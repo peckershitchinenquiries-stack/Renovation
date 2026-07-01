@@ -5,6 +5,10 @@
 *.tsbuildinfo
 next-env.d.ts
 
+# Excel and PDF files
+*.xlsx
+*.pdf
+
 # env
 .env
 .env*.local
