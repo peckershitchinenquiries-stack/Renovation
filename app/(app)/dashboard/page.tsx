@@ -14,7 +14,13 @@ export default async function DashboardPage() {
     supabase.from("expense_entries").select("*"),
   ]);
 
-  const entries = computeEntries((rawEntries ?? []) as ExpenseEntry[]);
+  // Spend must come from the week-by-week diary only. 'ledger' rows are the
+  // imported Trades / Materials reference set — summing both double-counts the
+  // same spend (and the target budget is itself derived from the ledger).
+  // Mirrors the filter in ProjectDetail.tsx so card and Overview agree.
+  const entries = computeEntries((rawEntries ?? []) as ExpenseEntry[]).filter(
+    (e) => e.source !== "ledger"
+  );
   const spentByProject = new Map<string, number>();
   for (const e of entries) {
     if (e.status === "Cancelled") continue;
