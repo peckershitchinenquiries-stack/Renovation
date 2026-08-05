@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { apiFetch, ApiError } from "@/lib/fetcher";
 import { validateExpense, hasErrors } from "@/lib/validation";
 import { calcMaterialsCost, calcTotal, formatCurrency } from "@/lib/calculations";
@@ -21,7 +21,10 @@ interface Props {
   trades: TradeLookup[];
   nextWeek: number;
   expense?: ExpenseEntry;
-  // Existing entries for this project — powers the "have I paid more?" warning.
+  // Prefills a *new* entry from a previous one ("Repeat"). Ignored when editing.
+  template?: ExpenseEntry;
+  // Existing entries for this project — powers the "have I paid more?" warning,
+  // the description/supplier suggestions and the duplicate check.
   priorEntries?: ExpenseEntry[];
   onSaved: () => void;
   onCancel: () => void;
@@ -29,36 +32,56 @@ interface Props {
 
 const ACCEPT = "image/jpeg,image/png,image/webp,application/pdf";
 
+// Distinct, trimmed, case-insensitively de-duplicated values for a datalist.
+function suggestions(values: (string | null | undefined)[]): string[] {
+  const byKey = new Map<string, string>();
+  for (const value of values) {
+    const text = value?.trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (!byKey.has(key)) byKey.set(key, text);
+  }
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b));
+}
+
 export default function ExpenseForm({
   projectId,
   trades,
   nextWeek,
   expense,
+  template,
   priorEntries = [],
   onSaved,
   onCancel,
 }: Props) {
   const toast = useToast();
   const editing = Boolean(expense);
+  const uid = useId();
 
-  const [form, setForm] = useState({
-    week_number: expense?.week_number?.toString() ?? String(nextWeek),
-    description: expense?.description ?? "",
-    category: expense?.category ?? "Materials",
-    trade: expense?.trade ?? "",
-    location_room: expense?.location_room ?? "",
-    notes: expense?.notes ?? "",
-    supplier: expense?.supplier ?? "",
-    invoice_ref: expense?.invoice_ref ?? "",
-    paid_date: expense?.paid_date ?? "",
-    payment_method: expense?.payment_method ?? "",
-    quoted_amount: expense?.quoted_amount?.toString() ?? "",
-    actual_amount: expense?.actual_amount?.toString() ?? "",
-    paid_amount: expense?.paid_amount?.toString() ?? "",
-    qty: expense?.qty?.toString() ?? "",
-    unit_cost: expense?.unit_cost?.toString() ?? "",
-    vat_rate: expense?.vat_rate?.toString() ?? "0",
-    status: expense?.status ?? "Planned",
+  // Editing loads the entry as-is. "Repeat" copies the descriptive fields of a
+  // past entry but starts a fresh, unpaid one in the current week — so the only
+  // thing you normally have to change is the price.
+  const [form, setForm] = useState(() => {
+    const base = expense ?? template;
+    return {
+      week_number: expense?.week_number?.toString() ?? String(nextWeek),
+      description: base?.description ?? "",
+      category: base?.category ?? "Materials",
+      trade: base?.trade ?? "",
+      location_room: base?.location_room ?? "",
+      notes: base?.notes ?? "",
+      supplier: base?.supplier ?? "",
+      invoice_ref: expense?.invoice_ref ?? "",
+      paid_date: expense?.paid_date ?? "",
+      payment_method: expense?.payment_method ?? "",
+      quoted_amount: base?.quoted_amount?.toString() ?? "",
+      actual_amount: base?.actual_amount?.toString() ?? "",
+      paid_amount: expense?.paid_amount?.toString() ?? "",
+      qty: base?.qty?.toString() ?? "",
+      unit_cost: base?.unit_cost?.toString() ?? "",
+      vat_rate: base?.vat_rate?.toString() ?? "0",
+      status: expense?.status ?? "Planned",
+    };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -67,11 +90,36 @@ export default function ExpenseForm({
     expense?.receipt_url ?? null
   );
 
+  // Optional fields stay collapsed so a quick on-site entry is short. They open
+  // automatically when editing an entry that already uses any of them.
+  const [showMore, setShowMore] = useState(
+    Boolean(
+      expense &&
+        (expense.paid_date ||
+          expense.payment_method ||
+          expense.location_room ||
+          expense.invoice_ref ||
+          expense.notes ||
+          expense.receipt_url)
+    )
+  );
+
   const isMaterials = form.category === "Materials";
 
   function set(field: string, value: string) {
     setForm((f) => ({ ...f, [field]: value }));
   }
+
+  // Type-ahead suggestions drawn from what has already been entered — this also
+  // keeps spellings consistent, which is what the price tracker groups on.
+  const descriptionOptions = useMemo(
+    () => suggestions(priorEntries.map((e) => e.description)),
+    [priorEntries]
+  );
+  const supplierOptions = useMemo(
+    () => suggestions(priorEntries.map((e) => e.supplier)),
+    [priorEntries]
+  );
 
   // Last time the same material was bought (by description), excluding this entry.
   const lastPurchase = useMemo(() => {
@@ -103,6 +151,61 @@ export default function ExpenseForm({
     const deltaPct = ((current - prev) / prev) * 100;
     return { prev, deltaPct, date: lastPurchase.paid_date };
   }, [lastPurchase, form.unit_cost]);
+
+  // Shown before a unit cost is typed, so the last price is visible while you
+  // are still deciding what to enter.
+  const lastPriceHint = useMemo(() => {
+    if (!lastPurchase || Number(form.unit_cost || 0) > 0) return null;
+    return {
+      prev: Number(lastPurchase.unit_cost),
+      date: lastPurchase.paid_date,
+    };
+  }, [lastPurchase, form.unit_cost]);
+
+  // Same item, same week, same amount — almost certainly logged twice.
+  const duplicateWarning = useMemo(() => {
+    const key = priceKey(form.description);
+    const week = Number(form.week_number || 0);
+    const actual = Number(form.actual_amount || 0);
+    if (!key || !week || actual <= 0) return null;
+    const match = priorEntries.find(
+      (e) =>
+        e.id !== expense?.id &&
+        e.status !== "Cancelled" &&
+        e.week_number === week &&
+        priceKey(e.description) === key &&
+        Math.abs(Number(e.actual_amount) - actual) < 0.005
+    );
+    return match ?? null;
+  }, [
+    form.description,
+    form.week_number,
+    form.actual_amount,
+    priorEntries,
+    expense?.id,
+  ]);
+
+  // Paying more than the entry is worth is usually a typo or a wrong field.
+  const overpaidWarning = useMemo(() => {
+    const actual = Number(form.actual_amount || 0);
+    const paid = Number(form.paid_amount || 0);
+    if (actual <= 0 || paid <= 0) return null;
+    if (paid - actual < 0.005) return null;
+    return { actual, paid, excess: paid - actual };
+  }, [form.actual_amount, form.paid_amount]);
+
+  // Qty × Unit Cost should normally equal the Actual amount; a mismatch means
+  // one of the three numbers was mistyped.
+  const unitMismatch = useMemo(() => {
+    if (!isMaterials) return null;
+    const qty = Number(form.qty || 0);
+    const unit = Number(form.unit_cost || 0);
+    const actual = Number(form.actual_amount || 0);
+    if (qty <= 0 || unit <= 0 || actual <= 0) return null;
+    const expected = calcMaterialsCost(qty, unit);
+    if (Math.abs(expected - actual) < 0.01) return null;
+    return { expected, actual };
+  }, [isMaterials, form.qty, form.unit_cost, form.actual_amount]);
 
   // Selecting a trade pre-fills the supplier name if it's empty.
   function onTradeChange(name: string) {
@@ -200,6 +303,17 @@ export default function ExpenseForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      <datalist id={`${uid}-descriptions`}>
+        {descriptionOptions.map((d) => (
+          <option key={d} value={d} />
+        ))}
+      </datalist>
+      <datalist id={`${uid}-suppliers`}>
+        {supplierOptions.map((s) => (
+          <option key={s} value={s} />
+        ))}
+      </datalist>
+
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="label" htmlFor="week_number">
@@ -208,6 +322,7 @@ export default function ExpenseForm({
           <input
             id="week_number"
             type="number"
+            inputMode="numeric"
             min={1}
             className="input"
             value={form.week_number}
@@ -242,14 +357,24 @@ export default function ExpenseForm({
           id="description"
           className="input"
           maxLength={200}
+          list={`${uid}-descriptions`}
+          autoComplete="off"
           value={form.description}
           onChange={(e) => set("description", e.target.value)}
           placeholder={isMaterials ? "e.g. Bricks, Tiles, Plaster" : "e.g. Owen Brickwork"}
         />
         {errors.description && <p className="field-error">{errors.description}</p>}
+        {duplicateWarning && (
+          <p className="field-warning">
+            Possible duplicate — week {duplicateWarning.week_number} already has
+            &ldquo;{duplicateWarning.description}&rdquo; at{" "}
+            {formatCurrency(Number(duplicateWarning.actual_amount))}. Save anyway
+            if this is a second purchase.
+          </p>
+        )}
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <label className="label" htmlFor="trade">
             Trade
@@ -275,6 +400,8 @@ export default function ExpenseForm({
           <input
             id="supplier"
             className="input"
+            list={`${uid}-suppliers`}
+            autoComplete="off"
             value={form.supplier}
             onChange={(e) => set("supplier", e.target.value)}
             placeholder="e.g. Lawsons, Dave Gardener"
@@ -287,7 +414,7 @@ export default function ExpenseForm({
         <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
           Amounts (£)
         </legend>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
           <div>
             <label className="label" htmlFor="quoted_amount">
               Quoted
@@ -295,6 +422,7 @@ export default function ExpenseForm({
             <input
               id="quoted_amount"
               type="number"
+              inputMode="decimal"
               min={0}
               step="0.01"
               className="input"
@@ -312,6 +440,7 @@ export default function ExpenseForm({
             <input
               id="actual_amount"
               type="number"
+              inputMode="decimal"
               min={0}
               step="0.01"
               className="input"
@@ -329,6 +458,7 @@ export default function ExpenseForm({
             <input
               id="paid_amount"
               type="number"
+              inputMode="decimal"
               min={0}
               step="0.01"
               className="input"
@@ -340,10 +470,19 @@ export default function ExpenseForm({
             )}
           </div>
         </div>
-        <p className="mt-1 text-xs text-gray-400">
-          Quoted = original price. Actual = real cost. Remaining is calculated for
-          you.
-        </p>
+        {overpaidWarning ? (
+          <p className="field-warning">
+            Paid ({formatCurrency(overpaidWarning.paid)}) is{" "}
+            {formatCurrency(overpaidWarning.excess)} more than Actual (
+            {formatCurrency(overpaidWarning.actual)}). Check the figures unless
+            this was an overpayment or deposit.
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-gray-400">
+            Quoted = original price. Actual = real cost. Remaining is calculated
+            for you.
+          </p>
+        )}
       </fieldset>
 
       {/* Materials detail — qty/unit cost drives the price tracker */}
@@ -360,6 +499,7 @@ export default function ExpenseForm({
               <input
                 id="qty"
                 type="number"
+                inputMode="decimal"
                 min={0}
                 step="0.01"
                 className="input"
@@ -374,6 +514,7 @@ export default function ExpenseForm({
               <input
                 id="unit_cost"
                 type="number"
+                inputMode="decimal"
                 min={0}
                 step="0.01"
                 className="input"
@@ -382,6 +523,14 @@ export default function ExpenseForm({
               />
             </div>
           </div>
+
+          {lastPriceHint && (
+            <div className="mt-2 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
+              Last time &ldquo;{form.description.trim()}&rdquo; was{" "}
+              {formatCurrency(lastPriceHint.prev)}/unit
+              {lastPriceHint.date ? ` on ${lastPriceHint.date}` : ""}.
+            </div>
+          )}
 
           {priceWarning && (
             <div
@@ -405,6 +554,20 @@ export default function ExpenseForm({
             </div>
           )}
 
+          {unitMismatch && (
+            <p className="field-warning">
+              Qty × Unit Cost is {formatCurrency(unitMismatch.expected)}, but
+              Actual is {formatCurrency(unitMismatch.actual)}.{" "}
+              <button
+                type="button"
+                className="font-semibold underline"
+                onClick={fillActualFromUnit}
+              >
+                Use {formatCurrency(unitMismatch.expected)}
+              </button>
+            </p>
+          )}
+
           <button
             type="button"
             className="mt-2 text-xs text-brand hover:underline"
@@ -414,39 +577,6 @@ export default function ExpenseForm({
           </button>
         </fieldset>
       )}
-
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="label" htmlFor="paid_amount_date">
-            Date Paid
-          </label>
-          <input
-            id="paid_amount_date"
-            type="date"
-            className="input"
-            value={form.paid_date ?? ""}
-            onChange={(e) => set("paid_date", e.target.value)}
-          />
-        </div>
-        <div>
-          <label className="label" htmlFor="payment_method">
-            Payment Method
-          </label>
-          <select
-            id="payment_method"
-            className="input"
-            value={form.payment_method}
-            onChange={(e) => set("payment_method", e.target.value)}
-          >
-            <option value="">—</option>
-            {PAYMENT_METHODS.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
 
       <div className="grid grid-cols-2 gap-3">
         <div>
@@ -485,69 +615,119 @@ export default function ExpenseForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="label" htmlFor="location_room">
-            Location / Room
-          </label>
-          <input
-            id="location_room"
-            className="input"
-            value={form.location_room}
-            onChange={(e) => set("location_room", e.target.value)}
-            placeholder="e.g. Kitchen"
-          />
-        </div>
-        <div>
-          <label className="label" htmlFor="invoice_ref">
-            Invoice / Receipt Ref
-          </label>
-          <input
-            id="invoice_ref"
-            className="input"
-            value={form.invoice_ref}
-            onChange={(e) => set("invoice_ref", e.target.value)}
-          />
-        </div>
-      </div>
+      {/* Everything below is optional — collapsed by default to keep a quick
+          on-site entry short. */}
+      <button
+        type="button"
+        onClick={() => setShowMore((s) => !s)}
+        className="flex min-h-touch w-full items-center justify-between rounded-lg border border-gray-200 px-3 text-sm font-medium text-gray-700"
+        aria-expanded={showMore}
+      >
+        <span>Date paid, payment method, room, notes &amp; receipt</span>
+        <span aria-hidden>{showMore ? "▴" : "▾"}</span>
+      </button>
 
-      <div>
-        <label className="label" htmlFor="notes">
-          Notes
-        </label>
-        <textarea
-          id="notes"
-          className="input"
-          rows={2}
-          value={form.notes ?? ""}
-          onChange={(e) => set("notes", e.target.value)}
-        />
-      </div>
-
-      {/* Receipt upload */}
-      <div>
-        <label className="label">Receipt (image or PDF, max 10MB)</label>
-        {receiptUrl ? (
-          <div className="flex items-center gap-3 rounded-lg border border-gray-200 p-2 text-sm">
-            <span className="text-gray-600">📎 Receipt attached</span>
-            <button
-              type="button"
-              onClick={removeReceipt}
-              className="text-red-600 hover:underline"
-            >
-              Remove
-            </button>
+      {showMore && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="label" htmlFor="paid_amount_date">
+                Date Paid
+              </label>
+              <input
+                id="paid_amount_date"
+                type="date"
+                className="input"
+                value={form.paid_date ?? ""}
+                onChange={(e) => set("paid_date", e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="payment_method">
+                Payment Method
+              </label>
+              <select
+                id="payment_method"
+                className="input"
+                value={form.payment_method}
+                onChange={(e) => set("payment_method", e.target.value)}
+              >
+                <option value="">—</option>
+                {PAYMENT_METHODS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-        ) : (
-          <input
-            type="file"
-            accept={ACCEPT}
-            aria-label="Receipt file"
-            className="input"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-        )}
-      </div>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="label" htmlFor="location_room">
+                Location / Room
+              </label>
+              <input
+                id="location_room"
+                className="input"
+                value={form.location_room}
+                onChange={(e) => set("location_room", e.target.value)}
+                placeholder="e.g. Kitchen"
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="invoice_ref">
+                Invoice / Receipt Ref
+              </label>
+              <input
+                id="invoice_ref"
+                className="input"
+                value={form.invoice_ref}
+                onChange={(e) => set("invoice_ref", e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="label" htmlFor="notes">
+              Notes
+            </label>
+            <textarea
+              id="notes"
+              className="input"
+              rows={2}
+              value={form.notes ?? ""}
+              onChange={(e) => set("notes", e.target.value)}
+            />
+          </div>
+
+          {/* Receipt upload */}
+          <div>
+            <label className="label">Receipt (image or PDF, max 10MB)</label>
+            {receiptUrl ? (
+              <div className="flex items-center gap-3 rounded-lg border border-gray-200 p-2 text-sm">
+                <span className="text-gray-600">📎 Receipt attached</span>
+                <button
+                  type="button"
+                  onClick={removeReceipt}
+                  className="text-red-600 hover:underline"
+                >
+                  Remove
+                </button>
+              </div>
+            ) : (
+              <input
+                type="file"
+                accept={ACCEPT}
+                capture="environment"
+                aria-label="Receipt file"
+                className="input"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Live totals */}
       <div className="rounded-lg bg-brand-50 p-3 text-sm">
@@ -569,7 +749,7 @@ export default function ExpenseForm({
         </div>
       </div>
 
-      <div className="flex gap-2 pb-2">
+      <div className="sticky bottom-0 -mx-4 flex gap-2 border-t border-gray-200 bg-white px-4 py-3 sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pb-2 sm:pt-0">
         <button type="submit" disabled={saving} className="btn-primary flex-1">
           {saving && <Spinner />}
           {editing ? "Save changes" : "Add expense"}

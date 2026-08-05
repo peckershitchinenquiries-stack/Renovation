@@ -41,4 +41,28 @@ body {
   .field-error {
     @apply mt-1 text-xs text-red-600;
   }
+  /* Non-blocking advisory shown under a field (price jump, likely duplicate). */
+  .field-warning {
+    @apply mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800;
+  }
+}
+
+/* Left slide-in for the mobile navigation drawer. */
+@keyframes drawer-left-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.drawer-left {
+  animation: drawer-left-in 0.18s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-left {
+    animation: none;
+  }
 }

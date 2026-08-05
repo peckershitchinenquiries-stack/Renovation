@@ -53,15 +53,53 @@ def num(v, default=0):
         return default
 
 
-def as_date(v):
-    """Return an ISO date string, or None if the cell isn't a real date.
+WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+# Candidate years for resolving free-text paid dates, most likely first.
+YEAR_CANDIDATES = (2026, 2025, 2027)
 
-    File 1's 'Paid Date' column holds free text like 'Friday 27/2', which the
-    `date` column cannot store. Those are preserved in notes instead.
-    """
+
+def as_date(v):
+    """Return an ISO date string, or None if the cell isn't a real date."""
     if isinstance(v, (dt.datetime, dt.date)):
         return v.strftime("%Y-%m-%d")
     return None
+
+
+def resolve_written_date(v):
+    """Resolve free text like 'Friday 27/2' to a real ISO date.
+
+    File 1's 'Paid Date' column is hand-typed day/month with a weekday name and
+    no year. The weekday disambiguates the year: only 2026 puts every one of
+    these dates on the stated weekday. Returns None if it can't be resolved,
+    in which case the raw text is kept in notes as before.
+    """
+    if isinstance(v, (dt.datetime, dt.date)):
+        return None  # already a real date; as_date handles it
+    s = str(v or "").strip()
+    if not s:
+        return None
+    m = re.search(r"(\d{1,2})\s*/\s*(\d{1,2})", s)
+    if not m:
+        return None
+    day, month = int(m.group(1)), int(m.group(2))
+    named = next((n for n in WEEKDAYS if n in s.lower()), None)
+
+    fallback = None
+    for year in YEAR_CANDIDATES:
+        try:
+            cand = dt.date(year, month, day)
+        except ValueError:
+            continue
+        if named is None:
+            return cand.strftime("%Y-%m-%d")
+        if cand.weekday() == WEEKDAYS[named]:
+            return cand.strftime("%Y-%m-%d")
+        fallback = fallback or cand
+    # Weekday never matched — trust the day/month over the weekday name.
+    return fallback.strftime("%Y-%m-%d") if fallback else None
 
 
 def category_of(v):
@@ -151,10 +189,13 @@ def parse_diary():
         if not description:
             continue  # padding row: a week number with no task
 
-        paid_date = as_date(r[8])
         raw_date = r[8]
+        # A filled 'Paid Date' is what marks a row as paid — the sheet's Status
+        # column reads 'Planned' on every row and carries no payment signal.
+        paid_date = as_date(raw_date) or resolve_written_date(raw_date)
         if raw_date and not paid_date:
             skipped_dates += 1
+        is_paid = bool(paid_date)
 
         qty = num(r[13])
         unit_cost = num(r[14])
@@ -182,10 +223,10 @@ def parse_diary():
             "qty": qty,
             "unit_cost": unit_cost,
             "vat": vat_of(r[16]),
-            "status": status_of(r[18], 0),
+            "status": status_of(r[18], total if is_paid else 0),
             "quoted": total,
             "actual": total,
-            "paid": total if str(r[18] or "").strip() == "Paid" else 0,
+            "paid": total if is_paid else 0,
             "source": "diary",
         })
     return out, skipped_dates

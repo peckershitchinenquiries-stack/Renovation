@@ -1,59 +1,69 @@
 "use client";
 
-import { useState } from "react";
-import { apiFetch } from "@/lib/fetcher";
 import { formatCurrency } from "@/lib/calculations";
 import { StatCard } from "@/components/ui/StatCard";
 import { WeeklySpendChart } from "@/components/charts/WeeklySpendChart";
 import { CategoryDonut } from "@/components/charts/CategoryDonut";
-import { useToast } from "@/components/ui/Toast";
 import type {
   ProjectSummary,
   WeekTotal,
   CategoryTotal,
-  ProjectWeek,
+  PriceHistoryItem,
 } from "@/types";
 
 export default function OverviewTab({
   summary,
   byWeek,
   byCategory,
-  projectId,
-  onWeekUpdated,
+  priceAlerts,
+  onViewPrices,
 }: {
   summary: ProjectSummary;
   byWeek: WeekTotal[];
   byCategory: CategoryTotal[];
-  projectId: string;
-  onWeekUpdated: (w: ProjectWeek) => void;
+  // Materials that cost more per unit than the previous purchase.
+  priceAlerts: PriceHistoryItem[];
+  onViewPrices: () => void;
 }) {
-  const toast = useToast();
-  const [drafts, setDrafts] = useState<Record<number, string>>({});
-
-  async function saveCompletion(week: number) {
-    const value = Number(drafts[week]);
-    if (Number.isNaN(value) || value < 0 || value > 100) {
-      toast("Completion must be 0–100", "error");
-      return;
-    }
-    try {
-      const saved = await apiFetch<ProjectWeek>(
-        `/api/projects/${projectId}/weeks`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({ week_number: week, completion_pct: value }),
-        }
-      );
-      onWeekUpdated(saved);
-      toast(`Week ${week} completion saved`, "success");
-    } catch (err) {
-      toast(err instanceof Error ? err.message : "Save failed", "error");
-    }
-  }
-
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="space-y-4 sm:space-y-6">
+      {/* Price rises, surfaced without opening the Price Tracker. */}
+      {priceAlerts.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 sm:p-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold text-amber-900">
+              ⚠ {priceAlerts.length}{" "}
+              {priceAlerts.length === 1 ? "item" : "items"} cost more than last
+              time
+            </h3>
+            <button
+              type="button"
+              onClick={onViewPrices}
+              className="text-sm font-medium text-amber-900 underline"
+            >
+              View Price Tracker
+            </button>
+          </div>
+          <ul className="mt-2 space-y-1 text-sm text-amber-900">
+            {priceAlerts.slice(0, 5).map((p) => (
+              <li key={p.item} className="flex justify-between gap-3">
+                <span className="truncate">{p.item}</span>
+                <span className="whitespace-nowrap font-medium">
+                  {formatCurrency(p.latest_price)}/unit ▲ +
+                  {p.latest_delta_pct.toFixed(1)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+          {priceAlerts.length > 5 && (
+            <p className="mt-1 text-xs text-amber-700">
+              +{priceAlerts.length - 5} more
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
         {summary.target_budget > 0 && (
           <StatCard
             label="Target Budget"
@@ -100,7 +110,7 @@ export default function OverviewTab({
         </div>
       </div>
 
-      <div className="card overflow-x-auto">
+      <div className="card">
         <h3 className="mb-3 text-sm font-semibold text-gray-700">
           Week-by-Week
         </h3>
@@ -109,54 +119,76 @@ export default function OverviewTab({
             No expenses logged yet.
           </p>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs uppercase text-gray-500">
-                <th className="py-2">Week</th>
-                <th className="py-2">Labour</th>
-                <th className="py-2">Materials</th>
-                <th className="py-2">VAT</th>
-                <th className="py-2">Total</th>
-                <th className="py-2">Completion %</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
+          <>
+            {/* Mobile: one card per week. */}
+            <ul className="space-y-2 sm:hidden">
               {byWeek.map((w) => (
-                <tr key={w.week_number}>
-                  <td className="py-2 font-medium">W{w.week_number}</td>
-                  <td className="py-2">{formatCurrency(w.labour)}</td>
-                  <td className="py-2">{formatCurrency(w.materials)}</td>
-                  <td className="py-2">{formatCurrency(w.vat)}</td>
-                  <td className="py-2 font-medium">{formatCurrency(w.total)}</td>
-                  <td className="py-2">
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        aria-label={`Week ${w.week_number} completion %`}
-                        className="input h-9 w-20 py-1"
-                        defaultValue={w.completion_pct}
-                        onChange={(e) =>
-                          setDrafts((d) => ({
-                            ...d,
-                            [w.week_number]: e.target.value,
-                          }))
-                        }
-                      />
-                      <button
-                        type="button"
-                        className="text-xs text-brand hover:underline"
-                        onClick={() => saveCompletion(w.week_number)}
-                      >
-                        Save
-                      </button>
+                <li
+                  key={w.week_number}
+                  className="rounded-lg border border-gray-200 p-3"
+                >
+                  <div className="flex items-baseline justify-between">
+                    <span className="font-semibold">Week {w.week_number}</span>
+                    <span className="font-semibold">
+                      {formatCurrency(w.total)}
+                    </span>
+                  </div>
+                  <dl className="mt-2 grid grid-cols-3 gap-2 text-xs text-gray-500">
+                    <div>
+                      <dt>Labour</dt>
+                      <dd className="text-gray-900">
+                        {formatCurrency(w.labour)}
+                      </dd>
                     </div>
-                  </td>
-                </tr>
+                    <div>
+                      <dt>Materials</dt>
+                      <dd className="text-gray-900">
+                        {formatCurrency(w.materials)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>VAT</dt>
+                      <dd className="text-gray-900">{formatCurrency(w.vat)}</dd>
+                    </div>
+                  </dl>
+                </li>
               ))}
-            </tbody>
-          </table>
+            </ul>
+
+            {/* Desktop: table. */}
+            <div className="hidden overflow-x-auto sm:block">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase text-gray-500">
+                    <th className="py-2">Week</th>
+                    <th className="py-2 text-right">Labour</th>
+                    <th className="py-2 text-right">Materials</th>
+                    <th className="py-2 text-right">VAT</th>
+                    <th className="py-2 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {byWeek.map((w) => (
+                    <tr key={w.week_number}>
+                      <td className="py-2 font-medium">W{w.week_number}</td>
+                      <td className="py-2 text-right">
+                        {formatCurrency(w.labour)}
+                      </td>
+                      <td className="py-2 text-right">
+                        {formatCurrency(w.materials)}
+                      </td>
+                      <td className="py-2 text-right">
+                        {formatCurrency(w.vat)}
+                      </td>
+                      <td className="py-2 text-right font-medium">
+                        {formatCurrency(w.total)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </div>

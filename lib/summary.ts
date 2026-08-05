@@ -242,3 +242,15 @@ export function buildPriceHistory(
   // Items with the biggest recent increase first.
   return items.sort((a, b) => b.latest_delta_pct - a.latest_delta_pct);
 }
+
+// Materials whose most recent purchase cost more per unit than the time before.
+// Feeds the "paid more than last time" alert on the Overview tab, so a price
+// rise surfaces without having to open the Price Tracker.
+export function buildPriceAlerts(
+  items: PriceHistoryItem[],
+  minPct = 0.001
+): PriceHistoryItem[] {
+  return items.filter(
+    (i) => i.trend === "up" && i.latest_delta_pct >= minPct
+  );
+}

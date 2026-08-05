@@ -12,6 +12,7 @@ import {
   buildTrades,
   buildMaterialLedger,
   buildPriceHistory,
+  buildPriceAlerts,
 } from "@/lib/summary";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -54,7 +55,6 @@ export default function ProjectDetail({
   const toast = useToast();
   const [tab, setTab] = useState<Tab>("overview");
   const [entries, setEntries] = useState<ExpenseEntryComputed[]>(initialEntries);
-  const [weeks, setWeeks] = useState<ProjectWeek[]>(initialWeeks);
   const [exportOpen, setExportOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -78,13 +78,17 @@ export default function ProjectDetail({
     [project, diaryEntries]
   );
   const byWeek = useMemo(
-    () => buildByWeek(diaryEntries, weeks),
-    [diaryEntries, weeks]
+    () => buildByWeek(diaryEntries, initialWeeks),
+    [diaryEntries, initialWeeks]
   );
   const byCategory = useMemo(() => buildByCategory(diaryEntries), [diaryEntries]);
   const tradeSummary = useMemo(() => buildTrades(entries), [entries]);
   const materialLedger = useMemo(() => buildMaterialLedger(entries), [entries]);
   const priceHistory = useMemo(() => buildPriceHistory(entries), [entries]);
+  const priceAlerts = useMemo(
+    () => buildPriceAlerts(priceHistory),
+    [priceHistory]
+  );
 
   const budgetPct =
     summary.target_budget > 0
@@ -107,9 +111,9 @@ export default function ProjectDetail({
   return (
     <div>
       {/* Persistent top bar */}
-      <div className="mb-4 rounded-xl border border-gray-200 bg-white p-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
+      <div className="mb-4 rounded-xl border border-gray-200 bg-white p-3 sm:p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
             <nav className="text-xs text-gray-400">
               <Link href="/dashboard" className="hover:underline">
                 Dashboard
@@ -117,7 +121,7 @@ export default function ProjectDetail({
               / {project.name}
             </nav>
             <div className="mt-1 flex flex-wrap items-center gap-2">
-              <h1 className="truncate text-xl font-bold text-gray-900">
+              <h1 className="truncate text-lg font-bold text-gray-900 sm:text-xl">
                 {project.name}
               </h1>
               <Badge label={project.status} />
@@ -128,60 +132,56 @@ export default function ProjectDetail({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span
-              className={`rounded-full px-3 py-1 text-sm font-semibold ${
-                over
-                  ? "bg-red-100 text-red-700"
-                  : "bg-emerald-100 text-emerald-700"
-              }`}
-            >
-              {budgetPct}% of budget
-            </span>
+          <span
+            className={`shrink-0 rounded-full px-3 py-1 text-sm font-semibold ${
+              over ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"
+            }`}
+          >
+            {budgetPct}% of budget
+          </span>
+        </div>
 
-            <div className="relative">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => setExportOpen((o) => !o)}
-              >
-                Export ▾
-              </button>
-              {exportOpen && (
-                <div
-                  className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
-                  onMouseLeave={() => setExportOpen(false)}
-                >
-                  <a
-                    href={`/api/projects/${project.id}/export/pdf`}
-                    className="block px-4 py-2 text-sm hover:bg-gray-50"
-                  >
-                    Export PDF
-                  </a>
-                  <a
-                    href={`/api/projects/${project.id}/export/excel`}
-                    className="block px-4 py-2 text-sm hover:bg-gray-50"
-                  >
-                    Export Excel
-                  </a>
-                </div>
-              )}
-            </div>
-
-            <Link
-              href={`/projects/${project.id}/edit`}
-              className="btn-secondary"
-            >
-              Edit
-            </Link>
+        {/* Actions wrap onto their own row on narrow screens. */}
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-gray-100 pt-3">
+          <div className="relative">
             <button
               type="button"
-              className="btn-danger"
-              onClick={() => setConfirmDelete(true)}
+              className="btn-secondary"
+              onClick={() => setExportOpen((o) => !o)}
             >
-              Delete
+              Export ▾
             </button>
+            {exportOpen && (
+              <div
+                className="absolute left-0 z-20 mt-1 w-44 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+                onMouseLeave={() => setExportOpen(false)}
+              >
+                <a
+                  href={`/api/projects/${project.id}/export/pdf`}
+                  className="block px-4 py-2 text-sm hover:bg-gray-50"
+                >
+                  Export PDF
+                </a>
+                <a
+                  href={`/api/projects/${project.id}/export/excel`}
+                  className="block px-4 py-2 text-sm hover:bg-gray-50"
+                >
+                  Export Excel
+                </a>
+              </div>
+            )}
           </div>
+
+          <Link href={`/projects/${project.id}/edit`} className="btn-secondary">
+            Edit
+          </Link>
+          <button
+            type="button"
+            className="btn-danger ml-auto"
+            onClick={() => setConfirmDelete(true)}
+          >
+            Delete
+          </button>
         </div>
       </div>
 
@@ -208,13 +208,8 @@ export default function ProjectDetail({
           summary={summary}
           byWeek={byWeek}
           byCategory={byCategory}
-          projectId={project.id}
-          onWeekUpdated={(w) =>
-            setWeeks((prev) => {
-              const rest = prev.filter((x) => x.week_number !== w.week_number);
-              return [...rest, w];
-            })
-          }
+          priceAlerts={priceAlerts}
+          onViewPrices={() => setTab("prices")}
         />
       )}
       {tab === "expenses" && (

@@ -42,8 +42,57 @@ export default function MaterialsTab({ rows }: { rows: MaterialLedgerRow[] }) {
   );
 
   return (
-    <div className="card overflow-x-auto">
-      <table className="w-full text-sm">
+    <>
+      {/* Mobile: one card per purchase. */}
+      <div className="space-y-2 sm:hidden">
+        {rows.map((r) => (
+          <div key={r.id} className="card p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <span className="font-medium">
+                  {r.supplier && r.supplier !== "—"
+                    ? r.supplier
+                    : cleanItem(r.item)}
+                </span>
+                <p className="mt-0.5 text-xs text-gray-500">
+                  Week {r.week_number}
+                  {r.unit_cost > 0
+                    ? ` · ${formatCurrency(r.unit_cost)}/unit`
+                    : ""}
+                  {r.qty ? ` × ${r.qty}` : ""}
+                </p>
+              </div>
+              <span className="shrink-0 font-semibold">
+                {formatCurrency(r.total)}
+              </span>
+            </div>
+            <div className="mt-2 flex justify-between border-t border-gray-100 pt-2 text-xs text-gray-500">
+              <span>Paid {formatCurrency(r.paid)}</span>
+              <span>
+                {fmtDate(r.paid_date)}
+                {r.payment_method ? ` · ${r.payment_method}` : ""}
+              </span>
+            </div>
+            {r.notes ? (
+              <p className="mt-1 text-xs text-gray-400">{r.notes}</p>
+            ) : null}
+          </div>
+        ))}
+        <div className="card p-3 text-sm">
+          <div className="flex justify-between font-semibold">
+            <span>Total ({rows.length} purchases)</span>
+            <span>{formatCurrency(totals.total)}</span>
+          </div>
+          <div className="mt-1 flex justify-between text-gray-500">
+            <span>Paid</span>
+            <span>{formatCurrency(totals.paid)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Desktop: table. */}
+      <div className="card hidden overflow-x-auto sm:block">
+        <table className="w-full text-sm">
         <thead>
           <tr className="text-left text-xs uppercase text-gray-500">
             <th className="py-2 pr-2">#</th>
@@ -93,7 +142,8 @@ export default function MaterialsTab({ rows }: { rows: MaterialLedgerRow[] }) {
             <td colSpan={2} />
           </tr>
         </tfoot>
-      </table>
-    </div>
+        </table>
+      </div>
+    </>
   );
 }

@@ -2,6 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## MANDATORY — read first, write last
+
+**Before making any change: read [`about.md`](./about.md).** It is the full
+reference for this project — every table, every field, and exactly how each
+number on each screen is calculated, with file and line references. It also
+lists the known traps that have already caused bugs. Do not re-derive this from
+the code; read it. Then skim the last few entries in `updates.md` for recent
+context.
+
+**After making any change: add an entry to [`updates.md`](./updates.md).**
+This is required for *every* change — schema, code, data, docs, however small.
+Use the template at the top of that file. An entry must state, in plain English:
+
+- what changed and why
+- where the information came from (which spreadsheet + sheet, table, or screen)
+- **files used** (read) and **files changed** (modified), by path
+- whether a migration was written *and whether it has actually been run*
+- any headline figure that moved, as `before → after`
+
+Write it so a non-developer can follow it a year from now. Example of the right
+level of detail: *"today we changed 20 rows from Planned to Paid, using the
+Paid Date column of the Week-by-Week Plan sheet in
+46_Glenferrie_Rd_..._Template.xlsx; changed build_import_sql.py and added
+migration 0006."*
+
+**If `about.md` becomes wrong because of your change, update `about.md` too.**
+Keep its §13 figures current.
+
 ## Project
 
 RenovaTrack — a renovation project cost tracker for 46 Glenferrie Road. Next.js 14
@@ -113,32 +141,8 @@ If the app shows no data:
 
 ## Changelog
 
-Append an entry here for every change made to this project — schema, code, or
-data. Newest at the bottom. Keep entries to one or two lines: what changed and
-why.
+**Moved to [`updates.md`](./updates.md).** Every change — schema, code, data or
+docs — is recorded there, oldest first, using the template at the top of that
+file. Adding an entry is mandatory; see "MANDATORY" at the top of this file.
 
-### 2026-07-20 — Data loss and recovery
-- Diagnosed empty app: the `admin@pk.com` auth user was deleted and recreated,
-  and `on delete cascade` had wiped all rows. Confirmed 0 projects / 0 expenses /
-  0 weeks; the 13 surviving trade lookups were fresh output of the
-  `trg_seed_trades` trigger, not originals.
-- Added `scripts/build_import_sql.py` — regenerates a full import from
-  `46_Glenferrie_Rd_..._Template.xlsx` (week-by-week diary) and
-  `Renovation_Cost_Tracker-1.xlsx` (trades + materials ledger).
-- Added and ran `supabase/migrations/0005_reimport_data.sql`: restored 40 diary
-  rows (weeks 1–15), 96 ledger rows, 16 trade lookups, under UUID
-  `5d3fc9ff-92a3-4923-a18b-7eb5eade3105`. Ledger total £98,932.12 matches the
-  Dashboard sheet.
-- 20 free-text paid dates could not fit the `date` column; preserved in each
-  row's `notes` as `Paid date (as written): ...`.
-- Deleted `0004_reassign_orphaned_data.sql` — written against the wrong
-  hypothesis (that rows survived with a stale `user_id`) and never applied.
-- Known open risk: the `on delete cascade` FKs are unchanged, deliberately.
-
-### 2026-07-22 — Dashboard card double-counted ledger rows
-- `app/(app)/dashboard/page.tsx` summed every `expense_entries` row with no
-  `source` filter, so each card showed diary + ledger (£43,686.17 + £98,932.12 =
-  £142,618.29, i.e. 144% of a budget that is itself the ledger total) while the
-  project Overview showed the correct £43,686.17 / 44%.
-- Added `.filter((e) => e.source !== "ledger")`, matching `ProjectDetail.tsx:73`.
-  Both views now use the same basis (`total_incl_vat`, excluding `Cancelled`).
+For how the project actually works, see [`about.md`](./about.md).
