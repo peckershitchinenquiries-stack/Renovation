@@ -186,13 +186,17 @@ export default function ExpenseForm({
   ]);
 
   // Paying more than the entry is worth is usually a typo or a wrong field.
+  // Compared against the incl-VAT total, since that is what actually gets paid.
   const overpaidWarning = useMemo(() => {
-    const actual = Number(form.actual_amount || 0);
+    const { totalInclVat } = calcTotal(
+      Number(form.actual_amount || 0),
+      Number(form.vat_rate || 0)
+    );
     const paid = Number(form.paid_amount || 0);
-    if (actual <= 0 || paid <= 0) return null;
-    if (paid - actual < 0.005) return null;
-    return { actual, paid, excess: paid - actual };
-  }, [form.actual_amount, form.paid_amount]);
+    if (totalInclVat <= 0 || paid <= 0) return null;
+    if (paid - totalInclVat < 0.005) return null;
+    return { actual: totalInclVat, paid, excess: paid - totalInclVat };
+  }, [form.actual_amount, form.vat_rate, form.paid_amount]);
 
   // Qty × Unit Cost should normally equal the Actual amount; a mismatch means
   // one of the three numbers was mistyped.
@@ -228,19 +232,22 @@ export default function ExpenseForm({
       subtotal,
       vatAmount,
       totalInclVat,
-      remaining: Number(form.actual_amount || 0) - Number(form.paid_amount || 0),
+      remaining: totalInclVat - Number(form.paid_amount || 0),
     };
   }, [form.actual_amount, form.vat_rate, form.paid_amount]);
 
-  // Suggest "Paid" once the paid amount covers the actual cost.
+  // Suggest "Paid" once the paid amount covers the incl-VAT cost.
   function onPaidChange(value: string) {
     setForm((f) => {
       const next = { ...f, paid_amount: value };
-      const actual = Number(f.actual_amount || 0);
+      const { totalInclVat: due } = calcTotal(
+        Number(f.actual_amount || 0),
+        Number(f.vat_rate || 0)
+      );
       const paid = Number(value || 0);
       if (
-        actual > 0 &&
-        paid >= actual &&
+        due > 0 &&
+        paid >= due - 0.005 &&
         (f.status === "Planned" || f.status === "In Progress")
       ) {
         next.status = "Paid";

@@ -131,7 +131,8 @@ export default function ExpensesTab({
         method: "PATCH",
         body: JSON.stringify({
           status: "Paid",
-          paid_amount: e.actual_amount,
+          // What gets handed over is the incl-VAT total, not the ex-VAT cost.
+          paid_amount: Number(e.total_incl_vat.toFixed(2)),
           paid_date: e.paid_date || new Date().toISOString().slice(0, 10),
         }),
       });

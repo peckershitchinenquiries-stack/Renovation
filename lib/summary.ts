@@ -27,7 +27,10 @@ export function buildSummary(
   const forecast_total = active.reduce((s, e) => s + e.total_incl_vat, 0);
   const paid_to_date = active.reduce((s, e) => s + Number(e.paid_amount), 0);
   const target_budget = Number(project.target_budget);
-  const variance = forecast_total - total_quoted;
+  // Quoted amounts are stored to the penny while the total is derived, so the
+  // difference carries sub-penny float noise. Round it, and normalise -0 to 0
+  // so an exact match never renders as "-£0.00".
+  const variance = Math.round((forecast_total - total_quoted) * 100) / 100 || 0;
   const contingency_amount = Math.max(variance, 0);
   const weeks = new Set(active.map((e) => e.week_number));
   return {

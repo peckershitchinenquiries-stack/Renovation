@@ -5,7 +5,7 @@
 This file explains what exists (tables, views, screens) and exactly how every
 number on every screen is calculated. It is the map. `updates.md` is the history.
 
-Last verified: 2026-08-05, against migrations 0001–0006.
+Last verified: 2026-08-06, against migrations 0001–0007.
 
 ---
 
@@ -44,7 +44,9 @@ migration file does not apply it. Always tell the user to run it.
 
 1. **Never persist a computed total.** `total_incl_vat` is not a column. It is
    derived on every read by `computeEntry`. Same for `subtotal`, `vat_amount`,
-   `materials_cost`, `remaining`.
+   `materials_cost`, `remaining`. The corollary: **`actual_amount` is ex-VAT.**
+   Writing an incl-VAT figure into it applies VAT twice. That is exactly what
+   went wrong in `0005` — see §3.1.
 2. **Never sum `diary` and `ledger` rows together.** They overlap. See §5.
 3. **Never add `.eq("user_id", …)` to a query.** RLS does the scoping. But
    a new table with no RLS policy returns nothing — or leaks everything if RLS
@@ -60,12 +62,12 @@ migration file does not apply it. Always tell the user to run it.
 
 ```
 Two spreadsheets (repo root)          scripts/build_import_sql.py
-  File 1: 46_Glenferrie_Rd_..._Template.xlsx  ──┐
+  File 1: 46_Glenferrie_Rd_..._Updated.xlsx  ───┐
           "Week-by-Week Plan" sheet            │
   File 2: Renovation_Cost_Tracker-1.xlsx  ─────┤
           "Trades & Labour" + "Materials..."   │
                                                ▼
-                              supabase/migrations/0005_reimport_data.sql
+                       supabase/migrations/0007_reimport_weeks_1_23.sql
                                                │  (pasted into SQL editor)
                                                ▼
                                     Supabase Postgres
@@ -95,22 +97,62 @@ Two spreadsheets (repo root)          scripts/build_import_sql.py
 
 | | File 1 | File 2 |
 |---|---|---|
-| Filename | `46_Glenferrie_Rd_Renovation_Spend_Tracker_Blank_Template.xlsx` | `Renovation_Cost_Tracker-1.xlsx` |
+| Filename | `46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` | `Renovation_Cost_Tracker-1.xlsx` |
 | Sheets | `Week-by-Week Plan`, `Summary`, `Lookups` | `Dashboard`, `Trades & Labour`, `Materials & Suppliers`, `Remaining` |
-| Becomes | 40 `diary` rows, weeks 1–15 | 96 `ledger` rows + 16 trade lookups |
-| Totals | actual £42,411.81 ex-VAT / £43,686.17 incl-VAT | quoted £98,932.12 |
+| Becomes | 111 `diary` rows, weeks 1–23 | 96 `ledger` rows + 16 trade lookups |
+| Totals | ex-VAT £141,686.89 / incl-VAT £151,644.78 | quoted £98,932.12 |
 
 These files are the **source of truth** for rebuilds. Do not delete them.
+`..._Blank_Template.xlsx` is the older weeks 1–15 version, superseded by
+`..._Updated.xlsx` on 2026-08-06 and kept only for history.
+
+### 3.1 How spreadsheet money becomes database money
+
+This is the single easiest thing to get wrong, and it has been got wrong once.
+The app derives `total_incl_vat = actual_amount × (1 + vat_rate/100)` on every
+read (§6.1). So **`actual_amount` must hold the ex-VAT figure.** The pre-2026-08-06
+import stored the sheet's *Total incl. VAT* column in `actual_amount` *and* set
+`vat_rate` to 20, so VAT was applied twice and the Overview read £43,686.17
+where the spreadsheet said £42,411.81.
+
+| DB column | Week-by-Week Plan column |
+|---|---|
+| `actual_amount` | `Labour Cost (£)` **+** `Materials Cost (£)` — ex-VAT |
+| `vat_rate` | `VAT` — `'0%'` → 0, `'20%'` → 20 |
+| `quoted_amount` | `Total incl. VAT (£)` |
+| `paid_amount` | `Total incl. VAT (£)`, but only when `Paid Date` is filled |
+| `status` | `Paid` when `Paid Date` is filled, else the sheet's `Status` |
+
+Two of those need justifying:
+
+- **`quoted_amount` gets the incl-VAT total** because the Week-by-Week Plan has
+  no quote column — the sheet's forecast *is* its quote. This makes the
+  Overview `Total Quoted` card equal the sheet's `Forecast Total (incl. VAT)`
+  and leaves `Variance vs Quote` at £0.00, which is honest: nothing here was
+  ever separately quoted.
+- **`paid_amount` gets the incl-VAT total** because that is the sum actually
+  handed over. It makes `Paid to Date` and `Remaining to Pay` equal the sheet's
+  own `Paid to date` and `Committed` figures exactly.
 
 **File 1 quirks you must know:**
 
-- The `Status` column reads `Planned` on **all 40 rows**. It carries no payment
+- The `Status` column reads `Planned` on **all 111 rows**. It carries no payment
   information. The real payment marker is the **`Paid Date`** column.
 - Paid dates are hand-typed free text: `Friday 27/2`, and once `FRIDAY 10/4`.
   Day/month, weekday name, no year. `resolve_written_date()` in
   `build_import_sql.py` picks the year by matching the weekday — all seven
   distinct dates land on the stated weekday only in **2026**.
-- Rows with a paid date: 20 (weeks 1–7). Rows without: 20 (weeks 8–15).
+- Rows with a paid date: 20 (weeks 1–7). Rows without: 91 (weeks 8–23).
+- `Qty (Materials)` and `Unit Cost (£)` are **empty on every row**. The Price
+  Tracker therefore sees nothing from the diary; everything it shows comes from
+  the File 2 ledger.
+- **Weeks 20–23 have every cost typed into `Materials Cost`**, whatever the row's
+  `Category` says. This is why `parse_diary()` *adds* the labour and materials
+  columns instead of picking one. It also means the sheet's own `Summary` tab
+  reports £0 labour for those weeks while the app, which splits on `Category`,
+  reports the real figure. Week totals are unaffected — see §6.4.
+- The `VAT` column is text (`'0%'`) in the updated file and was a number (`0`)
+  in the old one. `vat_of()` strips the `%` and handles both.
 
 ---
 
@@ -223,12 +265,17 @@ validation and signed URLs — never expose it to the client.
 | | `diary` | `ledger` |
 |---|---|---|
 | Comes from | File 1, plus anything added in-app | File 2 import only |
-| Rows | 40 (weeks 1–15) | 96 (weeks 16+) |
+| Rows | 111 (weeks 1–23) | 96 (all stored at `week_number = 1`) |
 | Appears in | **Expenses tab** and **all Overview analytics**, **Dashboard cards** | **Trades & Labour**, **Materials & Suppliers**, **Price Tracker** |
-| Money | £43,686.17 actual incl-VAT | £98,932.12 quoted |
+| Money | £151,644.78 actual incl-VAT | £98,932.12 quoted |
+
+> Ledger rows carry `week_number = 1` because File 2 has no week column
+> (`parse_ledger()` hard-codes it). Migration `0003` originally backfilled
+> "weeks 16+" as ledger, but `0005` re-imported them all at week 1 — **do not
+> use `week_number` to tell diary from ledger, use `source`.**
 
 **They overlap.** The ledger is a second record of much of the same spend.
-`43,686.17 + 98,932.12 = 142,618.29` is a meaningless number — it is the
+`151,644.78 + 98,932.12 = 250,576.90` is a meaningless number — it is the
 double-count. A raw `sum(actual_amount)` across the table is not a project total.
 
 **Where the filter lives** — every screen that reports *project spend* must
@@ -263,7 +310,13 @@ Trades / Materials / Prices deliberately use the **full** entry set.
 | `vat_amount` | `actual_amount × (vat_rate / 100)` | 15 |
 | `total_incl_vat` | `actual_amount + vat_amount` | 16 |
 | `materials_cost` | `qty × unit_cost`, but **only if both > 0**, else `0` | 8–11 |
-| `remaining` | `actual_amount − paid_amount` | 30 |
+| `remaining` | `total_incl_vat − paid_amount` | 34 |
+
+`remaining` was `actual_amount − paid_amount` until 2026-08-06. It was changed
+because `paid_amount` records the incl-VAT sum actually handed over, so an
+ex-VAT basis made every fully-paid VAT-bearing row look overpaid. It now agrees
+with `buildTrades` and `buildMaterials`, which already subtracted paid from an
+incl-VAT figure.
 
 Note `materials_cost` is informational only — it is **not** used in any total.
 Totals always come from `actual_amount`.
@@ -279,32 +332,38 @@ cancelled rows.
 | Card label | Field | Formula | Line |
 |---|---|---|---|
 | **Target Budget** | `target_budget` | `projects.target_budget` — a stored column, not computed | 29 |
-| **Total Quoted** | `total_quoted` | `Σ quoted_amount` — **ex-VAT** | 26 |
+| **Total Quoted** | `total_quoted` | `Σ quoted_amount` — **incl-VAT**, see §3.1 | 26 |
 | **Actual Total** | `forecast_total` | `Σ total_incl_vat` — i.e. **incl-VAT** | 27 |
-| **Variance vs Quote** | `variance` | `forecast_total − total_quoted` | 30 |
-| **Paid to Date** | `paid_to_date` | `Σ paid_amount` — **ex-VAT** | 28 |
-| **Remaining to Pay** | `remaining_to_pay` | `forecast_total − paid_to_date` | 41 |
-| **Weeks Tracked** | `weeks_tracked` | count of **distinct** `week_number` | 32 |
-| *(not shown)* | `contingency_amount` | `max(variance, 0)` | 31 |
-| *(not shown)* | `forecast_plus_contingency` | `forecast_total + contingency_amount` | 39 |
+| **Variance vs Quote** | `variance` | `forecast_total − total_quoted`, rounded to the penny and normalised so an exact match is `0`, not `-0` | 32 |
+| **Paid to Date** | `paid_to_date` | `Σ paid_amount` — **incl-VAT**, see §3.1 | 28 |
+| **Remaining to Pay** | `remaining_to_pay` | `forecast_total − paid_to_date` | 44 |
+| **Weeks Tracked** | `weeks_tracked` | count of **distinct** `week_number` | 35 |
+| *(not shown)* | `contingency_amount` | `max(variance, 0)` | 33 |
+| *(not shown)* | `forecast_plus_contingency` | `forecast_total + contingency_amount` | 42 |
 
 Rendered by `components/project/OverviewTab.tsx:57–85`.
 
 **Header "% of budget"** — `ProjectDetail.tsx:89` —
 `round(forecast_total / target_budget × 100)`.
 
-> ⚠️ **Two VAT mismatches are baked into these cards.** Both are pre-existing.
-> 1. `total_quoted` is ex-VAT but `forecast_total` is incl-VAT, so **Variance
->    vs Quote includes the VAT** and overstates the overrun.
-> 2. `paid_to_date` is ex-VAT but is subtracted from an incl-VAT total, so
->    **Remaining to Pay carries the VAT of rows already paid**.
+> ✅ **The two VAT mismatches that used to live here are gone** (2026-08-06).
+> They were artefacts of the import, not of these formulas: `quoted_amount` and
+> `paid_amount` now both hold incl-VAT figures (§3.1), so Variance vs Quote and
+> Remaining to Pay compare like with like. Every card matches the spreadsheet —
+> run `python scripts/verify_against_spreadsheet.py` to re-prove it.
 >
-> Fixing either changes headline figures — do not "tidy" it without asking.
+> The rounding on `variance` exists because `quoted_amount` is stored to the
+> penny while `forecast_total` is derived: across 111 rows the two differ by
+> £0.004, which would otherwise render as "-£0.00".
 
-> ⚠️ **Target Budget and spend come from different datasets.** Budget =
-> File 2 ledger quoted; spend = File 1 diary actual. The percentage is not
-> "% of the job done"; it compares two spreadsheets that overlap by an unknown
-> amount. Both numbers are individually correct; the ratio is soft.
+> ⚠️ **Target Budget and spend still come from different datasets.** Budget =
+> File 2 ledger quoted (£98,932.12); spend = File 1 diary actual (£151,644.78).
+> The percentage is not "% of the job done"; it compares two spreadsheets that
+> overlap by an unknown amount. Both numbers are individually correct; the ratio
+> is soft — and since weeks 16–23 landed, spend now exceeds that budget, so the
+> header and the dashboard bar read **153%** and show red. The spreadsheet's own
+> `Target Budget` cell is blank, so there is nothing better to use. Changing it
+> is a one-line `update public.projects set target_budget = …`.
 
 ### 6.3 Dashboard cards — `app/(app)/dashboard/page.tsx`
 
@@ -331,6 +390,19 @@ One row per `week_number`, sorted ascending. Cancelled excluded.
 
 Feeds `components/charts/WeeklySpendChart.tsx` and the read-only Week-by-Week
 table in `OverviewTab.tsx` (Week / Labour / Materials / VAT / Total).
+
+> ⚠️ **The Labour/Materials split will not match File 1's `Summary` tab, and
+> that is expected.** Two independent reasons:
+> 1. The Summary tab's two columns are **ex-VAT** (it sums `Labour Cost` and
+>    `Materials Cost` directly); the app's are **incl-VAT**.
+> 2. On **weeks 20–23** every cost was typed into the `Materials Cost` column
+>    regardless of the row's `Category`, so the sheet reports £0 labour for
+>    those weeks. The app splits on `Category`, which is what the rows say.
+>
+> The **week totals** — the numbers that feed every card and the chart's bar
+> heights — match exactly. `verify_against_spreadsheet.py` checks the split
+> against the sheet's *rows* rather than its Summary tab for this reason, and
+> prints the Summary columns alongside for comparison.
 
 ### 6.5 Category donut — `buildByCategory`, `lib/summary.ts:77`
 
@@ -608,10 +680,13 @@ If the app shows no data:
    immediately, so "some data exists" is misleading.
 4. **Rebuild from the spreadsheets.** Set `USER_ID` at the top of
    `scripts/build_import_sql.py` to the current UUID, run
-   `python3 scripts/build_import_sql.py`, then run the regenerated
-   `supabase/migrations/0005_reimport_data.sql` in the SQL editor.
+   `python scripts/build_import_sql.py`, then run the regenerated
+   `supabase/migrations/0007_reimport_weeks_1_23.sql` in the SQL editor.
+   Do **not** also run `0005` or `0006` — both are superseded and carry
+   do-not-run banners.
 
-`0005` is **re-runnable** — it deletes the prior import of the project first.
+`0007` is **re-runnable** — it deletes the prior import of the project first,
+and it refuses to commit if any week total disagrees with the spreadsheet.
 
 Current UUID: `5d3fc9ff-92a3-4923-a18b-7eb5eade3105` (`admin@pk.com`).
 
@@ -628,40 +703,54 @@ place. The same deletion would cause the same loss again.
 | `0002_quoted_actual_paid.sql` | drops the hours × rate model; adds `quoted_amount` / `actual_amount` / `paid_amount`; adds the price-lookup index | ✅ |
 | `0003_expense_source.sql` | adds `source` (`diary`/`ledger`) and backfills weeks 16+ as ledger | ✅ |
 | `0004_reassign_orphaned_data.sql` | **deleted, never applied** — written against a wrong hypothesis | ❌ |
-| `0005_reimport_data.sql` | full rebuild from both spreadsheets. **Generated** by `scripts/build_import_sql.py` — do not hand-edit. Idempotent | ✅ |
-| `0006_mark_paid_entries.sql` | marks the 20 diary rows with a paid date as `Paid`. **Generated** by `scripts/gen_mark_paid_sql.py`. Idempotent; aborts unless exactly 20 rows match | ✅ |
+| `0005_reimport_data.sql` | weeks 1–15 rebuild. **Superseded by 0007 — do not run.** Stored incl-VAT totals in `actual_amount`, causing double VAT | ⚠️ ran 2026-07-22 |
+| `0006_mark_paid_entries.sql` | marked the 20 paid diary rows. **Superseded by 0007 — do not run.** Would now overwrite `paid_amount` with the ex-VAT figure | ⚠️ ran 2026-07-22 |
+| `0007_reimport_weeks_1_23.sql` | full rebuild from both spreadsheets, weeks 1–23. **Generated** by `scripts/build_import_sql.py`. Idempotent, sets Paid status at import time, and **aborts the transaction unless every week total equals the spreadsheet's** | ❌ **not yet run** |
 
-`0005` and `0006` are **generated files**. Edit the Python scripts and
-regenerate — never hand-edit the SQL.
+`0007` is a **generated file**. Edit the Python script and regenerate — never
+hand-edit the SQL.
 
 ### Scripts
 
 | Script | Reads | Writes |
 |---|---|---|
-| `scripts/build_import_sql.py` | both spreadsheets | `0005_reimport_data.sql` |
-| `scripts/gen_mark_paid_sql.py` | File 1 (via `build_import_sql`) | `0006_mark_paid_entries.sql` |
+| `scripts/build_import_sql.py` | both spreadsheets | `0007_reimport_weeks_1_23.sql` |
+| `scripts/verify_against_spreadsheet.py` | the generated `0007` SQL + File 1 | nothing — prints a pass/fail report |
+| `scripts/gen_mark_paid_sql.py` | — | **disabled**; exits with an explanation |
+
+`verify_against_spreadsheet.py` is the regression test this project never had.
+It parses the rows back out of the generated SQL, replays `computeEntry`,
+`buildSummary`, `buildByWeek` and `buildByCategory` in Python, and diffs the
+result against the spreadsheet — per row, per week, and per card. Exit code 0
+means the app and the spreadsheet agree. Run it after any change to the import.
 
 ---
 
-## 13. Current figures (2026-07-22)
+## 13. Current figures
 
-Project `46 Glenferrie Road`, after `0006`:
+Project `46 Glenferrie Road`. The right-hand column is what `0007` produces —
+**it takes effect only once `0007` has been run in the SQL editor.**
 
-| | |
-|---|---|
-| Target Budget | £98,932.12 |
-| Total Quoted | £42,411.81 |
-| Actual Total (incl VAT) | £43,686.17 |
-| Variance vs Quote | £1,274.36 over |
-| Paid to Date | £13,273.40 |
-| Remaining to Pay | £30,412.77 |
-| Weeks Tracked | 15 |
-| Budget used | 44% |
-| Diary rows | 40 (20 Paid, 20 Planned) |
-| Ledger rows | 96 |
+| | After `0006` (2026-07-22) | After `0007` (2026-08-06) |
+|---|---|---|
+| Target Budget | £98,932.12 | £98,932.12 *(unchanged)* |
+| Total Quoted | £42,411.81 | £151,644.78 |
+| Actual Total (incl VAT) | £43,686.17 | £151,644.78 |
+| Variance vs Quote | £1,274.36 over | £0.00 |
+| Paid to Date | £13,273.40 | £13,273.40 *(unchanged)* |
+| Remaining to Pay | £30,412.77 | £138,371.38 |
+| Weeks Tracked | 15 | 23 |
+| Budget used | 44% | 153% |
+| Diary rows | 40 (20 Paid, 20 Planned) | 111 (20 Paid, 91 Planned) |
+| Ledger rows | 96 | 96 *(unchanged)* |
+
+Every figure in the right-hand column equals the corresponding cell in File 1's
+`Summary` tab — `Forecast Total (incl. VAT)`, `Paid to date`, and
+`Committed / no paid-date logged` respectively.
 
 Use these as a regression baseline. If a change moves one of them, that should
-be intentional and recorded in `updates.md`.
+be intentional and recorded in `updates.md`. The cheapest way to check is
+`python scripts/verify_against_spreadsheet.py`.
 
 ---
 

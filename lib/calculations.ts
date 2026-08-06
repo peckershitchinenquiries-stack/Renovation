@@ -27,7 +27,11 @@ export function computeEntry(e: ExpenseEntry): ExpenseEntryComputed {
     subtotal,
     vat_amount: vatAmount,
     total_incl_vat: totalInclVat,
-    remaining: actual - Number(e.paid_amount),
+    // Paid amounts are what was actually handed over, which includes VAT, so
+    // what is still owed is measured against the incl-VAT total. This matches
+    // buildTrades and buildMaterials, which already subtract paid from an
+    // incl-VAT figure.
+    remaining: totalInclVat - Number(e.paid_amount),
   };
 }
 

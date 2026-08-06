@@ -54,7 +54,7 @@ export interface ExpenseEntryComputed extends ExpenseEntry {
   subtotal: number; // = actual_amount
   vat_amount: number;
   total_incl_vat: number;
-  remaining: number; // actual_amount − paid_amount
+  remaining: number; // total_incl_vat − paid_amount
 }
 
 export interface TradeLookup {

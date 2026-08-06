@@ -394,3 +394,157 @@ produced.
 **Verified:** `npm run build` passes (this is the full typecheck) and the app
 serves without console errors. The screens behind the login were not checked
 visually — that needs a sign-in.
+
+
+---
+
+### 2026-08-06 — Weeks 16–23 added, and the double-VAT bug that made the app disagree with the spreadsheet
+
+**What changed (in plain English):**
+The app now holds the whole job to date — **weeks 1 to 23 instead of weeks 1 to
+15**, 111 cost lines instead of 40. Everything from week 16 onwards (the roof,
+the windows, the kitchen, the stairs, the bathrooms, the plastering, the
+flooring, the June Lawsons invoices, and the rest) is now in the Expenses tab,
+the weekly chart and every Overview figure.
+
+While loading it, a real bug came to light in how the *existing* 15 weeks had
+been imported, and it is now fixed. **The app had been adding VAT twice.** The
+spreadsheet's "Total incl. VAT" figure was being stored in the app's "Actual"
+box, and the app then added VAT on top of it when working out totals. That is
+why the app said the first 15 weeks came to **£43,686.17** when the spreadsheet
+said **£42,411.81** — the £1,274.36 difference was VAT counted a second time.
+Amounts are now stored the way the app expects (before VAT), so every figure on
+every screen equals the spreadsheet to the penny.
+
+Three smaller consequences of that fix, all deliberate:
+
+- **"Paid to Date" and "Remaining to Pay" now match the spreadsheet's own
+  Payment Status box exactly** (£13,273.40 paid, £138,371.38 still committed).
+  The app now records what was actually handed over, which includes VAT.
+- **"Variance vs Quote" now reads £0.00** instead of a made-up £1,274.36
+  overrun. The Week-by-Week Plan has no separate quote column — the plan *is*
+  the quote — so there is nothing to be over or under by.
+- **"Budget used" now reads 153% and shows red.** That is not an error. The
+  Target Budget (£98,932.12) still comes from the *other* spreadsheet,
+  `Renovation_Cost_Tracker-1.xlsx`, and spending has now passed it. The updated
+  spreadsheet's own "Target Budget" cell is blank, so there was nothing better
+  to replace it with. Say the word and it can be set to any figure.
+
+**Why:**
+The user supplied an updated tracker covering eight more weeks and asked that
+the app and the spreadsheet agree. Loading the new weeks was straightforward;
+making them *agree* meant fixing how money had been mapped into the database in
+the first place, because weeks 16–23 contain far more VAT-bearing rows than
+weeks 1–15 did, and the double-counting would have grown from £1,274 to
+£9,958.
+
+**Where the information came from:**
+`46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` — the "Week-by-Week
+Plan" sheet for the 111 cost lines, the "Summary" sheet for the week totals and
+the Paid/Committed figures used to check the import, and the "Lookups" sheet for
+the 16 trade rates. The 96 reference rows behind the Trades and Materials tabs
+still come from `Renovation_Cost_Tracker-1.xlsx` and are untouched.
+
+Weeks 1–15 were compared line by line against the previous spreadsheet first:
+the same 40 rows for the same money. The only differences are that the updated
+file writes VAT as text ("0%") rather than a number, and — helpfully — moves
+materials costs into the Materials column where the older file had put them in
+the Labour column.
+
+**Files used (read, not changed):**
+- `about.md`, `updates.md`
+- `46_Glenferrie_Rd_Renovation_Spend_Tracker_Blank_Template.xlsx` — the old
+  weeks 1–15 file, used only to confirm nothing in those weeks changed
+- `Renovation_Cost_Tracker-1.xlsx`
+- `lib/summary.ts`, `components/project/OverviewTab.tsx`,
+  `components/project/TradesTab.tsx`, `components/project/MaterialsTab.tsx`
+
+**Files changed:**
+- `scripts/build_import_sql.py` — reads the updated spreadsheet; maps money
+  correctly (Actual = labour + materials, before VAT; Quoted and Paid = the
+  sheet's incl-VAT total); refuses to write anything if a row's own
+  Labour + Materials + VAT does not reproduce that row's Total cell; now writes
+  `0007` instead of `0005`, and prints a full week-by-week comparison
+- `scripts/verify_against_spreadsheet.py` — **new.** Reads the rows back out of
+  the generated SQL, redoes the app's own sums in Python, and compares them with
+  the spreadsheet: every row, every week, every Overview card. Prints PASS/FAIL
+  and exits non-zero on any mismatch. This is the regression test the project
+  never had
+- `scripts/gen_mark_paid_sql.py` — **disabled.** It produced `0006`, which the
+  new import makes redundant; re-running it now would knock £166.40 off Paid to
+  Date. It exits with an explanation instead of being deleted
+- `lib/calculations.ts` — "Remaining" on a row is now the incl-VAT total minus
+  what has been paid, not the before-VAT cost minus what has been paid.
+  Otherwise every fully-settled VAT-bearing row looked overpaid
+- `lib/summary.ts` — Variance vs Quote is rounded to the penny, so an exact
+  match shows "£0.00" rather than "-£0.00"
+- `components/forms/ExpenseForm.tsx` — the "you have paid more than this is
+  worth" warning, the live Remaining figure, and the auto-tick to "Paid" all
+  now compare against the incl-VAT total
+- `components/project/ExpensesTab.tsx` — the one-click "Mark paid" button fills
+  in the incl-VAT total rather than the before-VAT cost
+- `types/index.ts` — comment corrected to match the new Remaining formula
+- `supabase/migrations/0005_reimport_data.sql`,
+  `supabase/migrations/0006_mark_paid_entries.sql` — a "SUPERSEDED — DO NOT RUN"
+  banner added at the top of each. The SQL itself is untouched; they stay as a
+  record of what was applied on 2026-07-22
+- `about.md` — new §3.1 spelling out exactly how each spreadsheet column becomes
+  each database column and why; §5 corrected (ledger rows sit at week 1, not
+  "weeks 16+"); §6.1, §6.2, §6.4, §11, §12 and §13 brought up to date; the two
+  long-standing VAT warnings in §6.2 replaced, because they are now fixed
+
+**Database:**
+Migration **`supabase/migrations/0007_reimport_weeks_1_23.sql`** — written and
+checked, **but NOT yet run.** It must be pasted into the Supabase SQL editor and
+run by hand, like all the others. Until then the app still shows the old 15
+weeks.
+
+It rebuilds the project from scratch: deletes the existing `46 Glenferrie Road`
+project, re-inserts it with 111 diary rows and 96 ledger rows, refreshes the 16
+trade rates, and creates week records 1–23. It is safe to run more than once.
+
+Two things make it hard to get wrong:
+
+- **It checks itself before committing.** The spreadsheet's own 23 week totals
+  are embedded in the file. If a single week disagrees by more than a penny, the
+  migration raises an error and the whole transaction is rolled back — nothing
+  is saved. It prints "All 23 weeks match the spreadsheet." when it is happy.
+- **It prints a report at the end** listing Total Quoted, Actual Total, Paid to
+  Date, Weeks Tracked and the two row counts, so the figures can be read
+  straight off against the spreadsheet's Summary tab.
+
+**Do not run `0005` or `0006` again.** `0007` replaces both, and both now carry
+banners saying so.
+
+**Result / numbers after:**
+
+| | before | after |
+|---|---|---|
+| Weeks tracked | 15 | 23 |
+| Diary rows | 40 | 111 |
+| Total Quoted | £42,411.81 | £151,644.78 |
+| Actual Total (incl VAT) | £43,686.17 | £151,644.78 |
+| Variance vs Quote | £1,274.36 over | £0.00 |
+| Paid to Date | £13,273.40 | £13,273.40 |
+| Remaining to Pay | £30,412.77 | £138,371.38 |
+| Budget used | 44% | 153% |
+| Ledger rows | 96 | 96 |
+
+Of the £107,958.61 increase in Actual Total, £109,232.97 is the eight new weeks
+and −£1,274.36 is the double-counted VAT being removed from weeks 1–15.
+
+**Verified:**
+- `npm run build` passes — this is the project's full typecheck.
+- `python scripts/verify_against_spreadsheet.py` passes every check: 111 of 111
+  rows match to the penny, all 23 week totals match, and all six Overview cards
+  match the Summary sheet. Re-run it any time.
+- The database itself has **not** been verified, because `0007` has not been run
+  yet. After running it, the migration's own report is the check.
+
+**One thing that will look like a mismatch and isn't:** the spreadsheet's
+Summary tab shows £0 of labour for weeks 20–23. That is because on those weeks
+every cost was typed into the "Materials Cost" column, whatever the row's
+Category said. The app splits Labour from Materials using the Category column,
+so it shows the real figures. Week totals — which is what every card and the
+chart use — are identical either way. The verification script prints both side
+by side and explains it.
