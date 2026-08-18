@@ -15,8 +15,10 @@ What it checks
   2. every week's total vs the Summary sheet's 'By Week (Totals)' block
   3. the Labour / Materials split per week
   4. the seven Overview cards vs the Summary sheet's Controls and
-     Payment Status blocks
-  5. row counts and paid-row counts
+     Payment Status blocks — Target Budget included, which must equal the
+     sheet's own (blank) Target Budget cell
+  5. row counts and paid-row counts, and that the ledger count is 0:
+     Renovation_Cost_Tracker-1.xlsx is a different job and must not reappear
 
 Usage:
     python scripts/verify_against_spreadsheet.py
@@ -29,7 +31,7 @@ from pathlib import Path
 import openpyxl
 
 ROOT = Path(__file__).resolve().parent.parent
-SQL = ROOT / "supabase" / "migrations" / "0007_reimport_weeks_1_23.sql"
+SQL = ROOT / "supabase" / "migrations" / "0009_reimport_file1_only.sql"
 XLSX = ROOT / "46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx"
 
 TOL = 0.01          # a penny: anything smaller is float/rounding noise
@@ -108,6 +110,19 @@ def load_sql_rows():
         r["week"] = int(r["week"])
         rows.append(r)
     return rows
+
+
+def sql_target_budget():
+    """The target_budget the migration will write into public.projects.
+
+    Read out of the generated SQL rather than recomputed, so this checks the
+    artifact that actually gets pasted into Supabase.
+    """
+    text = SQL.read_text(encoding="utf-8")
+    m = re.search(r"values \(v_user, '[^']*', ([\d.]+), 'active'", text)
+    if not m:
+        raise SystemExit("could not find the projects insert in " + SQL.name)
+    return float(m.group(1))
 
 
 # ------------------------- the app's arithmetic, mirrored from the TS source
@@ -201,6 +216,9 @@ def main():
     # -- 1. counts ---------------------------------------------------------
     print("1. Row counts")
     check("diary rows", len(diary), len(sheet_rows), tol=0, fmt="{:,.0f}")
+    # Renovation_Cost_Tracker-1.xlsx is a different job and is no longer
+    # imported; anything here means it has crept back in.
+    check("ledger rows", len(ledger), 0, tol=0, fmt="{:,.0f}")
     sheet_paid = sum(1 for r in sheet_rows if r["paid_date"])
     app_paid = sum(1 for e in diary if e["paid"] > 0)
     check("rows marked Paid", app_paid, sheet_paid, tol=0, fmt="{:,.0f}")
@@ -280,8 +298,7 @@ def main():
 
     # -- 4. the Overview cards --------------------------------------------
     print("\n4. Overview cards vs the Summary sheet")
-    target_budget = round(sum(r["quoted"] for r in ledger), 2)
-    summ = build_summary(diary, target_budget)
+    summ = build_summary(diary, sql_target_budget())
     forecast_sheet = controls.get("Forecast Total (incl. VAT)", 0.0)
     paid_sheet = controls.get("Paid to date (£)", 0.0)
     committed_sheet = controls.get("Committed / no paid-date logged (£)", 0.0)
@@ -295,9 +312,11 @@ def main():
     # app only counts weeks that actually carry an entry.
     weeks_with_spend = sum(1 for v in sheet_weeks.values() if v["total"] > 0)
     check("Weeks Tracked", summ["weeks_tracked"], weeks_with_spend, tol=0, fmt="{:,.0f}")
-    print(f"  [ -- ] Target Budget                   "
-          f"£{summ['target_budget']:,.2f} — from the File 2 ledger; the "
-          f"spreadsheet's own Target Budget cell is blank")
+    budget_sheet = controls.get("Target Budget (incl. VAT)", 0.0)
+    check("Target Budget", summ["target_budget"], budget_sheet)
+    if summ["target_budget"] == 0:
+        print("         (blank in the sheet and 0 here — the card and the "
+              "'% of budget' bar hide themselves)")
 
     # -- 5. category donut -------------------------------------------------
     print("\n5. Category donut")

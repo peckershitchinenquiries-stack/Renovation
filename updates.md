@@ -1408,3 +1408,566 @@ four routes appear in its route list as dynamic (`ƒ`) functions.
    `npm run build` (the project's only full typecheck) and by reading the
    code against the spec; they have not been exercised against a live
    upload, because that needs Phase 5's upload screen. Session 3 builds that.
+
+---
+
+### 2026-08-17 — Invoice ingestion, Phase 5a: the upload screen
+
+**What changed (in plain English):**
+Clicking "Log invoice" (on `/purchases` or its empty state) now shows a choice
+of two clear options instead of going straight to the form: **Upload invoice**
+or **Enter manually**. Manual entry opens the exact same invoice form as
+before, unchanged. Upload invoice opens a new screen where you can drag in a
+photo or PDF, or take one with the phone's camera, and queue up several at
+once — each gets its own card with its own progress bar and status
+(Uploading → Processing → Extracted, or Failed with a Retry button).
+
+Once a file finishes reading successfully, its card shows a **Review** button.
+Clicking it goes to a page that exists but is only a placeholder this
+session — it confirms the file was read and says the real review-and-save
+screen is coming next, rather than 404ing or pretending to save anything.
+Nothing is written into `purchases` from this session's work; that only
+happens once the review screen (Phase 5b) exists.
+
+**Why:**
+This is Session 3 (Phase 5a) of `invoice_ingestion_phase_prompts.md`, and the
+first bullet of Phase 5 in `invoice-ingestion-prompt.md`: get a file from the
+user's phone into storage and through extraction, honestly, before building
+the harder review-and-correct screen on top of it.
+
+**Where the information came from:**
+`invoice-ingestion-prompt.md` (Phase 5, first two bullets) and
+`invoice_ingestion_phase_prompts.md` (Session 3's brief) were the spec.
+Everything else came from reading the existing code to match its
+conventions — `components/forms/PurchaseForm.tsx` and
+`components/forms/AddExpensePanel.tsx` for the existing add-a-purchase path
+and layout; `lib/fetcher.ts`, `components/ui/Toast.tsx`, `States.tsx`,
+`Drawer.tsx` for shared UI primitives (a spinner and a status badge were
+reused, no new toast/spinner rolled); `lib/supabase/client.ts` for the browser
+client the Realtime subscription needs. No spreadsheet or database figure was
+touched.
+
+**Files used (read, not changed):**
+- `CLAUDE.md`, `about.md`, the last two entries of `updates.md`,
+  `invoice-ingestion-prompt.md` (Phase 5)
+- `app/api/invoices/upload-url/route.ts`, `[id]/route.ts`, `[id]/extract/route.ts`,
+  `[id]/commit/route.ts` — Phase 4's routes, to match request/response shapes
+- `components/forms/PurchaseForm.tsx`, `components/forms/AddExpensePanel.tsx`
+- `app/(app)/projects/[id]/purchases/new/page.tsx`,
+  `app/(app)/projects/[id]/purchases/page.tsx`
+- `lib/fetcher.ts`, `components/ui/Toast.tsx`, `States.tsx`, `Drawer.tsx`,
+  `ConfirmDialog.tsx`, `Badge.tsx`
+- `lib/supabase/client.ts`, `lib/supabase/server.ts`
+- `lib/data.ts` (`getProject`), `types/index.ts` (`InvoiceUpload`,
+  `InvoiceUploadStatus`), `supabase/migrations/0010_invoice_upload.sql`
+  (status enum, storage bucket, Realtime publication)
+- `app/globals.css`, `tailwind.config.ts` — existing `card` / `btn-*` / brand
+  color conventions, reused rather than reinvented
+
+**Files changed:**
+- `app/(app)/projects/[id]/purchases/add/page.tsx` — **new.** The chooser:
+  Upload invoice vs Enter manually
+- `app/(app)/projects/[id]/purchases/add/loading.tsx` — **new**
+- `app/(app)/projects/[id]/purchases/upload/page.tsx` — **new.** Server
+  Component wrapper (breadcrumb, copy, `InvoiceScopeNote`) around the panel
+- `app/(app)/projects/[id]/purchases/upload/loading.tsx` — **new**
+- `app/(app)/projects/[id]/purchases/upload/[uploadId]/review/page.tsx` —
+  **new.** Placeholder only, as instructed — reads the row back to prove the
+  id is real, says the real screen isn't built yet, links back to the queue
+  and to manual entry
+- `components/purchases/UploadInvoicePanel.tsx` — **new.** The Client
+  Component: drag-and-drop + file picker + a dedicated camera button, a
+  hand-rolled `XMLHttpRequest` PUT to the signed URL for real progress
+  reporting (the Supabase SDK's own `uploadToSignedUrl` gives none), a
+  per-file queue that survives one file failing without affecting the others,
+  a Realtime subscription on `invoice_uploads` with a polling fallback that
+  backs off rather than stops once Realtime confirms it connected, and
+  resumable retry (re-uploads only the part that didn't finish last time)
+- `app/(app)/projects/[id]/purchases/page.tsx` — both links that went straight
+  to `/purchases/new` ("+ Log invoice" and the empty-state action) now go to
+  `/purchases/add`
+- `about.md` — new §8.2 describing the three new routes and how
+  `UploadInvoicePanel` works; flagged (not fixed) that the existing §8 Pages
+  table already predates Phase 2 and was missing the `purchases` routes
+  entirely, before this change added to the same gap
+- `updates.md` — this entry
+
+**Database:**
+None. No migration written or changed. This session assumes migration `0010`
+and Phase 4's routes are already in place, per the prior two sessions' notes —
+nothing here depends on new schema.
+
+**Result / numbers after:**
+No schema, data or application figure changed. `npm run build` passes (the
+project's full typecheck, including lint) and lists all three new routes
+(`/purchases/add`, `/purchases/upload`,
+`/purchases/upload/[uploadId]/review`) alongside the four Phase 4 API routes.
+
+**Confirmed: a file over 4.5MB never passes through a Next.js route handler in
+this flow.** `UploadInvoicePanel` only ever sends JSON metadata (filename,
+mime type, size) to `POST /api/invoices/upload-url`; the file itself goes
+straight from the browser to the signed Supabase Storage URL via
+`XMLHttpRequest`, and the only other route the flow touches
+(`POST /api/invoices/[id]/extract`) takes no request body at all — it
+downloads the file server-side, directly from Storage.
+
+**Not verified in a browser this session** — the dev server was not started
+against the live app, so the drag-drop, camera capture, real upload progress,
+and the Realtime-vs-polling handoff have only been checked by reading the
+code, not by exercising it. `npm run build` and a full reading of the code
+against Phase 4's actual route shapes are the check that exists. `ANTHROPIC_API_KEY`
+is still not set in `.env` (per the Phase 4 note above), so even a live test
+today would end every upload on a `failed` row with "invoice reading is
+switched off" — that is expected, not a bug in this session's work.
+
+**Still to do (Session 4 / Phase 5b, per `invoice_ingestion_phase_prompts.md`):**
+The actual review-and-save screen — the extracted fields shown next to the
+original document, editable, reusing `PurchaseForm.tsx` rather than a second
+form, with the supplier/item confidence-band branching and the duplicate-
+invoice check. Nothing in this session writes to `purchases`.
+
+---
+
+### 2026-08-17 — Invoice ingestion, Phase 5b: the review screen
+
+**What changed (in plain English):**
+The placeholder at `/purchases/upload/[uploadId]/review` is now the real
+screen. An `extracted` upload shows the original photo or PDF next to a form
+already filled in with what was read off it — supplier, date, invoice
+number, every line, and any payment the document itself said had been made.
+Every field stays editable. Nothing about it is a second invoice form: it is
+the same `components/forms/PurchaseForm.tsx` that manual entry and editing
+already use, handed a prefilled starting point instead of a blank one.
+
+Three things the screen does beyond just showing the numbers:
+
+1. **The supplier is resolved, not just guessed.** If the invoice's VAT
+   number or name matches an existing merchant exactly, it is preselected and
+   shown as confirmed, with a "Change" link. A close-but-not-exact match
+   shows as a pick list with match scores. No match at all shows the
+   new-supplier fields already filled in and expanded, ready to accept in one
+   click, with a "search existing suppliers instead" link above it in case
+   the automatic search missed something. The same idea applies per line for
+   items, one notch lighter (a suggestion, not a full picker).
+2. **The three arithmetic checks — do the lines add up to the printed
+   subtotal, VAT and grand total — show up right next to the figure they are
+   about**, and update live as lines are edited, rather than a banner at the
+   top that goes stale the moment you fix something.
+3. **A duplicate invoice (same supplier, same invoice number) is flagged the
+   moment the screen opens**, with a link to the one already logged, so
+   nobody discovers it only when the save fails.
+
+Saving posts to `/api/invoices/[id]/commit` (built in Phase 4) and lands on
+the invoice that was just created, rather than the list.
+
+**Why:**
+This is Session 4 (Phase 5b) of `invoice_ingestion_phase_prompts.md`, and the
+piece the whole feature is judged on per `invoice-ingestion-prompt.md`'s
+"THE ONE RULE THAT MATTERS": there must be exactly one purchase form in the
+codebase. Phases 1–4 and 5a (schema, extractor, resolver, API routes, upload
+queue) already existed; nothing before this session actually wrote an
+extracted invoice into `purchases`.
+
+**Where the information came from:**
+`invoice-ingestion-prompt.md` (Phase 5 "Review screen" and the Acceptance
+criteria list) and `invoice_ingestion_phase_prompts.md` (Session 4's brief)
+were the spec. `about.md` §§4–8, especially §4.6 on aliases and §8.1's unit
+and confidence-band rules, and the last two `updates.md` entries (Phase 4,
+Phase 5a) for what already exists. Everything else came from reading the
+existing code to match its conventions — no spreadsheet or database figure
+was touched.
+
+**Files used (read, not changed):**
+- `CLAUDE.md`, `about.md` (all sections), `invoice-ingestion-prompt.md`,
+  `invoice_ingestion_phase_prompts.md`
+- `lib/invoice/resolve.ts`, `schema.ts`, `reconcile.ts`, `normalise.ts` —
+  read closely for the confidence bands, the reconciliation tolerance and the
+  shape of a normalised extraction
+- `app/api/invoices/[id]/extract/route.ts`, `commit/route.ts`, `[id]/route.ts`,
+  `upload-url/route.ts` — to match the request/response shapes Phase 4 already
+  settled on
+- `components/forms/PurchaseForm.tsx` (in full), `lib/purchases.ts`,
+  `lib/purchaseWrite.ts`, `lib/validation.ts`, `types/index.ts` — to extend
+  the existing form without disturbing anything it already does
+- `components/purchases/UploadInvoicePanel.tsx`,
+  `app/(app)/projects/[id]/purchases/upload/[uploadId]/review/page.tsx`
+  (the old placeholder), `app/(app)/projects/[id]/purchases/new/page.tsx`,
+  `[pid]/edit/page.tsx` — for the existing layout and loader conventions
+- `lib/data.ts` (`getPurchaseFormBundle`), `lib/supabase/server.ts`,
+  `lib/api.ts`
+
+**Files changed:**
+- `components/purchases/SupplierFields.tsx` — **new.** Name / VAT number /
+  address fields, extracted so the review screen's inline "add new supplier"
+  form and any future standalone supplier-creation screen share one component
+  rather than two that can drift apart
+- `components/forms/PurchaseForm.tsx` — six new *optional* props
+  (`prefill`, `invoiceUploadId`, `supplierResolution`, `lineResolutions`,
+  `extractedTotals`, `documentNotes`), all additive and all `undefined` for
+  the two existing call sites (manual entry, editing), which behave exactly
+  as before. Added: prefill-aware initial state for the header, lines and
+  payments; the supplier confidence-band UI; the per-line item-suggestion UI
+  (which required actually sending `line.item_id` — previously always
+  hardcoded `null` — so a confirmed suggestion can target a specific item);
+  live net/VAT reconciliation warnings next to the totals they describe; a
+  "View it" link on the pre-existing duplicate-invoice warning; a save path
+  that posts to `/api/invoices/[id]/commit` when reviewing an upload instead
+  of the normal purchases route
+- `app/(app)/projects/[id]/purchases/upload/[uploadId]/review/page.tsx` —
+  **rewritten.** Was the Phase 5a placeholder; now loads the upload row and
+  the purchase-form bundle, handles every non-`extracted` status honestly
+  (already committed → link to the invoice; still processing / failed → back
+  to the queue; an extraction that fails its own Zod re-check → back to the
+  queue or manual entry), signs a 10-minute read URL for the original file,
+  re-runs `resolveSupplier`/`resolveItems` against the *current* tables
+  (not the extract route's snapshot), builds the form's prefill data, and
+  renders the original alongside `PurchaseForm`
+- `about.md` — §8.2 rewritten: the review screen is no longer a stub;
+  documents the six new props, the "exactly one form" fact with all three
+  call sites named, and a note that this page signs its own 10-minute URL
+  rather than reusing the `GET` route's 5-minute one
+
+**Database:**
+None. No migration written or changed. This session assumes migration
+`0010_invoice_upload.sql` and Phase 4's routes are already in place, exactly
+as the prior two sessions left them.
+
+**Result / numbers after:**
+No schema, data or application figure changed — this is UI and one route's
+worth of consumption, nothing that touches `expense_entries` or the Overview
+cards. `npm run build` passes (the project's full typecheck, including
+lint); the review route now reports First Load JS of **107 kB**, the same as
+`/purchases/new` and `/purchases/[pid]/edit` — confirmation it is the same
+`PurchaseForm` bundle, not a second one.
+
+**Confirmed: exactly one purchase form component in the codebase.**
+`grep`-ing for `PurchaseForm` usage finds one definition
+(`components/forms/PurchaseForm.tsx`) and three consumers: `purchases/new`,
+`purchases/[pid]/edit`, and this review page.
+
+**Not verified in a browser this session** — the dev server was not started
+(declined this session), and two things would have limited a live test even
+if it had been: `ANTHROPIC_API_KEY` is still not set in `.env`, so no real
+extraction can run to produce an `extracted` row to review; and migration
+`0010_invoice_upload.sql`'s run status has not been reconfirmed since Session
+1's audit. `npm run build` and a close reading of the code against Phase 4's
+actual route shapes are the check that exists this session. Session 5
+(Acceptance pass, in `invoice_ingestion_phase_prompts.md`) is the place to
+verify against a live upload once both of those are in place.
+
+---
+
+### 2026-08-17 — Acceptance audit of invoice ingestion; fixed a real bug in `merge_suppliers`
+
+**What changed (in plain English):**
+Went through every item on `invoice-ingestion-prompt.md`'s Acceptance criteria
+list and traced the code for each one — reading, not testing, since neither
+`ANTHROPIC_API_KEY` nor migration `0010`'s run status allow a live upload yet.
+Found one genuine, 100%-reproducible bug: `merge_suppliers()` claimed to move
+a merged-away supplier's aliases onto the survivor but actually **deleted
+them**. It is fixed. Everything else on the list checked out in code, with
+some caveats recorded below and no other changes made.
+
+**Why:**
+User request — an audit pass before trusting the feature, specifically asking
+for the merge function, the alias-writing paths, and the client-bundle secret
+boundary to be traced rather than asserted.
+
+**The bug, precisely:** `ux_supplier_aliases_user_alias` is unique on
+`(user_id, norm_key(alias))` — not `supplier_id` — because one spelling can
+only ever mean one supplier. The old merge code tried to move the source
+supplier's aliases onto the target with `INSERT ... SELECT ... FROM
+supplier_aliases WHERE supplier_id = source_id ON CONFLICT DO NOTHING`. At the
+moment that statement runs, the source's *own* alias rows are still in the
+table, so the new copy for the target collides with them on that same unique
+index and is silently dropped. The very next statement then deletes the source
+supplier, which cascades and removes the original rows too. Net effect: every
+alias the merged-away supplier knew, other than its own name (inserted
+separately, and safe), vanished — the opposite of what a merge exists to do,
+and exactly what the acceptance list's "leaves no orphans" line was checking
+for. `purchases.supplier_id` was repointed correctly; only the aliases were
+lost.
+
+**Where the information came from:**
+Reading `supabase/migrations/0010_invoice_upload.sql` end to end and reasoning
+through the exact row-by-row state of `supplier_aliases` at each statement,
+against the unique index defined for it in `supabase/migrations/0008_transaction_core.sql:78-79`.
+
+**Files used (read, not changed):**
+- `invoice-ingestion-prompt.md`, `CLAUDE.md`, `about.md`, the last dozen
+  `updates.md` entries
+- `lib/invoice/extract.ts`, `resolve.ts`, `reconcile.ts`, `normalise.ts`, `schema.ts`
+- `app/api/invoices/upload-url/route.ts`, `[id]/route.ts`, `[id]/extract/route.ts`, `[id]/commit/route.ts`
+- `lib/purchaseWrite.ts`, `lib/purchases.ts`
+- `components/forms/PurchaseForm.tsx`, `components/purchases/UploadInvoicePanel.tsx`, `SupplierFields.tsx`
+- `app/(app)/projects/[id]/purchases/new/page.tsx`, `[pid]/edit/page.tsx`, `upload/[uploadId]/review/page.tsx`
+- `supabase/migrations/0008_transaction_core.sql`, `0010_invoice_upload.sql`
+- `.env.local.example`
+- `git status`, `git log -- components/forms/PurchaseForm.tsx` (empty — the whole feature has never been committed, so "diff against pre-Phase-5b" was done by tracing which code paths are gated behind the six optional props instead of a literal `git diff`)
+
+**Files changed:**
+- `supabase/migrations/0010_invoice_upload.sql` — `merge_suppliers()`'s alias
+  move changed from `INSERT ... SELECT ... ON CONFLICT DO NOTHING` to a plain
+  `UPDATE supplier_aliases SET supplier_id = target_id WHERE supplier_id =
+  source_id`, which cannot conflict with itself. The final `DELETE FROM
+  suppliers WHERE id = source_id` comment corrected — it no longer has any
+  aliases left to cascade away, because they were already re-pointed.
+- `updates.md` — this entry
+
+**Database:**
+`0010_invoice_upload.sql` is still **not run**. This fix only matters once it
+is — the bug has never affected live data. No new migration needed; editing
+the unrun file in place is correct per `CLAUDE.md`.
+
+**Result / numbers after:**
+No application figure changed. `npx tsc --noEmit` is clean.
+
+**Full audit findings, one line each — see the chat transcript for the full
+citations and reasoning:**
+- Exactly one `PurchaseForm` — confirmed by grep (one definition, three consumers).
+- No secret reaches the client bundle — confirmed by tracing every import
+  from every `"use client"` file; `lib/invoice/extract.ts` (the only file
+  touching `ANTHROPIC_API_KEY`) is imported solely by
+  `app/api/invoices/[id]/extract/route.ts`, a server route.
+- A malformed model response and every other extraction failure lands on
+  `status: 'failed'` via one try/catch in `extract/route.ts`, retryable by
+  POSTing the same id again — confirmed. A hard Vercel `maxDuration` kill is
+  the one path outside the try/catch's reach and can still leave a row on
+  `'processing'`; this is inherent to the serverless timeout model, not a
+  code defect, and the row is still retryable once noticed.
+- Confirming a resolved supplier match (the `existing`/`new` branches of
+  `buildSupplierDecision` in `PurchaseForm.tsx`) always sends `raw_alias` and
+  the commit route always writes it — confirmed. The `search` bypass branch
+  (user ignores the resolver and types/picks a name directly) does not write
+  an alias, by design — same behaviour manual entry has always had.
+- VAT-number match for a re-spelled supplier — confirmed in
+  `lib/invoice/resolve.ts`'s tier 1, and the VAT number is written onto a
+  newly-created supplier at commit time so a later invoice can match it.
+- A narrower, unfixed edge case flagged: editing the "new supplier" draft
+  name at commit time to a string that happens to equal an *existing*
+  supplier's alias (not its canonical name) is not re-checked before commit —
+  `createPurchase` correctly attaches the purchase to the existing supplier,
+  but the commit route can still mark that existing, previously-verified
+  supplier `is_unverified` and overwrite its VAT/address, because its
+  "is this genuinely new" check only queries `suppliers.name`, not
+  `supplier_aliases`. Reported, not fixed — needs a product decision on
+  whether to re-resolve live as the draft is edited.
+- Manual entry and editing are unaffected — confirmed by tracing that all six
+  of `PurchaseForm`'s new props are `undefined` at both of their call sites
+  and every new branch in the component is conditioned on one of them.
+
+---
+
+### 2026-08-17 — Invoice extraction switched from Claude to Gemini
+
+**What changed (in plain English):**
+The model that reads an uploaded invoice into structured data is now Gemini
+2.5 Flash instead of Claude, at the user's request. Nothing about the feature
+changed from the outside — same upload flow, same review screen, same
+retry/failure behaviour — only which model answers the "what does this
+invoice say" question, and which API key pays for it.
+
+**Why:**
+User request, to use a Gemini API key they already have instead of an
+Anthropic one.
+
+**Where the information came from:**
+The installed `@google/genai` package's own TypeScript definitions
+(`node_modules/@google/genai/dist/node/node.d.ts`) — read directly rather than
+assumed, specifically to get `responseJsonSchema`'s accepted shape (real JSON
+Schema with `anyOf: [type, "null"]` for nullable fields, not the older
+`responseSchema` field's OpenAPI-style `nullable: true` flag), the
+`finishReason` values, and `createPartFromBase64` for building image/PDF
+parts. Confirmed via the same audit session's tracing of `lib/invoice/extract.ts`
+that it is the *only* file reading the model API key, and is only ever
+imported by `app/api/invoices/[id]/extract/route.ts` (a server route) — so the
+provider swap does not reopen the "no secret in the client bundle" question
+answered in the previous audit entry.
+
+**Files used (read, not changed):**
+- `node_modules/@google/genai/dist/node/node.d.ts` (installed package's types)
+- `lib/invoice/schema.ts`, `prompt.ts` — to keep the hand-written JSON Schema
+  and the system/task prompts (both provider-agnostic already) in step with
+  what the route re-validates
+- `app/api/invoices/[id]/extract/route.ts` — confirmed it only calls
+  `extractInvoice()`/`ExtractionError` and never touches the model client or
+  key directly, so no change was needed there
+- `.env.local.example`
+
+**Files changed:**
+- `lib/invoice/extract.ts` — rewritten to use `@google/genai`'s
+  `GoogleGenAI.models.generateContent()` instead of the Anthropic SDK's
+  `messages.parse()`. Reads `GEMINI_API_KEY` instead of `ANTHROPIC_API_KEY`.
+  Structured output is now driven by a hand-written JSON Schema
+  (`INVOICE_JSON_SCHEMA`/`LINE_JSON_SCHEMA`, must be kept in step with
+  `InvoiceExtractionSchema` in `schema.ts` — noted in the file's own comment)
+  passed via `responseJsonSchema`, since Gemini doesn't accept a zod schema
+  directly the way Anthropic's `zodOutputFormat` helper did; the JSON is then
+  parsed and re-validated with the same zod schema before being trusted, same
+  as before. The refusal/`stop_reason` check became a `finishReason !== "STOP"`
+  check (Gemini's equivalent). Text vs. vision routing, the PDF text-layer
+  detection via `unpdf`, and the page-count logic are all unchanged — none of
+  that is provider-specific. `thinkingConfig: { thinkingBudget: -1 }`
+  (Gemini's "automatic" budget) carries forward the same intent the removed
+  Anthropic `thinking: { type: "adaptive" }` had.
+- `package.json` / `package-lock.json` — removed `@anthropic-ai/sdk`, added
+  `@google/genai@^2.17.1`
+- `.env.local.example` — added `GEMINI_API_KEY`, removed nothing (there was
+  never an `ANTHROPIC_API_KEY` line here — see the previous audit entry's
+  note that this was a pre-existing documentation gap)
+- `updates.md` — this entry
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No application figure changed. `npx tsc --noEmit` is clean and `npm run build`
+succeeds — `/purchases/new`, `/purchases/[pid]/edit` and the review route all
+still report the same **107 kB** First Load JS as each other, confirming the
+swap didn't disturb the "exactly one `PurchaseForm` bundle" property from the
+previous audit. Not exercised against a live extraction — that needs a real
+`GEMINI_API_KEY` in `.env.local`, which is a manual step for whoever sets this
+up next.
+
+### 2026-08-18 — Fixed invoice extraction losing the quantity number
+
+**What changed (in plain English):**
+The Gemini extractor was reading the unit ("EA") off invoice lines correctly
+but leaving `qty` blank on the review screen, even though a quantity was
+printed. Added an explicit instruction for the `qty` field to the extraction
+prompt, covering the common case where a merchant invoice prints quantity and
+unit jammed together with no space (e.g. "10.000EA", "5EA") and telling the
+model to split the leading number off as `qty` rather than leaving it null
+just because it isn't visually separated from the unit code.
+
+**Why:**
+User report: quantity field showing blank on extracted invoices while every
+other field (including the unit) extracted correctly. `EXTRACTION_SYSTEM` in
+`lib/invoice/prompt.ts` had a "SPECIFIC FIELDS" bullet for every line field
+except `qty` — under the prompt's own "null beats a guess" rule, an
+unexplained combined qty+unit token was the most likely thing being read as
+one unsplittable value and nulled out. No code path (schema, JSON Schema sent
+to the model, or normaliseLine) drops or truncates qty — a schema/route/
+reconcile-logic audit ruled that out before concluding this was a prompt gap.
+
+**Where the information came from:**
+User request describing the symptom; `lib/invoice/prompt.ts`,
+`lib/invoice/schema.ts`, `lib/invoice/extract.ts`, `lib/invoice/normalise.ts`,
+`lib/invoice/reconcile.ts`, and the review screen
+(`app/(app)/projects/[id]/purchases/upload/[uploadId]/review/page.tsx`) read
+to rule out a non-prompt cause.
+
+**Files used (read, not changed):**
+- `lib/invoice/schema.ts`, `lib/invoice/extract.ts`, `lib/invoice/normalise.ts`,
+  `lib/invoice/reconcile.ts`
+- `app/(app)/projects/[id]/purchases/upload/[uploadId]/review/page.tsx`
+
+**Files changed:**
+- `lib/invoice/prompt.ts` — added a `qty` bullet to `EXTRACTION_SYSTEM`'s
+  SPECIFIC FIELDS section
+
+**Database:**
+None.
+
+**Result / numbers after:**
+Not yet verified against a live extraction — that needs a real invoice run
+through `GEMINI_API_KEY`, which whoever picks this up next should do on an
+invoice that previously came back with a blank `qty`. No figures changed.
+
+### 2026-08-18 — The quantity and the VAT rate now survive the invoice reader
+
+**What changed (in plain English):**
+Two things that were being lost between the invoice and the review screen:
+
+1. **The quantity.** A line printed as `10.000EA` was arriving with the Qty box
+   empty and the Unit box saying "EA" — the number, which is the whole point of
+   the column, was being thrown away. The number is now split off the unit in
+   code, so it no longer depends on the model doing it. If the quantity still
+   cannot be read but the line shows a unit price and a total, the quantity is
+   worked back from those two — but only when it comes out a **whole** number
+   that multiplies back to the printed total exactly. A part number (which
+   means a discount or a part-load, not a count) is left blank on purpose.
+2. **The VAT rate.** The invoice's own rate was being thrown away unless it was
+   0% or 20%, and the review screen then quietly filled the box in as 0%. A 5%
+   invoice — which is the normal rate for a lot of residential renovation work —
+   was therefore being saved as if no VAT was charged at all, and its VAT
+   disappeared from every total on the app. 5% is now a rate the system stores.
+   Any other rate (17.5%, or a misread figure) leaves the VAT box **empty** with
+   a note saying which rate was read, and the form refuses to save until someone
+   picks one — an empty box is a question, a 0 nobody chose is a wrong number.
+
+**Why:**
+User report, reviewing real extracted invoices: "Qty field is empty, it is only
+extracting EA which is the unit of the Quantity; and VAT is written in the
+invoice — extract that value, but VAT is hard coded either 0% or 20%."
+
+The qty half had been attempted earlier the same day as a prompt-only change
+(see the previous entry). It did not hold, which is the reason this fix is in
+code: the prompt asks the model to split "10.000EA", and that is worth asking,
+but a rule that must be right every time cannot depend on being asked nicely.
+
+The VAT half was a real constraint, not a bug in the reading: `vat_rate` had a
+CHECK of `(0,20)` on both tables, so 5 was rejected outright and the extractor
+had no choice but to drop it. Widening the constraint is what made keeping the
+printed rate possible.
+
+**Where the information came from:**
+User request. UK VAT rates are HMRC's current three — 0% (zero-rated/exempt),
+5% (reduced, which covers a good deal of residential renovation work) and 20%
+(standard). No spreadsheet involved.
+
+**Files used (read, not changed):**
+- `lib/invoice/resolve.ts`, `lib/invoice/schema.ts`, `lib/purchases.ts`,
+  `lib/purchaseWrite.ts`
+- `supabase/migrations/0001_init.sql`, `supabase/migrations/0008_transaction_core.sql`
+  (for the existing `vat_rate` CHECK constraints and `expenses_view`)
+- `components/forms/ExpenseForm.tsx` (checked that widening the shared
+  `VAT_RATES` list does not break the older expense form)
+
+**Files changed:**
+- `supabase/migrations/0011_vat_reduced_rate.sql` — **new.** Widens the
+  `vat_rate` CHECK on `expense_entries` and `purchase_lines` from `(0,20)` to
+  `(0,5,20)`
+- `types/index.ts` — `VAT_RATES` is now `[0, 5, 20]`; added `VatRate`,
+  `isVatRate()` and `VAT_RATES_SENTENCE` so one list drives the dropdown, the
+  validation messages and the extractor
+- `lib/validation.ts` — both VAT checks now use that list; a **blank** line VAT
+  rate is its own error ("Pick the VAT rate printed on the invoice") instead of
+  being read as 0
+- `lib/invoice/normalise.ts` — added `splitQtyFromUnit()`; `normaliseLine()`
+  uses it, and falls back to deriving a whole-number qty from
+  `line_net ÷ unit_price`; `normaliseVatRate()` now keeps any allowed rate
+  instead of only 0 and 20
+- `lib/invoice/prompt.ts` — rewrote the `qty`/`unit` and `vat_rate` rules:
+  split the number off the unit code, never return a unit containing digits,
+  report 5% as 5
+- `lib/invoice/extract.ts` — put those same three rules on the JSON schema
+  fields themselves, where the model writes them
+- `lib/invoice/reconcile.ts` — the odd-rate note now says which rate could not
+  be stored and that the box has been left empty
+- `app/(app)/projects/[id]/purchases/upload/[uploadId]/review/page.tsx` — an
+  unstorable VAT rate prefills as blank, not `"0"`
+- `components/forms/PurchaseForm.tsx` — the VAT dropdown shows a "— pick —"
+  option when the rate is blank, and shows the validation error under it; a new
+  line no longer inherits a blank rate from the line above
+- `about.md` — §2 rule 4, §4.2, §8.2, §10 and the §12 migrations table
+- `updates.md` — this entry
+
+**Database:**
+`supabase/migrations/0011_vat_reduced_rate.sql` is **written but NOT run.**
+Run it in the Supabase SQL editor before logging a reduced-rate invoice —
+until then, saving a 5% line will fail at the insert. It is re-runnable, it
+only widens a constraint, and it cannot invalidate an existing row: every row
+currently holds 0 or 20. It prints a count of rows per rate at the end.
+
+**Result / numbers after:**
+No existing figure moved — §13 is unchanged, and nothing in the database was
+rewritten. What changes is future invoices: a line printed `10.000EA` at £3.20
+now arrives as qty 10 / unit "EA" / £32.00 (was qty blank / unit "EA"), and a
+5% VAT line now saves £32.00 + £1.60 VAT (was £32.00 + £0.00 — the VAT lost
+entirely). `npm run build` and `npm run lint` both pass. The two normalisers
+were exercised against 18 hand-checked cases covering `10.000EA`, `5 EA`,
+`2BAG`, a genuine `2.4m` unit that must *not* be split, a discounted line that
+must not produce a fabricated quantity, and the 0/5/20/17.5 rates.
+Not yet run against a live extraction — that needs a real invoice through
+`GEMINI_API_KEY`.

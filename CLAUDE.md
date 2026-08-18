@@ -4,12 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## MANDATORY — read first, write last
 
-**Before making any change: read [`about.md`](./about.md).** It is the full
-reference for this project — every table, every field, and exactly how each
-number on each screen is calculated, with file and line references. It also
-lists the known traps that have already caused bugs. Do not re-derive this from
-the code; read it. Then skim the last few entries in `updates.md` for recent
-context.
+
 
 **After making any change: add an entry to [`updates.md`](./updates.md).**
 This is required for *every* change — schema, code, data, docs, however small.
@@ -94,12 +89,12 @@ constraint, so any other value fails at insert.
 - **`diary`** — the week-by-week plan. Powers the Expenses tab *and all Overview
   analytics*. `ProjectDetail.tsx` and `ExpensesTab.tsx` both filter
   `e.source !== "ledger"`.
-- **`ledger`** — imported reference rows shown only in the Trades and
-  Materials & Suppliers tabs.
+- **`ledger`** — reference rows shown only in the Trades and
+  Materials & Suppliers tabs. **Empty since migration `0009` (2026-08-14)**: the
+  workbook that fed it turned out to be a different job. The column and every
+  filter that uses it stay in place — see about.md §3.0 and §5.
 
-No screen sums both. Summing them double-counts overlapping spend, so a raw
-`sum(actual_amount)` across the table is not a meaningful project total. New
-entries default to `diary`.
+No screen sums both, and none should start. New entries default to `diary`.
 
 ### Auth
 
@@ -132,12 +127,19 @@ If the app shows no data:
    are gone, not hidden — RLS was a red herring.
 2. Check `select id, email from auth.users`. A recreated account gets a **new**
    UUID; same email does not mean same user.
-3. Rebuild from the spreadsheets in the repo root, which are the source of truth:
-   set `USER_ID` at the top of `scripts/build_import_sql.py` to the current UUID,
-   run `python3 scripts/build_import_sql.py`, then run the generated
-   `supabase/migrations/0005_reimport_data.sql` in the SQL editor.
+3. Rebuild from `46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` in the
+   repo root, which is the source of truth: set `USER_ID` at the top of
+   `scripts/build_import_sql.py` to the current UUID, run
+   `python scripts/build_import_sql.py`, then run the generated
+   `supabase/migrations/0009_reimport_file1_only.sql` in the SQL editor,
+   **followed by `0008_transaction_core.sql`**.
 
-`0005` is re-runnable — it deletes the prior import of the project first.
+`0009` is re-runnable — it deletes the prior import of the project first.
+Do **not** run `0005`, `0006` or `0007`; all three are superseded and carry
+do-not-run banners.
+
+`Renovation_Cost_Tracker-1.xlsx` is a **different job** and is deliberately not
+imported — see about.md §3.0 before ever adding it back.
 
 ## Changelog
 

@@ -1,15 +1,36 @@
 #!/usr/bin/env python3
 """
-RenovaTrack — rebuild the Supabase data from the source spreadsheets.
+RenovaTrack — rebuild the Supabase data from the source spreadsheet.
 
-Generates supabase/migrations/0007_reimport_weeks_1_23.sql, which recreates the
+Generates supabase/migrations/0009_reimport_file1_only.sql, which recreates the
 project, its expense_entries and its trade_lookups under the CURRENT auth user.
 
-Two source files:
-  File 1  46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx
-          'Week-by-Week Plan' -> 111 diary rows, weeks 1-23
-  File 2  Renovation_Cost_Tracker-1.xlsx
-          'Trades & Labour' + 'Materials & Suppliers' -> 96 ledger rows
+ONE source file, and that is deliberate:
+  46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx
+    'Week-by-Week Plan' -> 111 diary rows, weeks 1-23
+    'Lookups'           -> 16 trade lookups
+
+WHY Renovation_Cost_Tracker-1.xlsx IS NO LONGER IMPORTED  (2026-08-14)
+----------------------------------------------------------------------
+Up to 0007 that second workbook was imported as 96 'ledger' rows. It is a
+different job, not a second record of this one:
+
+  - it names no address; File 1 names 46 Glenferrie Road on both sheets
+  - its dates run 2025-11-02 to 2026-01-25 and STOP a month before File 1's
+    week 1 (2026-02-27). The two ranges do not overlap by a single day
+  - its last entries are carpets, staging and a driveway clean — a finished
+    house — while File 1's week 1 is 'clearance / back to brick'
+  - every one of its rows is 100% paid; File 1 has paid GBP 13,273 of 151,645
+
+It also poisoned the Price Tracker. Its 'Materials & Suppliers' sheet is a
+payment log: the Item column is empty on all 60 rows, Quantity is 1 on all 60,
+and Unit Cost holds THE AMOUNT OF THAT PAYMENT. So a deposit of 416.05 followed
+by a balance of 3,586.00 to Wunda UFH read as one item whose unit price rose
+761.9%. Eleven suppliers were doing this. Since File 1 records no unit costs at
+all, that meant 100% of the Price Tracker's content was instalment payments
+misread as prices.
+
+The workbook stays in the repo as history. It is not deleted, just not imported.
 
 HOW MONEY IS MAPPED  (read this before changing anything)
 --------------------------------------------------------
@@ -55,8 +76,15 @@ USER_ID = "5d3fc9ff-92a3-4923-a18b-7eb5eade3105"  # admin@pk.com, current accoun
 PROJECT_NAME = "46 Glenferrie Road"
 
 FILE1 = ROOT / "46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx"
-FILE2 = ROOT / "Renovation_Cost_Tracker-1.xlsx"
-OUT = ROOT / "supabase" / "migrations" / "0007_reimport_weeks_1_23.sql"
+OUT = ROOT / "supabase" / "migrations" / "0009_reimport_file1_only.sql"
+
+# The spreadsheet's own 'Target Budget (incl. VAT)' cell is blank, so there is
+# no budget to import. 0 is the honest value: OverviewTab, ProjectDetail,
+# the dashboard and the project list all hide the budget card and the
+# '% of budget' bar when it is 0, rather than showing a ratio against a figure
+# that came from somewhere else. Set it in the app's Edit Project form if a
+# real ceiling is ever agreed.
+TARGET_BUDGET = 0.0
 
 # Column indexes into 'Week-by-Week Plan' (0-based, header on sheet row 5).
 C_WEEK, C_DESC, C_CAT, C_TRADE, C_ROOM = 0, 1, 2, 3, 4
@@ -71,6 +99,69 @@ STATUSES = {"Planned", "In Progress", "Paid", "Cancelled"}
 METHODS = {"Cash", "Debit Card", "Credit Card", "Bank Transfer"}
 
 PENNY = 0.011  # tolerance for float comparisons against the sheet
+
+
+# --------------------------------------------------------------- suppliers
+# WHERE THE MERCHANT NAMES ACTUALLY LIVE  (2026-08-17)
+# ----------------------------------------------------------
+# The sheet's 'Supplier' column is not usable. It has only 8 non-empty cells
+# and 7 of them are sentences typed into the wrong column ('steels in',
+# '1 day - to DPC', '£300 PAID FROM OWED'). The merchant names were being
+# typed into 'Task / Description' instead — so before this change /suppliers
+# listed seven notes and one real merchant, and every real merchant was
+# invisible.
+#
+# The list below was confirmed by the project owner. It is exactly the set of
+# distinct descriptions on the sheet's 45 Materials rows — check_suppliers()
+# proves that on every run and ABORTS if the two ever drift apart. So this is
+# a declared mapping, not a heuristic: nothing here guesses which strings
+# "look like" a merchant, and a new Materials row with an unlisted description
+# stops the import rather than silently inventing a supplier.
+#
+# Kept verbatim as the owner wrote them, including the two pairs that are
+# probably one merchant each — 'Johnstones' / 'Johnstones Paint' and
+# 'Steels' / 'Ryan Steels'. Merging near-duplicates is the alias work
+# described in about.md §4.6, where a human confirms each one; it is not this
+# script's job to decide.
+SUPPLIER_NAMES = [
+    "Master Mix",
+    "Steels",
+    "SDE Drainage",
+    "Scaffold",
+    "Lawsons",
+    "Eurocell",
+    "Wunda UFH Materials",
+    "Cabinets Direct (Kitchen)",
+    "Alspec Windows",
+    "Miscl Roofing Materials",
+    "Travis Perkins",
+    "CAD Stairs",
+    "St Albans Bathroom Centre",
+    "Saris",
+    "Todds Doors",
+    "Ryan Steels",
+    "Eaves Electrical",
+    "Johnstones Paint",
+    "JJ Roofing",
+    "Jewsons",
+    "Watts Roofing",
+    "Pro Tiler",
+    "Skips",
+    "Cut Price Tiles",
+    "Plastic Construction",
+    "Metres Direct LTD",
+    "Corston",
+    "Lionvest",
+    "Topps Tiles",
+    "AC Supplies",
+    "Johnstones",
+    "Mark Cornice",
+]
+
+# The one Supplier-column cell that really is a merchant: sheet row 59,
+# week 5, description 'Skip'. It is a Labour row, so the Materials rule below
+# would never reach it. Every other non-empty cell in that column is a note.
+SUPPLIER_COLUMN_MERCHANTS = ["Stevenage Skips"]
 
 
 # ----------------------------------------------------------------- helpers
@@ -196,6 +287,44 @@ def vat_of(v):
     return 20 if n > 0 else 0
 
 
+def name_key(v):
+    """Trim, lower-case, collapse internal whitespace.
+
+    Deliberately the same rule as public.norm_key() in 0008, priceKey() in
+    lib/summary.ts and normaliseName() in lib/purchases.ts. All four must stay
+    in step or the import, the database and the app will disagree about what
+    one merchant is. It is what lets 'CAD Stairs ' (trailing space on the
+    sheet) resolve to the canonical 'CAD Stairs'.
+    """
+    return re.sub(r"\s+", " ", str(v or "").strip().lower())
+
+
+SUPPLIER_BY_KEY = {
+    name_key(n): n for n in SUPPLIER_NAMES + SUPPLIER_COLUMN_MERCHANTS
+}
+
+
+def supplier_of(description, supplier_cell, category):
+    """Resolve a row's merchant, and rescue anything misfiled in Supplier.
+
+    Returns (supplier, misplaced_note):
+      - supplier       the canonical merchant name, or None for a Labour row
+                       that has no merchant behind it
+      - misplaced_note the Supplier cell's text when it is not a merchant —
+                       the caller folds it into notes, which is the column it
+                       should have been typed into in the first place
+
+    Order matters: a Supplier cell naming a known merchant wins, because that
+    is the column actually meant for it. Otherwise a Materials row takes its
+    merchant from the description, which is where they were all typed.
+    """
+    cell = text(supplier_cell)
+    if cell and name_key(cell) in SUPPLIER_BY_KEY:
+        return SUPPLIER_BY_KEY[name_key(cell)], None
+    named = SUPPLIER_BY_KEY.get(name_key(description)) if category == "Materials" else None
+    return named, cell
+
+
 def join_notes(*parts):
     out = [str(p).strip() for p in parts if p not in (None, "")]
     return " | ".join(out) if out else None
@@ -265,21 +394,36 @@ def parse_diary():
         vat = vat_of(r[C_VAT])
         sheet_total = num(r[C_TOTAL])
 
+        category = category_of(r[C_CAT])
+        # The merchant is in the description on Materials rows, not in the
+        # Supplier column — see SUPPLIER_NAMES above. Anything else sitting in
+        # the Supplier column is a note and is moved into notes.
+        supplier, misplaced = supplier_of(description, r[C_SUPPLIER], category)
+        if misplaced:
+            warnings.append(
+                f"row {excel_row} (week {week}, {description!r}): Supplier cell "
+                f"{misplaced!r} is not a merchant — moved into notes"
+            )
+
         out.append({
             "week": week,
             "excel_row": excel_row,
             "description": description,
-            "category": category_of(r[C_CAT]),
+            "category": category,
             "trade": text(r[C_TRADE]),
             "location": text(r[C_ROOM]),
             # Preserve the unparseable date text rather than losing it.
             "notes": join_notes(
                 r[C_NOTES],
+                # What the Supplier cell said, kept verbatim. This is exactly
+                # what moving the cell into 'Dependencies/Notes' on the sheet
+                # would have produced.
+                misplaced,
                 f"Paid date (as written): {raw_date}" if raw_date and not paid_date else None,
                 f"Hours: {num(r[C_HOURS])}" if num(r[C_HOURS]) else None,
                 f"Rate: {num(r[C_RATE])}" if num(r[C_RATE]) else None,
             ),
-            "supplier": text(r[C_SUPPLIER]),
+            "supplier": supplier,
             "invoice": text(r[C_INVOICE]),
             "paid_date": paid_date,
             "method": method_of(r[C_METHOD]),
@@ -315,6 +459,33 @@ def check_arithmetic(diary):
     return bad
 
 
+def check_suppliers(diary):
+    """Prove SUPPLIER_NAMES still describes the spreadsheet exactly.
+
+    The whole mapping rests on one claim: the distinct descriptions of the
+    Materials rows ARE the merchant list the owner confirmed. If someone adds
+    a Materials row for a new merchant, or renames one, that claim stops being
+    true and the import would quietly leave the row with no supplier. This
+    turns that into a hard stop instead.
+    """
+    on_sheet = {name_key(r["description"]) for r in diary if r["category"] == "Materials"}
+    declared = {name_key(n) for n in SUPPLIER_NAMES}
+    bad = []
+    for k in sorted(on_sheet - declared):
+        rows = [r for r in diary if name_key(r["description"]) == k]
+        bad.append(
+            f"Materials row(s) {[r['excel_row'] for r in rows]} describe "
+            f"{rows[0]['description']!r}, which is not in SUPPLIER_NAMES — add it "
+            f"there (after checking with the owner) or the row imports with no supplier"
+        )
+    for k in sorted(declared - on_sheet):
+        bad.append(
+            f"SUPPLIER_NAMES lists {SUPPLIER_BY_KEY[k]!r} but no Materials row on "
+            f"the sheet has that description any more — remove it or fix the sheet"
+        )
+    return bad
+
+
 def parse_week_summary():
     """The Summary sheet's 'By Week (Totals)' block -> {week: total incl VAT}.
 
@@ -326,56 +497,6 @@ def parse_week_summary():
     for r in ws.iter_rows(values_only=True):
         if isinstance(r[0], (int, float)) and r[3] is not None:
             out[int(r[0])] = round(float(r[3]), 2)
-    return out
-
-
-# ----------------------------------------------------------------- File 2
-def parse_ledger():
-    """Trades & Labour + Materials & Suppliers -> ledger reference rows.
-
-    These are a second, overlapping record of the same job. They are shown only
-    on the Trades and Materials tabs and are excluded from every project total —
-    see about.md section 5. Unchanged by the weeks 16-23 update.
-    """
-    wb = openpyxl.load_workbook(FILE2, data_only=True)
-    out = []
-
-    for r in list(wb["Trades & Labour"].iter_rows(values_only=True))[1:]:
-        name = text(r[1]) or ""
-        quoted, actual, paid = num(r[2]), num(r[3]), num(r[4])
-        if not name and quoted == 0 and actual == 0 and paid == 0:
-            continue  # trailing formula-only row
-        out.append({
-            "week": 1, "description": name or "Labour",
-            "category": "Labour",
-            "trade": text(r[0]),
-            "location": None, "notes": join_notes(r[8]),
-            "supplier": name or None, "invoice": None,
-            "paid_date": as_date(r[5]), "method": None,
-            "qty": 0, "unit_cost": 0, "vat": 0,
-            "status": status_of(r[7], paid),
-            "quoted": quoted, "actual": actual or quoted, "paid": paid,
-            "source": "ledger",
-        })
-
-    for r in list(wb["Materials & Suppliers"].iter_rows(values_only=True))[1:]:
-        item = text(r[1]) or ""
-        supplier = text(r[2]) or ""
-        total, paid = num(r[5]), num(r[6])
-        if not item and not supplier and total == 0 and paid == 0:
-            continue
-        out.append({
-            "week": 1, "description": item or supplier or "Materials",
-            "category": "Materials",
-            "trade": text(r[0]),
-            "location": None, "notes": join_notes(r[8]),
-            "supplier": supplier or None, "invoice": None,
-            "paid_date": as_date(r[7]), "method": method_of(r[8]),
-            "qty": num(r[4]), "unit_cost": num(r[3]), "vat": 0,
-            "status": "Paid" if paid > 0 else "Planned",
-            "quoted": total, "actual": total, "paid": paid,
-            "source": "ledger",
-        })
     return out
 
 
@@ -410,6 +531,22 @@ def app_figures(diary):
         "remaining_to_pay": round(forecast - paid, 2),
         "weeks_tracked": len({r["week"] for r in active}),
     }
+
+
+def supplier_report(diary):
+    """Rows and incl-VAT spend per merchant — what /suppliers will show.
+
+    Cancelled rows are excluded, matching ACTIVE in lib/summary.ts and
+    ACTIVE_PURCHASE in lib/purchases.ts.
+    """
+    named = {}
+    for r in diary:
+        if r["status"] == "Cancelled" or not r["supplier"]:
+            continue
+        d = named.setdefault(r["supplier"], {"rows": 0, "gross": 0.0})
+        d["rows"] += 1
+        d["gross"] += r["actual"] * (1 + r["vat"] / 100)
+    return named
 
 
 def print_week_report(diary, sheet_weeks):
@@ -453,30 +590,59 @@ def main():
             print("  " + p)
         raise SystemExit(1)
 
-    ledger = parse_ledger()
-    lookups = parse_lookups()
-    entries = diary + ledger
+    problems = check_suppliers(diary)
+    if problems:
+        print("ABORT — SUPPLIER_NAMES no longer matches the spreadsheet:")
+        for p in problems:
+            print("  " + p)
+        raise SystemExit(1)
 
-    budget = round(sum(e["quoted"] for e in ledger), 2)
+    lookups = parse_lookups()
+    entries = diary  # File 1 only — see the module docstring for why
+
     weeks = sorted({e["week"] for e in diary})
     fig = app_figures(diary)
+    named = supplier_report(diary)
+    with_supplier = sum(1 for r in diary if r["supplier"])
 
     # Only weeks that actually carry rows are worth checking; the sheet lists
     # empty weeks up to 32.
     expected_weeks = [(w, sheet_weeks[w]) for w in weeks if w in sheet_weeks]
 
     sql = [
-        "-- RenovaTrack — reimport the Week-by-Week Plan, now covering weeks 1-23.",
+        "-- RenovaTrack — rebuild from the Week-by-Week Plan alone, weeks 1-23.",
         "-- GENERATED by scripts/build_import_sql.py — do not hand-edit.",
         "--",
         f"-- Owner  : {USER_ID} (admin@pk.com)",
-        f"-- Diary  : {len(diary)} rows, weeks {min(weeks)}-{max(weeks)}  (File 1, 'Week-by-Week Plan')",
-        f"-- Ledger : {len(ledger)} rows                (File 2, unchanged)",
-        f"-- Trades : {len(lookups)} lookups",
+        f"-- Diary  : {len(diary)} rows, weeks {min(weeks)}-{max(weeks)}",
+        "--          (46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx,",
+        "--           'Week-by-Week Plan')",
+        f"-- Trades : {len(lookups)} lookups (same file, 'Lookups')",
+        f"-- Supplrs: {len(named)} merchants on {with_supplier} rows. The sheet's",
+        "--          'Supplier' column is NOT the source: it has 8 non-empty cells",
+        "--          and 7 are notes typed into the wrong column ('steels in',",
+        "--          '£300 PAID FROM OWED'). The merchant names were typed into",
+        "--          'Task / Description' on the Materials rows, and that is where",
+        "--          this import reads them from, against a list confirmed by the",
+        "--          owner (SUPPLIER_NAMES in the script). The 7 notes are moved",
+        "--          into notes, where they belong. Re-run 0008 afterwards to",
+        "--          reseed public.suppliers and link every purchase to one.",
+        "-- Ledger : 0 rows — Renovation_Cost_Tracker-1.xlsx is NO LONGER",
+        "--          imported. It is a different job: it names no address, its",
+        "--          dates (2025-11-02 to 2026-01-25) stop a month before this",
+        "--          project's week 1, and it ends with carpets and staging while",
+        "--          week 1 here is 'clearance / back to brick'. It also broke the",
+        "--          Price Tracker — its Unit Cost column holds the amount of each",
+        "--          instalment, so a 416.05 deposit followed by a 3,586.00 balance",
+        "--          to Wunda UFH read as a 761.9% price rise. The workbook stays",
+        "--          in the repo; it is simply not imported.",
         "--",
-        "-- Supersedes 0005 (weeks 1-15) and 0006 (mark-paid). Do NOT run those",
-        "-- again — this file rebuilds the project from scratch and already sets",
-        "-- the Paid status on every row that has a paid date.",
+        "-- Supersedes 0005, 0006 and 0007. Do NOT run any of those again.",
+        "--",
+        "-- target_budget is set to 0 because the spreadsheet's own 'Target Budget",
+        "-- (incl. VAT)' cell is blank. The budget card and the '% of budget' bar",
+        "-- hide themselves at 0 rather than comparing spend against another job's",
+        "-- total, which is what the old 98,932.12 figure was.",
         "--",
         "-- Money mapping — actual_amount is EX-VAT because the app derives",
         "--   total_incl_vat = actual_amount x (1 + vat_rate/100)",
@@ -509,11 +675,22 @@ def main():
         "    raise exception 'User % not found in auth.users.', v_user;",
         "  end if;",
         "",
-        "  -- Idempotency: clear any prior import of this project.",
+        "  -- Idempotency: clear any prior import of this project. Cascades to",
+        "  -- expense_entries, project_weeks, and (from 0008) purchases with their",
+        "  -- lines, payments and receipt rows.",
         f"  delete from public.projects where user_id = v_user and name = {q(PROJECT_NAME)};",
         "",
+        "  -- 0008's suppliers and items sit ABOVE the project, so the delete above",
+        "  -- does not reach them: without this, every merchant seeded from the old",
+        "  -- File 2 import would linger on /suppliers and /items with no purchase",
+        "  -- behind it. Aliases cascade; purchases.supplier_id and",
+        "  -- purchase_lines.item_id are 'on delete set null', so nothing else",
+        "  -- breaks. Re-run 0008 afterwards to reseed them from what is left.",
+        "  delete from public.items     where user_id = v_user;",
+        "  delete from public.suppliers where user_id = v_user;",
+        "",
         "  insert into public.projects (user_id, name, target_budget, status, notes)",
-        f"  values (v_user, {q(PROJECT_NAME)}, {budget}, 'active',",
+        f"  values (v_user, {q(PROJECT_NAME)}, {TARGET_BUDGET}, 'active',",
         f"          'Imported from the Week-by-Week Plan, weeks 1-{max(weeks)}.')",
         "  returning id into v_project;",
         "",
@@ -533,7 +710,7 @@ def main():
         f"  select v_user, v_project, generate_series(1, {max(weeks)}), 0",
         "  on conflict (project_id, week_number) do nothing;",
         "",
-        f"  raise notice 'Imported project % ({len(diary)} diary + {len(ledger)} ledger rows).', v_project;",
+        f"  raise notice 'Imported project % ({len(diary)} diary rows, no ledger).', v_project;",
         "end $$;",
         "",
         "-- ------------------------------------------------------------------",
@@ -587,8 +764,17 @@ def main():
         "commit;",
         "-- rollback;  -- use instead of commit if the numbers look wrong",
         "",
+        "-- ==================================================================",
+        "-- NEXT STEP: run 0008_transaction_core.sql again, immediately.",
+        "-- It is re-runnable. Its backfill was wiped by the project delete",
+        "-- above (purchases.project_id is on delete cascade), and its suppliers",
+        "-- and items were cleared on purpose so the old File 2 merchants do not",
+        "-- linger. Until you re-run it, /suppliers and /items will be empty.",
+        "-- ==================================================================",
+        "",
         "-- ------------------------------------------------------------------",
         "-- Report. Compare these against the spreadsheet's Summary tab.",
+        "-- 'Ledger rows' must now be 0.",
         "-- ------------------------------------------------------------------",
         "select 'Total Quoted'      as card, sum(quoted_amount)                          as value",
         "from public.expense_entries e join public.projects p on p.id = e.project_id",
@@ -627,13 +813,21 @@ def main():
     print(f"wrote {OUT.relative_to(ROOT)}")
     print(f"  source : {FILE1.name}")
     print(f"  diary  : {len(diary)} rows (weeks {min(weeks)}-{max(weeks)})")
-    print(f"  ledger : {len(ledger)} rows")
+    print("  ledger : 0 rows — Renovation_Cost_Tracker-1.xlsx is a different job")
     print(f"  lookups: {len(lookups)}")
     print(f"  paid   : {sum(1 for r in diary if r['paid'] > 0)} rows")
     print("  every row's ex-VAT + VAT reproduces the sheet's Total column")
 
+    print(f"\nSuppliers: {len(named)} distinct on {with_supplier} of "
+          f"{len(diary)} rows ({len(diary) - with_supplier} rows have no merchant "
+          "behind them — labour and subcontractors)")
+    for name in sorted(named, key=lambda n: (-named[n]["rows"], n.lower())):
+        d = named[name]
+        print(f"  {name:<28} {d['rows']:>2} row(s)  £{d['gross']:>10,.2f} incl VAT")
+
     print("\nOverview cards this import will produce:")
-    print(f"  Target Budget      £{budget:,.2f}   (File 2 ledger quoted — unchanged)")
+    print(f"  Target Budget      £{TARGET_BUDGET:,.2f}   (the sheet's own cell is blank; "
+          "the card hides itself at 0)")
     print(f"  Total Quoted       £{fig['total_quoted']:,.2f}")
     print(f"  Actual Total       £{fig['forecast_total']:,.2f}")
     print(f"  Variance vs Quote  £{fig['variance']:,.2f}")

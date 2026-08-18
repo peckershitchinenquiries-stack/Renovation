@@ -172,6 +172,16 @@ export default function ProjectDetail({
             )}
           </div>
 
+          {/* The multi-line invoice screens live outside the five tabs: they
+              read the transaction core rather than expense_entries, so they
+              are a route of their own rather than a sixth tab (about.md §8.2). */}
+          <Link
+            href={`/projects/${project.id}/purchases`}
+            className="btn-secondary"
+          >
+            Invoices
+          </Link>
+
           <Link href={`/projects/${project.id}/edit`} className="btn-secondary">
             Edit
           </Link>

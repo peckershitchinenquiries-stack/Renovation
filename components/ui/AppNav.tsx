@@ -6,18 +6,24 @@ import { useEffect, useState } from "react";
 import { SignOutButton } from "./SignOutButton";
 
 const NAV = [
+  // Dashboard is the only project list — the old /projects list showed the same
+  // projects with less information, so it was removed.
   { href: "/dashboard", label: "Dashboard", icon: "▦" },
-  { href: "/projects", label: "Projects", icon: "🏠" },
+  // Suppliers and Items are cross-project: they sit above the project, which is
+  // the point of the transaction core (about.md §4.6).
+  { href: "/suppliers", label: "Suppliers", icon: "🏬" },
+  { href: "/items", label: "Items", icon: "📦" },
   { href: "/projects/new", label: "Add Project", icon: "＋" },
   { href: "/settings", label: "Settings", icon: "⚙" },
 ];
 
 function isActive(pathname: string, href: string) {
-  // /projects covers the list and any project detail page, but not /projects/new,
-  // which is its own nav item.
-  if (href === "/projects")
+  // Project detail pages are reached from the dashboard and have no nav item of
+  // their own, so Dashboard stays lit while you are inside one. /projects/new is
+  // its own item and must not count.
+  if (href === "/dashboard")
     return (
-      pathname === "/projects" ||
+      pathname === "/dashboard" ||
       (/^\/projects\/[^/]+/.test(pathname) &&
         !pathname.startsWith("/projects/new"))
     );

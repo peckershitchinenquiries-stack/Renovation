@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import openpyxl; print\\(openpyxl.__version__\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 python -)"
+    ]
+  }
+}

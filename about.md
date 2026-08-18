@@ -55,8 +55,9 @@ migration file does not apply it. Always tell the user to run it.
 3. **Never add `.eq("user_id", …)` to a query.** RLS does the scoping. But
    a new table with no RLS policy returns nothing — or leaks everything if RLS
    is left disabled.
-4. **CHECK constraints reject, they don't coerce.** A `vat_rate` of 5 fails the
-   insert outright. Match the allowed value lists in §4 exactly.
+4. **CHECK constraints reject, they don't coerce.** A `vat_rate` of 17.5 fails
+   the insert outright (0, 5 and 20 are the allowed rates since `0011` — 5 was
+   rejected too before that). Match the allowed value lists in §4 exactly.
 5. **`on delete cascade` on every `user_id`.** Deleting an auth user destroys
    all their data. This has already happened once — see §11.
 
@@ -298,7 +299,7 @@ the owner does not track them.
 | `paid_amount` | numeric(12,2) | ≥ 0. What has been handed over, **ex-VAT** |
 | `qty` | numeric(10,2) | ≥ 0. Materials only |
 | `unit_cost` | numeric(12,2) | ≥ 0. Materials only — drives the Price Tracker |
-| `vat_rate` | numeric(5,2) | **exactly `0` or `20`** |
+| `vat_rate` | numeric(5,2) | **exactly `0`, `5` or `20`** — `5` added by `0011` |
 | `status` | text | `Planned` \| `In Progress` \| `Paid` \| `Cancelled` |
 | `source` | text | `diary` \| `ledger`, default `diary` — see §5 |
 | `receipt_url` | text | path in the private `receipts` storage bucket |
@@ -814,6 +815,118 @@ it today.**
 | `/` | `app/page.tsx` | login |
 | `/reset-password` | `reset-password/page.tsx` | password reset |
 
+> The table above predates Phase 2 and was never brought up to date with the
+> `purchases` routes — it is missing `/projects/[id]/purchases`,
+> `/purchases/new` and `/purchases/[pid]/edit` even though all three exist and
+> work. Flagged, not fixed, here — out of scope for this change.
+
+### 8.2 Invoice upload (Phase 5a) — getting a file into extraction
+
+Three more routes, added 2026-08-17, all under `/projects/[id]/purchases/`:
+
+| Route | File | Shows |
+|---|---|---|
+| `/purchases/add` | `add/page.tsx` | chooser: **Upload invoice** or **Enter manually** |
+| `/purchases/upload` | `upload/page.tsx` → `UploadInvoicePanel.tsx` | drag-drop / camera upload queue, one row per file |
+| `/purchases/upload/[uploadId]/review` | `upload/[uploadId]/review/page.tsx` | the review-and-correct screen (Phase 5b) — see below |
+
+Both places that used to link straight to `/purchases/new` (the "+ Log
+invoice" button and the empty-state action on `/purchases`) now link to
+`/purchases/add` instead. `/purchases/new` itself is unchanged — manual entry
+reaches exactly the same `PurchaseForm` it always did.
+
+**`UploadInvoicePanel.tsx`** (Client Component) drives each file through:
+`POST /api/invoices/upload-url` → `PUT` straight to the returned signed URL
+(a hand-rolled `XMLHttpRequest`, not the Supabase SDK's own
+`uploadToSignedUrl`, because the SDK's version reports no upload progress and
+a 12MB phone photo is not instant) → `POST /api/invoices/[id]/extract`. The
+file itself never reaches a Next.js route — the same 4.5MB-body-cap reason
+`upload-url/route.ts` is built the way it is.
+
+Several files can be queued at once, each with its own row and status, so one
+failure never blocks the others. Once extraction starts, a Supabase Realtime
+subscription on that `invoice_uploads` row is the primary way the UI learns
+the outcome; a poll every few seconds runs alongside it from the start and
+only backs off (never stops outright) once Realtime confirms it connected —
+so a dropped Realtime connection still resolves, just more slowly. A `failed`
+row shows the stored error with **Retry** (re-`POST`s `/extract` on the same
+row if the file already made it to storage, or resumes from the top if it
+didn't) and **Enter manually instead**, which goes to the same unchanged
+`/purchases/new`.
+
+**The review screen (Phase 5b).** An `extracted` row links to
+`/purchases/upload/[uploadId]/review`, a Server Component. It re-validates
+`extraction_raw` with `parseExtraction`, re-resolves the supplier and every
+line's item against the *current* `suppliers`/`items` tables (not the
+snapshot the extract route saw — a supplier added since then still matches),
+builds a `PurchaseFormPrefill`, and renders the signed-URL original next to
+`components/forms/PurchaseForm.tsx`, prefilled. **There is exactly one
+purchase form component in the codebase** — `new/page.tsx`, `[pid]/edit/page.tsx`
+and this review page all render the same `PurchaseForm`, which gained six new
+*optional* props (`prefill`, `invoiceUploadId`, `supplierResolution`,
+`lineResolutions`, `extractedTotals`, `documentNotes`) that manual entry and
+editing never pass, so neither of those paths' behaviour changed.
+
+What the added props drive:
+
+- **Supplier field branches on `resolve.ts`'s confidence band.** `certain` —
+  preselected, collapsed to a confirmed line with a "Change" link. `likely` /
+  `possible` — a candidate list with match scores plus "None of these — add
+  new supplier". `none` — the new-supplier fields
+  (`components/purchases/SupplierFields.tsx`, extracted so a future
+  standalone supplier-creation screen can reuse it) shown already expanded
+  and prefilled from the draft, with a collapsed "Search existing suppliers
+  instead" link above it. Every branch also offers that search fallback, so
+  a weak or absent match is never a dead end.
+- **Same pattern per line**, but lighter: `PurchaseForm`'s own exact-match
+  lookup already covers `resolve.ts`'s "certain" tier, so only a `likely` /
+  `possible` fuzzy suggestion shows anything extra — "Looks like X (72%
+  match) — Use this item / It's new". Confirming sets that line's `item_id`
+  (previously always `null`) alongside rewriting the description to the
+  canonical spelling.
+- **Reconciliation warnings render at the field they're about, live**, not a
+  banner: the printed net and VAT totals are compared against the *current*
+  line totals on every render (so editing a line updates the warning), and
+  the printed gross is compared through the pre-existing "Invoice total as
+  printed" check by simply prefilling it — one mechanism, not two.
+- **The duplicate-invoice check is the pre-existing one**, `PurchaseForm`'s
+  own `duplicateInvoice` memo against `bundle.invoices` (already loaded
+  across every project). It fires the moment the form mounts, prefilled, so
+  it is effectively "before the screen renders its interactive state" without
+  a second implementation — just gained a link to the existing purchase.
+- **Save posts to `/api/invoices/[id]/commit`**, with a `supplier` decision
+  object (`existing` / `new`) built from which branch the user is in, and
+  lands on `/purchases/[id]/edit` — the created purchase — rather than the
+  list, unlike manual entry.
+
+**Two things the extraction used to lose on the way to that form, fixed
+2026-08-18.** Both were silent — a wrong or empty field on a screen whose whole
+job is being trusted at a glance:
+
+- **The quantity, when the invoice printed it stuck to the unit.** Merchant
+  invoices print the quantity column as `10.000EA` / `5EA` / `2BAG`, and once a
+  PDF's layout is gone that arrives as one token; the extractor returned
+  `unit: "EA"` with `qty: null`. The prompt asks for them split, but asking is
+  not a guarantee — a prompt-only fix earlier the same day did not hold — so
+  `splitQtyFromUnit()` in `lib/invoice/normalise.ts` now does it
+  deterministically, and a quantity is *only* taken from the unit when none was
+  read. As a last resort, a missing qty is derived from `line_net / unit_price`
+  when that comes out **whole** and multiplies back to the printed total to the
+  penny; a fractional result means a discount or part-load and is left blank.
+- **The VAT rate, when it wasn't 0 or 20.** `normaliseVatRate` dropped anything
+  else to null and the prefill defaulted the field to `"0"`, so a 5% invoice —
+  ordinary on residential renovation work — saved as zero-rated and its VAT
+  vanished from every total. `0011` widened the CHECK to 0/5/20 and the rate the
+  document prints is now the rate that is kept. A rate still outside the set
+  (17.5%, or a misread) leaves the box **empty**, not zero: `documentNotes()`
+  names the rate that could not be stored and `validatePurchase` refuses to save
+  until a human picks one.
+
+**Known limitation, not fixed here:** the review page's signed read URL is
+valid for 10 minutes; a review left open longer needs a reload. `about.md`
+§8.2's earlier 5-minute figure was for the `GET /api/invoices/[id]` route,
+which this page does not use — it signs its own URL directly.
+
 ### Navigation — `components/ui/AppNav.tsx`
 
 Two components, rendered together by `app/(app)/layout.tsx`; each is hidden at
@@ -969,7 +1082,13 @@ Runs **both** client-side and server-side from the same file,
   in the allowed set.
 - `validateExpense` — `week_number` a positive integer; description required,
   ≤ 200 chars; category in the allowed set; all five amounts ≥ 0;
-  **`vat_rate` exactly 0 or 20**; status and payment method in their sets.
+  **`vat_rate` one of `VAT_RATES` — 0, 5 or 20**; status and payment method in
+  their sets.
+- `validatePurchase` — the header, plus every line and payment. On a line,
+  **a blank `vat_rate` is its own error** ("Pick the VAT rate printed on the
+  invoice"), separate from an out-of-set one: the invoice review screen leaves
+  the box empty when the document printed a rate the CHECK will not take, and
+  a blank that silently saved as 0% is exactly the bug §8.2 describes.
 - `lib/expense.ts` → `buildExpensePayload()` normalises a form body into a DB
   payload — coerces the six numeric fields, maps `""` → `null`, defaults
   `status` to `Planned`.
@@ -1062,6 +1181,8 @@ place. The same deletion would cause the same loss again.
 | `0007_reimport_weeks_1_23.sql` | full rebuild from both spreadsheets, weeks 1–23. **Superseded by 0009 — do not run.** It re-imports the other job's 96 ledger rows and restores the £98,932.12 budget | ⚠️ ran 2026-08-14 |
 | `0008_transaction_core.sql` | the Route C transaction core: 8 new tables, `norm_key()`, RLS, the backfill of every expense row into one purchase + one line, and `expenses_view`. Additive — changes nothing that already existed. Re-runnable | ✅ ran 2026-08-14 |
 | `0009_reimport_file1_only.sql` | rebuild from `..._Updated.xlsx` **alone**: 111 diary rows, 0 ledger rows, `target_budget = 0`, and **33 real merchants in `supplier`** (§3.2). Also clears `suppliers` and `items`, which `0008` seeds but never prunes. **Generated** by `scripts/build_import_sql.py`. Idempotent, and **aborts the transaction unless every week total equals the spreadsheet's** | ⬜ **not yet run** |
+| `0010_invoice_upload.sql` | `invoice_uploads`, supplier VAT number / address, pg_trgm + the two `match_*` RPCs. Additive and re-runnable | ⚠️ run status not recorded here — the upload and review screens only work once it has been run; see `updates.md` |
+| `0011_vat_reduced_rate.sql` | widens the `vat_rate` CHECK on **both** `expense_entries` and `purchase_lines` from `(0,20)` to `(0,5,20)`, so a reduced-rate invoice can be stored as the rate it prints (§8.2). Drops whatever CHECK on those tables mentions `vat_rate`, whatever it is named, and re-adds a named one — re-runnable. Cannot invalidate a row: every existing row holds 0 or 20, so no §13 figure moves | ⬜ **not yet run** |
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.
