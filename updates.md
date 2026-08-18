@@ -548,3 +548,863 @@ Category said. The app splits Labour from Materials using the Category column,
 so it shows the real figures. Week totals — which is what every card and the
 chart use — are identical either way. The verification script prints both side
 by side and explains it.
+
+---
+
+### 2026-08-14 — Written the build instructions for the next three phases
+
+**What changed (in plain English):**
+A new document, `phase_prompts.md`, containing three ready-to-use briefs — one
+each for Phase 0, Phase 1 and Phase 3 of the "Route C" restructure described in
+`renovatrack_evolution_summary.md`. Nothing in the app, the database or the
+data changed. This is planning paperwork only.
+
+Phase 0 is the new set of tables (suppliers, materials, invoices with several
+lines on them, and payments as their own records) plus a one-off copy of the
+existing expense rows into that new shape, with every current screen left
+alone. Phase 1 is the pair of read-only screens that pays for it: pick a
+supplier and see everything ever bought from them with what is still owed, or
+pick a material and see what it has cost over time. Phase 3 is bulk-importing a
+spreadsheet through a review screen where nothing saves until it is accepted
+row by row. Phases 2, 4 and 5 are left for later.
+
+**Why:**
+The evolution summary describes what to build but not how to build it inside
+*this* project, which has several rules that are easy to trip over — VAT is
+applied on reading, not stored; the "diary" and "ledger" rows overlap and must
+never be added together; new tables are invisible without a security policy;
+migrations are pasted in by hand. Each brief carries those rules with it, so
+they do not have to be rediscovered three times.
+
+Three things worth flagging that the briefs now handle explicitly:
+
+- **Migration `0007` still has not been run.** Until it is, the database holds
+  40 rows for weeks 1–15, not the 111 rows for weeks 1–23 the spreadsheet now
+  describes. Phase 0 copies whatever is actually in the database, and running
+  `0007` afterwards would delete the rows it was built from. The document says
+  to settle this first.
+- **The diary/ledger split has to survive the move.** The new invoice table
+  gets its own column to carry it, kept separate from the column recording
+  where the data came from.
+- **Nothing computed gets stored.** What is still owed on an invoice is worked
+  out on every read as the invoice total minus its payments, matching how the
+  rest of the app already works.
+
+**Where the information came from:**
+`renovatrack_evolution_summary.md` (the untracked planning document in the repo
+root), plus the current schema and rules as documented in `about.md`. User
+request: "write claude code prompt to implement phase 0, phase 1, phase 3".
+
+**Files used (read, not changed):**
+- `renovatrack_evolution_summary.md`, `about.md`, `updates.md`, `CLAUDE.md`
+- `supabase/migrations/0001_init.sql`, `types/index.ts`, `lib/data.ts`,
+  `package.json`, `components/ui/AppNav.tsx`
+
+**Files changed:**
+- `phase_prompts.md` — **new.** The three briefs, plus a note on the order they
+  must run in and what each one leaves behind
+- `updates.md` — this entry
+
+**Database:**
+None. No migration written and none run. The briefs reserve
+`0008_transaction_core.sql` for Phase 0 and `0009_import_staging.sql` for
+Phase 3; neither file exists yet.
+
+**Result / numbers after:**
+No figure moved. Everything in `about.md` §13 is unchanged.
+
+---
+
+### 2026-08-14 — Weeks 16–23 went live, and the new invoice tables were built (Phase 0)
+
+**What changed (in plain English):**
+
+Two things happened today.
+
+First, migration `0007` was finally run in the Supabase SQL editor. That is the
+one written on 6 August that rebuilds the project from the spreadsheet with all
+23 weeks in it. The app had been showing only the first 15 weeks until now.
+Nothing about it changed today — it was simply run.
+
+Second, and this is the new work: the app now has a proper set of tables for
+suppliers, materials, invoices and payments sitting alongside the old ones, and
+every existing cost row has been copied into that new shape. **No screen
+changed.** Everything looks and behaves exactly as it did this morning. This is
+the groundwork — the useful screens come next.
+
+The idea, in plain terms. Today a cost is one row that mashes several different
+things together: the shop, the item, the invoice it came on, and the payment for
+it. That is why "Lawson", "Lawsons" and "Lawson Bldg Supplies" look like three
+different merchants, why an invoice with six things on it has to be typed as six
+separate rows that no longer know they belong together, and why "what did I owe
+Lawson on the 14th?" cannot be answered. The new tables separate those things
+out:
+
+- **Suppliers** and **materials** get their own records, each with a list of the
+  different spellings that mean the same thing.
+- **A purchase** is now the document — one invoice, with however many **lines**
+  on it.
+- **A payment** is its own record, with its own date, amount and method. There
+  can be several against one invoice.
+- **What is still owed is no longer written down anywhere.** It is worked out
+  every time it is shown: the invoice total minus the payments against it. A
+  written-down balance goes stale; a calculated one cannot.
+
+**Why:**
+This is Phase 0 of the plan in `renovatrack_evolution_summary.md`. The four
+problems it is aimed at — unreliable supplier grouping, no multi-line invoices,
+no payment dates, and no way to import a spreadsheet — all come from the same
+root: one row is being asked to be four things at once. Everything else in the
+plan is built on top of this step.
+
+**Where the information came from:**
+`renovatrack_evolution_summary.md` (the Route C schema outline and the Phase 0
+list), the briefs written yesterday in `phase_prompts.md`, and the existing
+schema and rules as documented in `about.md`. The data itself came from
+`expense_entries` — no spreadsheet was re-read today. User request: "i ran 0007
+sql file, now implement phase 0".
+
+**Files used (read, not changed):**
+- `about.md`, `updates.md`, `CLAUDE.md`, `renovatrack_evolution_summary.md`
+- `supabase/migrations/0001_init.sql` and `0007_reimport_weeks_1_23.sql` — for
+  the house style: how policies, triggers, self-checks and the end-of-file
+  report are written here
+- `lib/calculations.ts`, `lib/summary.ts`, `lib/data.ts`
+
+**Files changed:**
+- `supabase/migrations/0008_transaction_core.sql` — **new.** The whole of Phase
+  0: eight tables (`suppliers`, `supplier_aliases`, `items`, `item_aliases`,
+  `purchases`, `purchase_lines`, `payments`, `receipts`), their security
+  policies, the copy of the old rows into the new shape, and a
+  backwards-compatible view
+- `types/index.ts` — the matching TypeScript types, plus `PurchaseComputed` for
+  the worked-out paid / balance / status figures
+- `lib/purchases.ts` — **new.** Works out what is paid, what is outstanding, and
+  whether an invoice is Paid, Partial or Pending. The same job
+  `lib/calculations.ts` does for the old rows, and it stores nothing
+- `about.md` — new §4.6 describing the eight tables and exactly how each old
+  column became a new one; new §7.1 on the compatibility view; a note in §5 that
+  the diary/ledger split is carried onto the new tables; §12 updated (`0007` now
+  run, `0008` added); §13 reworded now that `0007` is live
+- `phase_prompts.md` — the "before you start" note replaced with the current
+  status
+- `updates.md` — this entry
+
+**Database:**
+
+`supabase/migrations/0007_reimport_weeks_1_23.sql` — **run today** by the owner
+in the Supabase SQL editor. This is what moved the headline figures below.
+
+`supabase/migrations/0008_transaction_core.sql` — **written, NOT yet run.** It
+must be pasted into the Supabase SQL editor and run by hand, like every other
+migration here. Until then the new tables do not exist, and nothing is different
+in the app.
+
+Three things make `0008` hard to get wrong:
+
+- **It checks itself before saving anything.** It will not commit unless every
+  row's total survives the copy to within half a penny, the diary and ledger
+  money each add up to what they did before, the row counts line up, and the
+  compatibility view reproduces the old table field by field. Any failure rolls
+  the whole thing back and nothing is saved.
+- **It is safe to run more than once.** It clears its own previous copy first.
+- **It prints a report** at the end: the old and new totals side by side, a row
+  count per table, and the Overview cards recomputed from the new tables so they
+  can be read straight off against `about.md` §13.
+
+It must be run **after** `0007`, never before. `0007` deletes and rebuilds the
+project, and the new tables hang off the project, so running `0007` afterwards
+would take the copy with it. The fix, if that ever happens, is simply to run
+`0008` again.
+
+Two judgement calls worth recording, because they are the kind of thing that
+looks like a bug later:
+
+- **Suppliers and materials were seeded literally, not cleverly.** Every
+  distinct spelling became its own record, so "Lawson" and "Lawsons" are two
+  suppliers today. Nothing was merged by guesswork. Merging them is Phase 3's
+  job, where each merge is confirmed by a human and remembered afterwards.
+- **The purchase date is really the paid date.** The spreadsheet never had a
+  purchase-date column — the only date it carried was a hand-typed Paid Date —
+  so that is what was used, and it is empty on the 91 rows that were never paid.
+  This is already how the Price Tracker orders purchases, so it is not a new
+  compromise, but it does mean the price timeline in Phase 1 will be ordered by
+  payment rather than purchase for the historic data. Real purchase dates start
+  arriving with the importer in Phase 3.
+
+**Result / numbers after:**
+
+From running `0007` (the eight new weeks going live):
+
+| | before | after |
+|---|---|---|
+| Weeks tracked | 15 | 23 |
+| Diary rows | 40 | 111 |
+| Total Quoted | £42,411.81 | £151,644.78 |
+| Actual Total (incl VAT) | £43,686.17 | £151,644.78 |
+| Variance vs Quote | £1,274.36 over | £0.00 |
+| Paid to Date | £13,273.40 | £13,273.40 |
+| Remaining to Pay | £30,412.77 | £138,371.38 |
+| Budget used | 44% | 153% |
+| Ledger rows | 96 | 96 |
+
+From this Phase 0 work: **no figure moved at all**, and that is the point. Once
+`0008` is run there will be 207 purchases with 207 lines and 20 payments
+alongside the 207 expense rows, holding the same money twice in two shapes. The
+migration will not commit unless those two shapes agree.
+
+**Verified:**
+- `npm run build` passes — the project's full typecheck.
+- `python scripts/verify_against_spreadsheet.py` passes every check, unchanged:
+  111 of 111 rows, all 23 week totals, all six Overview cards.
+- No screen was touched, so there was nothing to check in the browser.
+- `0008` itself has **not** been verified against a live database, because it
+  has not been run. Its own self-checks and end-of-file report are the check —
+  read the report against `about.md` §13 after running it.
+
+---
+
+### 2026-08-14 — Supplier and item pages went in (Phase 1)
+
+**What changed (in plain English):**
+
+The app has two new sections, **Suppliers** and **Items**, both in the top menu.
+
+- **Suppliers** lists everyone you have bought from, with how much has been
+  spent with each and how much is still owed. Click one and you get what is
+  essentially that merchant's account statement: every purchase, newest first,
+  with its date, invoice number, project, total, what was paid, what is left,
+  when it was paid and by what method, and a running total down the side. Each
+  purchase opens up to show the individual things on it and the payments
+  against it.
+- **Items** lists every material and job you have bought. Click one and you get
+  its price history — every time you bought it, from which supplier, on which
+  project, at what price per unit, and whether that was up or down on the time
+  before.
+
+So "when did I last buy sand from Lawson, and what did it cost?" is now one
+click. That was the whole point of the plan.
+
+Three things about these screens are deliberate and are the kind of thing that
+looks like a bug if you don't know:
+
+- **Diary and ledger money is shown in separate columns and never added
+  together.** They are two overlapping records of the same job — the
+  week-by-week plan and the imported cost tracker — so a single combined "total
+  spend" would count much of the same money twice. Each page says this on
+  screen rather than hiding it. The supplier list is even *sorted* by how many
+  records a supplier has rather than by money, for the same reason.
+- **Lots of items show no unit price, and that is correct.** The week-by-week
+  spreadsheet has no quantity or unit-cost column filled in on any of its 111
+  rows, so those purchases genuinely never recorded a price per unit. The
+  screens show a dash rather than inventing a zero. All the real price history
+  comes from the imported cost tracker.
+- **A percentage is never shown across two different units.** If you bought
+  something by the bag last time and by the tonne this time, you get
+  "bag → tonne — check pack size" instead of a made-up number. A price warning
+  that lies once gets ignored for ever, so it was worth doing properly. Today
+  no row records a unit at all, so this rule is waiting for the importer — but
+  it is in place before the data that needs it arrives, not after.
+
+**Nothing else changed.** No existing screen, no existing figure, no database
+change. The old tables still feed the five project tabs exactly as before.
+
+**Why:**
+Phase 1 of the plan in `renovatrack_evolution_summary.md`. Phase 0 (done on the
+same day) put the data into the right shape but nothing displayed it; this is
+the part that makes it useful. It is read-only on purpose — adding and editing
+invoices is Phase 2, and importing spreadsheets is Phase 3.
+
+**Where the information came from:**
+No new data. Everything on these screens is read from the `purchases`,
+`purchase_lines`, `payments`, `suppliers` and `items` tables that migration
+`0008` created and filled from the existing cost rows. The brief is the
+"Phase 1" section of `phase_prompts.md`. User request: "i ran 0008 sql file, now
+implement phase 1".
+
+**Files used (read, not changed):**
+- `CLAUDE.md`, `about.md`, `updates.md`, `renovatrack_evolution_summary.md`,
+  `phase_prompts.md`
+- `supabase/migrations/0008_transaction_core.sql` — for the exact column
+  meanings, especially which amounts include VAT
+- `lib/summary.ts`, `lib/calculations.ts` — so the new figures use the same
+  rounding tolerance, the same £ formatting and the same "exclude cancelled"
+  rule as the existing ones
+- `components/project/PricesTab.tsx`, `components/ui/StatCard.tsx`,
+  `components/ui/States.tsx`, `app/(app)/dashboard/page.tsx` — for the existing
+  look and the mobile-card / desktop-table pattern
+- `scripts/build_import_sql.py` — to confirm which spreadsheet columns ever
+  carried a supplier or a unit cost
+
+**Files changed:**
+- `app/(app)/suppliers/page.tsx`, `app/(app)/suppliers/[id]/page.tsx`,
+  `app/(app)/items/page.tsx`, `app/(app)/items/[id]/page.tsx` — **new.** The
+  four screens, plus a `loading.tsx` beside each one
+- `lib/data.ts` — four new loaders: `getSuppliers`, `getSupplierBundle`,
+  `getItems`, `getItemBundle`
+- `lib/purchases.ts` — the new worked-out figures: timeline ordering, unit
+  comparison, price change, and per-source totals
+- `types/index.ts` — the shapes those loaders return
+- `components/purchases/PurchaseExpander.tsx`,
+  `components/purchases/PriceMoveBadge.tsx`,
+  `components/purchases/SourceNote.tsx` — **new**, shared bits of the screens
+- `components/ui/AppNav.tsx` — Suppliers and Items added to the menu (one array
+  feeds both the desktop bar and the mobile drawer)
+- `components/ui/Badge.tsx` — two new colours, for the diary and ledger labels
+- `about.md` — new §8.1 describing the four routes and the three rules they are
+  built on; §7 now lists every derived function in `lib/purchases.ts`; §4.6 and
+  §5 updated now that something reads the new tables; §12 marks `0008` as run
+- `updates.md` — this entry
+
+**Database:**
+None. No migration was written and none was run — Phase 1 is a reading layer
+over the tables `0008` already created.
+
+`supabase/migrations/0008_transaction_core.sql` was **run by the owner in the
+Supabase SQL editor** before this work started. Confirmed from here: all seven
+new tables and the `expenses_view` view exist in the live database. (A table
+that does not exist answers with a different error than one that exists but is
+not readable, which is how this was checked without read access — see
+"Verified" below.)
+
+**Result / numbers after:**
+No figure moved. Everything in `about.md` §13 is unchanged, because nothing that
+feeds those cards was touched. The new screens read different tables and are
+labelled as covering all projects, not one.
+
+**Verified:**
+- `npm run build` passes — the project's only full typecheck. All four new
+  routes build as server-rendered pages carrying **195 B** of JavaScript each,
+  i.e. none of their own; the expand/collapse is a plain HTML `<details>`.
+- `0008` confirmed applied: probing the live database, every new table returns
+  "permission denied" (exists) rather than "could not find the table" (does
+  not). `expenses_view` is the last object `0008` creates, after all of its
+  self-checks, so its existence means the whole migration committed.
+- **Not verified in the browser, and this is outstanding.** The pages sit behind
+  the login, the dev server was not started, and the Supabase keys in `.env`
+  cannot read rows from here — they are refused on `expense_entries` too, so
+  that is a pre-existing key/privilege matter and nothing to do with this work.
+  The row counts and one hand-checked supplier balance still need looking at on
+  screen. See the note at the end of this entry.
+
+**Still to check on screen (next session or by the owner):**
+1. `/suppliers` and `/items` show rows at all — if either is empty while the
+   project tabs have data, something is wrong with the `0008` backfill, and the
+   empty state on those pages says exactly that.
+2. One supplier's Outstanding equals its Gross minus its Paid, by hand.
+3. Both pages at phone width.
+
+**Implemented Phase2:**
+
+Phase 2: Multi-line Invoice Entry (manual form)
+Pick supplier, date, invoice number
+Add N lines, each with item, qty, unit, unit price
+Duplicate and price warnings move to the line level (now you see which material)
+Outcome: Real invoices can be logged without losing structure
+
+---
+
+### 2026-08-14 — Dropped `Renovation_Cost_Tracker-1.xlsx`: it was a different job
+
+**What changed (in plain English):**
+The app used to be built from **two** spreadsheets. It is now built from **one**
+— `46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx`. The second workbook,
+`Renovation_Cost_Tracker-1.xlsx`, was contributing 96 rows and the project's
+Target Budget, and it is not this house. Those 96 rows are removed and the
+budget is cleared.
+
+**Why:**
+The owner spotted that the Price Tracker showed **two Wunda UFH entries with a
+761.9% price difference**, when the Materials tab correctly showed just one
+Wunda entry (£500.49 + 20% VAT = £600.59, Planned). Both of those Price Tracker
+rows came from the second workbook.
+
+Two separate problems were found, and they compound:
+
+*1. The second workbook is a different job.* Four independent signs, none of
+which needs any outside knowledge:
+
+- it names **no address** anywhere; the main sheet names 46 Glenferrie Road on
+  two separate tabs
+- its dates run **2025-11-02 to 2026-01-25** and stop a **month before** this
+  project's week 1 (2026-02-27). The two date ranges do not overlap by a
+  single day
+- its last entries are carpets, **staging** and a driveway clean — a house being
+  dressed for sale — while this project's week 1 is "clearance / back to brick".
+  You do not stage a house and then strip it back to brick
+- every one of its rows is **100% paid**; this project has paid £13,273 of
+  £151,645
+
+The shared supplier names (Lawsons, Alspec, Eurocell, Wunda, Johnstones) are
+simply the same trades being used again on the next job.
+
+*2. Its "Unit Cost" column is not a unit cost.* Its `Materials & Suppliers`
+sheet is a **payment log**: the `Item` column is empty on all 60 rows,
+`Quantity` is `1` on all 60 rows, and `Unit Cost (£)` holds **the amount of that
+payment**. The import copied that straight into `unit_cost`, so instalments were
+read as prices:
+
+| Item as the app saw it | "Prices" | Reported change |
+|---|---|---|
+| wunda ufh | £416.05 deposit, then £3,586.00 balance | **+761.9%** |
+| plumbing | 1000, 1000, 3000, 1000, 1500, 500, 1000 | +100.0% |
+| alspec windows | 5000, 2500, 1000, 1500 | +50.0% |
+| eurocell | 650, 50 | −92.3% |
+
+Eleven suppliers were doing this. Because the main spreadsheet leaves `Qty` and
+`Unit Cost` blank on all 111 of its rows, **100% of the Price Tracker's content
+was instalment payments misread as prices.** Not one figure on that screen was a
+real price comparison.
+
+*3. Target Budget came from the wrong house.* `target_budget` was £98,932.12 —
+the second workbook's total. The Overview header and dashboard bar were showing
+**153% of budget**, a ratio between two unrelated properties.
+
+**Where the information came from:**
+User request, then a direct comparison of the two workbooks in the repo root:
+`Week-by-Week Plan` and `Summary` from
+`46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx`, against `Dashboard`,
+`Trades & Labour` and `Materials & Suppliers` from
+`Renovation_Cost_Tracker-1.xlsx`. Also `supabase/migrations/0005_reimport_data.sql`
+and `0007_reimport_weeks_1_23.sql`, which the user asked to have compared.
+
+**Files used (read, not changed):**
+- `46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` — all three sheets
+- `Renovation_Cost_Tracker-1.xlsx` — all four sheets
+- `supabase/migrations/0005_reimport_data.sql` — for the comparison
+- `supabase/migrations/0008_transaction_core.sql` — to see how its supplier and
+  item seeding behaves when rows are removed
+- `lib/summary.ts`, `lib/calculations.ts`, `components/project/PricesTab.tsx`,
+  `components/project/MaterialsTab.tsx`, `components/project/TradesTab.tsx`,
+  `components/project/OverviewTab.tsx`, `components/project/ProjectDetail.tsx`,
+  `app/(app)/dashboard/page.tsx`, `app/(app)/projects/page.tsx`
+
+**Files changed:**
+- `scripts/build_import_sql.py` — stopped opening the second workbook, deleted
+  `parse_ledger()`, set `TARGET_BUDGET = 0.0`, and pointed the output at the new
+  migration. The docstring now explains at length why that workbook is not
+  imported, so nobody adds it back by accident
+- `scripts/verify_against_spreadsheet.py` — reads the new migration; now also
+  **fails** if any ledger row reappears, and checks Target Budget against the
+  spreadsheet's own (blank) Target Budget cell
+- `supabase/migrations/0009_reimport_file1_only.sql` — **new, generated**
+- `supabase/migrations/0007_reimport_weeks_1_23.sql` — added a do-not-run banner
+  at the top explaining what it would put back. The SQL below it is untouched
+- `about.md` — new §3.0 with the full evidence; §1, §2, §3, §3.1, §5, §6.2,
+  §6.8, §8.1, §11, §12, §13 all updated
+- `CLAUDE.md` — data-recovery steps now name `0009` (they still said `0005`),
+  plus a warning not to re-add the second workbook
+
+**Database:**
+Migration `supabase/migrations/0009_reimport_file1_only.sql` was **written and
+verified but has NOT been run yet.** It must be pasted into the Supabase SQL
+editor by hand, and **`0008_transaction_core.sql` must be run straight
+afterwards** — `0009` deletes the project, and `purchases.project_id` is
+`on delete cascade`, so `0008`'s backfill goes with it. Between the two runs
+`/suppliers` and `/items` are empty.
+
+`0009` also deletes this user's `suppliers` and `items` rows outright. Those two
+tables sit *above* the project, so deleting the project does not reach them, and
+`0008` only ever adds to them — without this, all 37 merchants from the retired
+import would linger on `/suppliers` and `/items` with nothing behind them.
+
+Do not run `0005`, `0006` or `0007`. All three now carry do-not-run banners.
+
+**Result / numbers after:**
+
+| | Before (`0007`) | After (`0009`) |
+|---|---|---|
+| Target Budget | £98,932.12 | **£0.00 — card and % bar hide themselves** |
+| Budget used | 153% (red) | **hidden** |
+| Ledger rows | 96 | **0** |
+| Price Tracker items | 37, eleven with an invented % change | **0 — "No price history yet"** |
+| Suppliers / Items | 37 / 143 | 8 / 52 |
+| Total Quoted | £151,644.78 | £151,644.78 — unchanged |
+| Actual Total (incl VAT) | £151,644.78 | £151,644.78 — unchanged |
+| Variance vs Quote | £0.00 | £0.00 — unchanged |
+| Paid to Date | £13,273.40 | £13,273.40 — unchanged |
+| Remaining to Pay | £138,371.38 | £138,371.38 — unchanged |
+| Weeks Tracked | 23 | 23 — unchanged |
+| Diary rows | 111 (20 Paid, 91 Planned) | 111 — unchanged |
+
+**Only the budget and the ledger moved.** Every spend figure is identical, which
+is itself the proof that the retired workbook was never feeding them — it was a
+parallel dataset all along.
+
+`python scripts/verify_against_spreadsheet.py` passes with exit code 0: all 111
+rows, all 23 week totals, both category totals and all seven Overview cards
+match the spreadsheet. `npx tsc --noEmit` is clean.
+
+**Two things to be aware of:**
+
+1. **The Price Tracker is now empty, and that is correct.** The spreadsheet
+   records no unit costs, so there is nothing honest to compare. It fills up as
+   `qty` and `unit cost` are entered on new Materials expenses — and the expense
+   form's own price hint and price warning wake up at the same moment.
+2. **7 of the 8 remaining "suppliers" are notes typed into the wrong column** of
+   the spreadsheet — things like `steels in`, `1 day - to DPC` and
+   `£300 PAID FROM OWED`. Only `Stevenage Skips` is a real merchant. This is a
+   pre-existing data-entry issue that was hidden behind the retired workbook's 30
+   real merchants; the import is faithful to what the cells say. The fix is to
+   move those seven values into the `Dependencies/Notes` column of the
+   spreadsheet and re-run the import, rather than to add guesswork to the
+   importer. Listed row by row in `about.md` §13.
+
+---
+
+### 2026-08-17 — The suppliers page was showing notes instead of suppliers
+
+**What changed (in plain English):**
+The Suppliers page listed seven scribbled notes (`steels in`, `1 day - to DPC`,
+`£300 PAID FROM OWED`) and one real merchant. It now lists **33 real
+merchants** — Lawsons, Alspec Windows, Topps Tiles, Travis Perkins and the rest
+— each with the purchases behind it. The seven notes have been moved into the
+notes field of their rows, which is where they were always meant to go.
+
+**Why:**
+The merchant names had been typed into the wrong column of the spreadsheet. The
+`Supplier` column has only 8 non-empty cells in 111 rows, and seven of those are
+sentences. The actual supplier names were being typed into the
+`Task / Description` column of the Materials rows, so the import — which was
+faithfully reading the `Supplier` column — imported the notes and none of the
+merchants.
+
+The owner supplied the list of real suppliers. It turned out to be **exactly**
+the set of distinct descriptions on the sheet's 45 Materials rows: 32 names,
+nothing extra on either side, nothing missing. That one-for-one match is what
+made this safe to fix in the importer rather than by hand.
+
+**Where the information came from:**
+User request (the list of 34 supplier names, 32 distinct), checked against
+`Week-by-Week Plan` in
+`46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx`.
+
+**Files used (read, not changed):**
+- `46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` — `Week-by-Week Plan`
+- `supabase/migrations/0008_transaction_core.sql` — to confirm `public.suppliers`
+  is seeded from `expense_entries.supplier` and that purchases link back to it by
+  name, so fixing the import is enough and no app code needs to change
+- `lib/summary.ts`, `lib/purchases.ts`, `lib/data.ts` — to confirm the same
+
+**Files changed:**
+- `scripts/build_import_sql.py` — added `SUPPLIER_NAMES` (the 32 confirmed
+  merchants) and `SUPPLIER_COLUMN_MERCHANTS` (`Stevenage Skips`, the one real
+  entry in the Supplier column); added `name_key()`, `supplier_of()` and
+  `supplier_report()`; added `check_suppliers()`, which **aborts the import** if
+  the list and the spreadsheet ever stop matching; `parse_diary()` now resolves
+  the merchant and folds a misfiled Supplier cell into notes; the generated
+  migration's header and the console report both explain all of it
+- `supabase/migrations/0009_reimport_file1_only.sql` — **regenerated**
+- `about.md` — new **§3.2** with the rule and the guard; §3.1 mapping table,
+  §4.6 seeding note, §12 and §13 updated; the §13 warning about the seven notes
+  is now marked resolved, and a new one records that `/items` still lists
+  merchants as items
+- `updates.md` — this entry
+
+**Database:**
+`supabase/migrations/0009_reimport_file1_only.sql` was **regenerated and has NOT
+been run.** It must be pasted into the Supabase SQL editor by hand, and
+**`0008_transaction_core.sql` must be run straight afterwards** — `0009` deletes
+the project and `purchases.project_id` is `on delete cascade`, so `0008`'s
+backfill goes with it. `0008` is what turns the corrected `supplier` column into
+rows in `public.suppliers` and links every purchase to one. Between the two runs
+`/suppliers` and `/items` are empty.
+
+**Result / numbers after:**
+
+| | Before | After |
+|---|---|---|
+| Suppliers on `/suppliers` | 8 (7 of them notes) | **33, all real merchants** |
+| Rows carrying a supplier | 8 | **46** (45 Materials + `Stevenage Skips`) |
+| Rows with no supplier | 103 | **65** — labour and subcontractors, correctly |
+| Notes rescued into `notes` | — | **7** |
+| Total Quoted / Actual Total | £151,644.78 | £151,644.78 — unchanged |
+| Paid to Date | £13,273.40 | £13,273.40 — unchanged |
+| Remaining to Pay | £138,371.38 | £138,371.38 — unchanged |
+| Weeks Tracked / Diary rows | 23 / 111 | 23 / 111 — unchanged |
+| Items | 52 | 52 — unchanged |
+
+**No money moved.** Only the labelling did, which is the point: every card, week
+total and chart bar is identical, and
+`python scripts/verify_against_spreadsheet.py` still passes with exit code 0 —
+all 111 rows, all 23 week totals, both category totals and all seven Overview
+cards. `npx tsc --noEmit` is clean. No application code changed at all; the
+supplier and item screens already read `public.suppliers` correctly, they were
+just being fed the wrong names.
+
+**The biggest merchants now visible:** Lawsons £20,631.69 (3 purchases), Alspec
+Windows £13,472.80 (2), Cabinets Direct (Kitchen) £5,000.00, St Albans Bathroom
+Centre £4,850.00, Miscl Roofing Materials £3,145.42, Eaves Electrical £3,105.00,
+Lionvest £3,050.78, CAD Stairs £3,000.00, Mark Cornice £2,924.25, Ryan Steels
+£2,370.00.
+
+**Three things to be aware of:**
+
+1. **The spreadsheet is still wrong.** This is corrected on import, not at
+   source. If a *new* merchant is typed into a Materials row's description,
+   `check_suppliers()` will stop the next import until the name is added to
+   `SUPPLIER_NAMES` — deliberately, so nobody has to notice a missing supplier
+   on a screen weeks later.
+2. **`Johnstones` / `Johnstones Paint` and `Steels` / `Ryan Steels` are kept as
+   two suppliers each**, exactly as the owner listed them. Each pair is probably
+   one merchant, but merging near-duplicates is the alias work described in
+   `about.md` §4.6, where a human confirms each one. Say the word and they can
+   be merged.
+3. **`/items` still lists merchants as items.** `0008` seeds items from the
+   description, and on Materials rows the description *is* the merchant name, so
+   `Lawsons` appears as an "item". The spreadsheet has no item column to read
+   instead, so there is nothing honest to import — real item names arrive with
+   the Phase 3 importer or as they are typed into new expenses.
+
+### 2026-08-17 — Items page: show Materials only, not Labour
+
+**What changed (in plain English):**
+The `/items` page was listing every item regardless of category, so Labour
+rows (subcontractor names, seeded from the expense description the same way
+Materials rows are) showed up mixed in with real materials. `getItems()` now
+filters to `item.category === "Materials"` only, and the page copy was updated
+to say so.
+
+**Why:**
+User request — the Items page is meant to be a materials price-history list;
+Labour entries don't belong on it.
+
+**Where the information came from:**
+User request in chat. Confirmed `items.category` is populated from
+`expense_entries.category` (Labour / Materials / Skip/Disposal / Other) by
+migration `0008_transaction_core.sql`.
+
+**Files used (read, not changed):**
+- `app/(app)/items/page.tsx`
+- `lib/data.ts`
+- `types/index.ts`
+- `supabase/migrations/0008_transaction_core.sql`
+
+**Files changed:**
+- `lib/data.ts` — `getItems()` now filters items to `category === "Materials"` before building rows.
+- `app/(app)/items/page.tsx` — updated the intro copy to say Labour items are excluded.
+
+**Database:**
+None. No migration needed — this is a read-side filter only.
+
+**Result / numbers after:**
+`/items` no longer lists Labour-category items (subcontractor/trade names);
+only Materials-category items remain. Row count on the page will drop
+accordingly (exact before/after count not checked against the live database
+in this session — verify by comparing `Items` row count at `/items` before and
+after deploying). `npm run build` passes (typecheck clean).
+
+### 2026-08-17 — Session-by-session build prompts written for invoice ingestion
+
+**What changed (in plain English):**
+Added `invoice_ingestion_phase_prompts.md`, a set of five ready-to-paste Claude
+Code prompts that take the invoice-upload feature from where it currently sits
+to finished. No application code, schema or data was touched.
+
+The reason it is five prompts and not six: an earlier session had already built
+Phases 1–3 of `invoice-ingestion-prompt.md` — migration
+`0010_invoice_upload.sql` and the whole of `lib/invoice/` — but never committed
+that work and never logged it here. So Session 1 in the new file is an *audit*
+of what already exists rather than a build, and the build sessions start at the
+API routes.
+
+**Why:**
+The work has to be run in separate Claude Code sessions to fit inside the
+5-hour session limit, and each session starts with no memory of the last one.
+Each prompt therefore restates the repo conventions it needs (RLS, `requireUser`,
+`createPurchase`, migrations run by hand) so a cold session cannot invent its
+own.
+
+**Where the information came from:**
+User request. The prompts are derived from `invoice-ingestion-prompt.md`
+(uploaded spec) checked against the actual state of the repo — migrations list,
+`lib/invoice/` file listing, `app/api/` routes, `types/index.ts`, and
+`git status`.
+
+**Files used (read, not changed):**
+- `invoice-ingestion-prompt.md`
+- `CLAUDE.md`, `phase_prompts.md`, `updates.md`
+- `supabase/migrations/0010_invoice_upload.sql`
+- `lib/invoice/extract.ts`, `lib/invoice/resolve.ts`, `lib/invoice/schema.ts` and the rest of `lib/invoice/`
+- `lib/api.ts`, `lib/purchaseWrite.ts`, `lib/fetcher.ts`
+- `app/api/projects/[id]/purchases/route.ts`, `app/api/expenses/[eid]/receipt/route.ts`
+- `components/forms/PurchaseForm.tsx`, `components/forms/AddExpensePanel.tsx`
+- `package.json`, `types/index.ts`
+
+**Files changed:**
+- `invoice_ingestion_phase_prompts.md` — new file, the five prompts.
+- `updates.md` — this entry.
+
+**Database:**
+None. Note for the record: `supabase/migrations/0010_invoice_upload.sql` is
+written but **has not been run** in the Supabase SQL editor. Session 1 of the
+new prompt file ends by handing over the exact run order, including a read-only
+check for existing `(supplier_id, invoice_no)` violations before the unique
+constraint is added.
+
+**Result / numbers after:**
+No figures moved. `about.md` §13 is unaffected.
+
+---
+
+### 2026-08-17 — Audited the unlogged invoice-ingestion work; fixed a build-breaking typo
+
+**What changed (in plain English):**
+Checked the Phase 1–3 invoice-ingestion work from the earlier, uncommitted
+session (`0010_invoice_upload.sql` and everything in `lib/invoice/`) against
+`invoice-ingestion-prompt.md`, item by item. The schema and the resolver logic
+turned out to be sound — the only real defect was a typo in `resolve.ts` that
+made `npm run build` fail outright. That is now fixed. Nothing else was
+touched: no refactor, no Phase 4/5 work started.
+
+**Why:**
+`npm run build` is this project's only full typecheck (CLAUDE.md), and it was
+red. Before building anything further on top of `lib/invoice/`, the existing
+work needed to actually compile and be checked against the spec it claims to
+implement.
+
+**Where the information came from:**
+`invoice-ingestion-prompt.md` (the spec) compared line-by-line against
+`supabase/migrations/0010_invoice_upload.sql` and every file in `lib/invoice/`;
+`supabase/migrations/0008_transaction_core.sql` and `about.md` §4.6/§9 for what
+`0010` is allowed to assume already exists; `npm run build` output for the
+actual compiler error.
+
+**Files used (read, not changed):**
+- `invoice-ingestion-prompt.md`
+- `supabase/migrations/0008_transaction_core.sql`, `0009_reimport_file1_only.sql`,
+  `0010_invoice_upload.sql`
+- `about.md` (all sections, especially §2, §4.6, §5, §9, §12)
+- `lib/invoice/schema.ts`, `prompt.ts`, `extract.ts`, `normalise.ts`,
+  `reconcile.ts`
+- `lib/purchases.ts`, `lib/purchaseWrite.ts`, `types/index.ts`
+
+**Files changed:**
+- `lib/invoice/resolve.ts` — fixed a syntax typo in `resolveItem()`'s trigram
+  result cast (`}[))` → `}[]))`, a missing `]`). This was the only thing
+  actually broken; everything else in the file matched the spec (VAT → alias →
+  trigram priority, the VAT-conflict guard, no writes).
+- `updates.md` — this entry.
+
+**Database:**
+No migration written or changed. `0010_invoice_upload.sql` is still **written
+but NOT run**. Audit findings on it, for whoever runs it next:
+- Every statement is `if not exists` / `create or replace` — fully re-runnable.
+- It only depends on `0008` (already run) — nothing from `0009` (not yet run).
+  Safe to run in the current database state.
+- Its `(supplier_id, invoice_no)` unique index is pre-guarded: it counts
+  duplicate groups and `raise exception`s with the offending rows rather than
+  dropping anything. Read-only check to run first, to see the same thing before
+  committing to the migration:
+  ```sql
+  select p.user_id, p.supplier_id, s.name as supplier_name,
+         btrim(p.invoice_no) as invoice_no, count(*) as purchase_count,
+         string_agg(p.id::text, ', ') as purchase_ids
+  from public.purchases p
+  join public.suppliers s on s.id = p.supplier_id
+  where p.supplier_id is not null and p.invoice_no is not null
+    and btrim(p.invoice_no) <> ''
+  group by p.user_id, p.supplier_id, s.name, public.norm_key(p.invoice_no)
+  having count(*) > 1
+  order by purchase_count desc;
+  ```
+- `0010` extends `0008`'s `supplier_aliases` / `item_aliases` (adds trigram
+  indexes) rather than duplicating or re-creating them — confirmed by reading
+  both files side by side.
+
+**Result / numbers after:**
+`npm run build` now passes (was failing with `Type error: ']' expected` at
+`lib/invoice/resolve.ts:466`). No schema, no data, and no application figure
+changed. Phase 1–3 remain unrun/unwired — this was a fix-in-place audit, not
+new functionality. Phase 4 (API routes) and Phase 5 (UI) were not started, per
+instruction.
+
+---
+
+### 2026-08-17 — Invoice ingestion, Phase 4: the three API routes
+
+**What changed (in plain English):**
+Four new Route Handlers so a photographed or PDF'd invoice can travel from the
+browser into `purchases`, with no UI yet:
+
+- `POST /api/invoices/upload-url` — the browser asks for somewhere to put a
+  file; gets back a Supabase signed *upload* URL and a new `invoice_uploads`
+  row (`status: 'pending'`). The file itself is never sent to this route —
+  the browser PUTs it straight to Storage with the signed URL, because
+  Vercel caps a serverless request body at 4.5MB and a phone photo is
+  routinely bigger than that.
+- `POST /api/invoices/[id]/extract` — downloads the file server-side, calls
+  the already-written extractor and resolver (`lib/invoice/extract.ts`,
+  `resolve.ts`), and moves the row to `'extracted'` with the model's raw
+  answer, the reconciliation warnings, and the supplier/item match
+  candidates. Every exit path — success, a bad extraction, a storage
+  failure, an unhandled throw — lands on a terminal status. Calling it again
+  on a `'failed'` row retries cleanly.
+- `POST /api/invoices/[id]/commit` — takes the reviewed (and possibly
+  hand-edited) payload and writes it through `createPurchase` in
+  `lib/purchaseWrite.ts`, the same function the manual multi-line form
+  already uses, so there is still exactly one place that turns a form body
+  into `purchases` + `purchase_lines` + `payments`. On top of that it always
+  records the invoice's raw supplier string as a `supplier_aliases` row, and
+  if a brand-new supplier was accepted, flags it `is_unverified` with
+  `created_from_upload_id` set — but only when the name genuinely didn't
+  already exist, checked before the write, because there is no way to tell
+  "just created" from "already existed" apart afterwards.
+- `GET /api/invoices/[id]` — the upload row plus a 5-minute signed *read* URL
+  for the original file, for a future review screen to show the source
+  document. Same pattern as the existing receipt route's GET.
+
+**Why:**
+This is Session 2 (Phase 4) of `invoice_ingestion_phase_prompts.md`. Phases
+1–3 (schema, extractor, resolver) were audited and fixed in the previous
+session; nothing could reach them from the app until these routes existed.
+Phase 5 (the upload UI and review screen) is next.
+
+**Where the information came from:**
+`invoice-ingestion-prompt.md` (Phase 4 and Constraints) and
+`invoice_ingestion_phase_prompts.md` (Session 2's brief) were the spec.
+Everything else came from reading the existing code to match its
+conventions — no spreadsheet or database figure was touched.
+
+**Files used (read, not changed):**
+- `CLAUDE.md`, `about.md` §§3–5, the last two entries of `updates.md`
+- `invoice-ingestion-prompt.md`, `invoice_ingestion_phase_prompts.md`
+- `supabase/migrations/0010_invoice_upload.sql` — column names, bucket
+  policies, the `match_suppliers` / `match_items` RPCs
+- `lib/api.ts`, `app/api/projects/[id]/purchases/route.ts`,
+  `app/api/expenses/[eid]/receipt/route.ts` (for what *not* to copy — it
+  posts the file through the route)
+- `lib/purchaseWrite.ts`, `lib/purchases.ts`, `lib/validation.ts`
+- `lib/invoice/extract.ts`, `resolve.ts`, `schema.ts`, `reconcile.ts`,
+  `normalise.ts`
+- `types/index.ts`, `package.json` (confirmed `createSignedUploadUrl` is
+  available in the installed `@supabase/supabase-js` 2.45.4)
+- `lib/supabase/server.ts`
+
+**Files changed:**
+- `app/api/invoices/upload-url/route.ts` — **new**
+- `app/api/invoices/[id]/route.ts` — **new** (GET, signed read URL)
+- `app/api/invoices/[id]/extract/route.ts` — **new**
+- `app/api/invoices/[id]/commit/route.ts` — **new**
+- `updates.md` — this entry
+
+**Database:**
+None. No migration written or changed this session. `0010_invoice_upload.sql`
+must already be run for these routes to work — the prior session's audit
+entry above has the run order.
+
+**Result / numbers after:**
+No schema, data or application figure changed — this is new server-side
+plumbing only, unreachable from any screen yet. `npm run build` passes; all
+four routes appear in its route list as dynamic (`ƒ`) functions.
+
+**Two things worth flagging, not fixed here — out of scope for Phase 4:**
+1. **`ANTHROPIC_API_KEY` is not set in `.env`.** The extract route will
+   correctly mark a row `'failed'` with a clear message
+   ("invoice reading is switched off...") rather than crash or hang, so
+   nothing is broken by its absence — but real extraction cannot be tested
+   until the key is added.
+2. **No UI exists yet to call any of this.** These routes were verified with
+   `npm run build` (the project's only full typecheck) and by reading the
+   code against the spec; they have not been exercised against a live
+   upload, because that needs Phase 5's upload screen. Session 3 builds that.

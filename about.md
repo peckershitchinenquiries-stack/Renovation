@@ -2,17 +2,18 @@
 
 **Read this before changing anything in this project.**
 
-This file explains what exists (tables, views, screens) and exactly how every
-number on every screen is calculated. It is the map. `updates.md` is the history.
 
-Last verified: 2026-08-06, against migrations 0001–0007.
+
+Last verified: 2026-08-17, against migrations 0001–0009. `0009` has been
+regenerated and **not yet run** — see §12.
 
 ---
 
 ## 1. What this is
 
 RenovaTrack — a renovation cost tracker for **46 Glenferrie Road, St Albans,
-AL1 4JU**. It replaces two spreadsheets the owner was keeping by hand.
+AL1 4JU**. It replaces the week-by-week spreadsheet the owner was keeping by
+hand.
 
 - **Next.js 14** (App Router) · **TypeScript** · **Tailwind** · **Supabase**
   (Postgres + Auth + Storage).
@@ -47,7 +48,10 @@ migration file does not apply it. Always tell the user to run it.
    `materials_cost`, `remaining`. The corollary: **`actual_amount` is ex-VAT.**
    Writing an incl-VAT figure into it applies VAT twice. That is exactly what
    went wrong in `0005` — see §3.1.
-2. **Never sum `diary` and `ledger` rows together.** They overlap. See §5.
+2. **`ledger` is now an empty half of the app.** Since `0009` (2026-08-14) every
+   row is `diary`. The `source` column, the CHECK constraint and every filter
+   that uses it all remain — the mechanism is intact and still correct, there
+   is simply nothing on the other side of it. Do not sum the two anyway. See §5.
 3. **Never add `.eq("user_id", …)` to a query.** RLS does the scoping. But
    a new table with no RLS policy returns nothing — or leaks everything if RLS
    is left disabled.
@@ -61,13 +65,12 @@ migration file does not apply it. Always tell the user to run it.
 ## 3. Where data comes from and how it flows
 
 ```
-Two spreadsheets (repo root)          scripts/build_import_sql.py
-  File 1: 46_Glenferrie_Rd_..._Updated.xlsx  ───┐
-          "Week-by-Week Plan" sheet            │
-  File 2: Renovation_Cost_Tracker-1.xlsx  ─────┤
-          "Trades & Labour" + "Materials..."   │
+One spreadsheet (repo root)           scripts/build_import_sql.py
+  46_Glenferrie_Rd_..._Updated.xlsx  ──────────┐
+    "Week-by-Week Plan"  → 111 diary rows      │
+    "Lookups"            → 16 trade lookups    │
                                                ▼
-                       supabase/migrations/0007_reimport_weeks_1_23.sql
+                       supabase/migrations/0009_reimport_file1_only.sql
                                                │  (pasted into SQL editor)
                                                ▼
                                     Supabase Postgres
@@ -93,18 +96,59 @@ Two spreadsheets (repo root)          scripts/build_import_sql.py
   `{user, supabase}` or `{response}`. **The caller must check for `response`
   and return it early** — that is the 401 path.
 
-### The two source spreadsheets
+### The source spreadsheet
 
-| | File 1 | File 2 |
-|---|---|---|
-| Filename | `46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` | `Renovation_Cost_Tracker-1.xlsx` |
-| Sheets | `Week-by-Week Plan`, `Summary`, `Lookups` | `Dashboard`, `Trades & Labour`, `Materials & Suppliers`, `Remaining` |
-| Becomes | 111 `diary` rows, weeks 1–23 | 96 `ledger` rows + 16 trade lookups |
-| Totals | ex-VAT £141,686.89 / incl-VAT £151,644.78 | quoted £98,932.12 |
+**`46_Glenferrie_Rd_Renovation_Spend_Tracker_Updated.xlsx` is the only file
+imported.** It is the **source of truth** for rebuilds. Do not delete it.
 
-These files are the **source of truth** for rebuilds. Do not delete them.
+| | |
+|---|---|
+| Sheets | `Week-by-Week Plan`, `Summary`, `Lookups` |
+| Becomes | 111 `diary` rows, weeks 1–23, + 16 trade lookups |
+| Totals | ex-VAT £141,686.89 / incl-VAT £151,644.78 |
+
 `..._Blank_Template.xlsx` is the older weeks 1–15 version, superseded by
 `..._Updated.xlsx` on 2026-08-06 and kept only for history.
+
+### 3.0 `Renovation_Cost_Tracker-1.xlsx` is a *different job* — do not re-import it
+
+Until `0009` (2026-08-14) this second workbook was imported as 96 `ledger` rows
+and its total became the project's `target_budget`. It was never this project's
+spend. Four independent things say so:
+
+| | `..._Updated.xlsx` | `Renovation_Cost_Tracker-1.xlsx` |
+|---|---|---|
+| Address stated | 46 Glenferrie Road, on both sheets | **none anywhere** |
+| Date range | 2026-02-27 → ongoing | 2025-11-02 → **2026-01-25** |
+| Proportion paid | £13,273 of £151,645 | £98,932 of £98,932 — **100%** |
+| First / last work | week 1 "clearance / back to brick" | ends carpets, **staging**, driveway clean |
+
+The date ranges **do not overlap by a single day** — the second workbook stops a
+month before this project's week 1 — and it ends with a house being dressed for
+sale while this one *begins* by stripping back to brick. The shared supplier
+names (Lawsons, Alspec, Eurocell, Wunda, Johnstones) are the same trades used
+again on the next job, which is exactly what let it contaminate the
+string-matched Price Tracker (§6.8).
+
+**It also broke the Price Tracker outright.** Its `Materials & Suppliers` sheet
+is a *payment log*, not a price list: `Item` is empty on all 60 rows, `Quantity`
+is `1` on all 60, and `Unit Cost (£)` holds **the amount of that payment**. The
+import copied that into `unit_cost`, so instalments read as unit prices:
+
+```
+wunda ufh       2x  416.05 (deposit), 3586.00 (balance)  →  +761.9%
+plumbing        7x  1000, 1000, 3000, 1000, 1500, 500, 1000  →  +100.0%
+alspec windows  4x  5000, 2500, 1000, 1500               →   +50.0%
+eurocell        2x  650, 50                              →   -92.3%
+```
+
+Eleven suppliers did this. Since the diary records no unit costs at all
+(`Qty` and `Unit Cost` are empty on all 111 rows), **100% of the Price Tracker's
+content was instalment payments misread as prices.**
+
+The workbook stays in the repo as history. `build_import_sql.py` no longer opens
+it, and `verify_against_spreadsheet.py` now **fails** if any `ledger` row
+reappears.
 
 ### 3.1 How spreadsheet money becomes database money
 
@@ -122,6 +166,7 @@ where the spreadsheet said £42,411.81.
 | `quoted_amount` | `Total incl. VAT (£)` |
 | `paid_amount` | `Total incl. VAT (£)`, but only when `Paid Date` is filled |
 | `status` | `Paid` when `Paid Date` is filled, else the sheet's `Status` |
+| `supplier` | **`Task / Description`, on `Materials` rows only** — *not* the `Supplier` column. See §3.2 |
 
 Two of those need justifying:
 
@@ -134,7 +179,7 @@ Two of those need justifying:
   handed over. It makes `Paid to Date` and `Remaining to Pay` equal the sheet's
   own `Paid to date` and `Committed` figures exactly.
 
-**File 1 quirks you must know:**
+**Spreadsheet quirks you must know:**
 
 - The `Status` column reads `Planned` on **all 111 rows**. It carries no payment
   information. The real payment marker is the **`Paid Date`** column.
@@ -144,8 +189,8 @@ Two of those need justifying:
   distinct dates land on the stated weekday only in **2026**.
 - Rows with a paid date: 20 (weeks 1–7). Rows without: 91 (weeks 8–23).
 - `Qty (Materials)` and `Unit Cost (£)` are **empty on every row**. The Price
-  Tracker therefore sees nothing from the diary; everything it shows comes from
-  the File 2 ledger.
+  Tracker therefore sees nothing at all and shows its "No price history yet"
+  empty state. It fills up as unit costs are typed into new expenses — see §6.8.
 - **Weeks 20–23 have every cost typed into `Materials Cost`**, whatever the row's
   `Category` says. This is why `parse_diary()` *adds* the labour and materials
   columns instead of picking one. It also means the sheet's own `Summary` tab
@@ -153,6 +198,57 @@ Two of those need justifying:
   reports the real figure. Week totals are unaffected — see §6.4.
 - The `VAT` column is text (`'0%'`) in the updated file and was a number (`0`)
   in the old one. `vat_of()` strips the `%` and handles both.
+- **The `Supplier` column is not where the suppliers are.** See §3.2.
+
+### 3.2 The merchant names are in the *Description* column
+
+The sheet's `Supplier` column (index 6) has **8 non-empty cells in 111 rows**,
+and only one of them — `Stevenage Skips` — is a merchant. The other seven are
+sentences typed into the wrong column. The merchant names were being typed into
+`Task / Description` instead, on the `Materials` rows:
+
+| Sheet row | Week | `Task / Description` | Category |
+|---|---|---|---|
+| 62 | 5 | `Master Mix` | Materials |
+| 190 | 15 | `Lawsons` | Materials |
+| 205 | 16 | `Alspec Windows` | Materials |
+| … | | 45 Materials rows, **32 distinct merchants** | |
+
+Confirmed by the owner on 2026-08-17, who supplied the list of real suppliers —
+it turned out to be *exactly* the set of distinct Materials descriptions, with
+nothing extra on either side. So the import reads `supplier` from there.
+
+**The rule, in `scripts/build_import_sql.py` (`supplier_of`):**
+
+1. A `Supplier` cell naming a **known merchant** wins — that is the column meant
+   for it. Only `Stevenage Skips` (row 59, a Labour row) qualifies.
+2. Otherwise, a **`Materials`** row takes its merchant from its description,
+   looked up in `SUPPLIER_NAMES`.
+3. Any other non-empty `Supplier` cell is a **note** and is moved into `notes`,
+   verbatim — exactly what re-typing it into `Dependencies/Notes` on the sheet
+   would have produced. Seven rows, listed in §13.
+4. **Labour rows get no supplier.** `Dave Builder`, `Owen Brickwork`,
+   `Nick Loft`, `Labourers` and the rest are people and subcontractors, not
+   merchants. 65 of the 111 rows have `supplier = null` and that is correct.
+
+> ⚠️ **`SUPPLIER_NAMES` is a declared list, not a heuristic — and there is a
+> guard that keeps it that way.** `check_suppliers()` **aborts the import** if
+> the distinct Materials descriptions and the list ever stop matching in either
+> direction. Add a Materials row for a new merchant and the script stops and
+> tells you to add the name (after checking with the owner) rather than
+> silently importing a row with no supplier. Nothing anywhere guesses which
+> strings "look like" a merchant; that is the property that keeps the import
+> verifiable against its source.
+
+Two pairs are kept as the owner wrote them even though each is probably one
+merchant: **`Johnstones` / `Johnstones Paint`** and **`Steels` / `Ryan Steels`**.
+Merging near-duplicates is the alias work in §4.6, where a human confirms each
+one — the importer does not decide it.
+
+The name key is `name_key()`, the same trim / lower-case / collapse-whitespace
+rule as `public.norm_key()`, `priceKey()` and `normaliseName()` (§4.6). That is
+what lets the sheet's `CAD Stairs ` and `Saris ` — both carrying a trailing
+space — resolve to one canonical merchant each.
 
 ---
 
@@ -256,6 +352,107 @@ Private bucket `receipts`. Objects are namespaced by user:
 delete). `createServiceClient()` (service-role key) exists **only** for MIME
 validation and signed URLs — never expose it to the client.
 
+### 4.6 The transaction core — eight more tables
+
+Added by `0008_transaction_core.sql` (Route C, Phase 0), **run 2026-08-14**.
+They sit **alongside** the four tables above, which are untouched and still feed
+every project screen. The only things reading them are the Phase 1 supplier and
+item pages — see §8.1.
+
+Why they exist: `expense_entries` flattens the document and the item into one
+row, and the purchase and the payment into one row. That is what makes
+multi-line invoices impossible, supplier grouping unreliable string matching,
+and "what did I owe Lawson on 14 Aug?" unanswerable.
+
+| Table | Scope | Holds |
+|---|---|---|
+| `suppliers` | above the project | one row per merchant — `name`, `type`, `account_ref`, `notes` |
+| `supplier_aliases` | above the project | every spelling that means that supplier |
+| `items` | above the project | one row per material — `canonical_name`, `category`, `default_unit`, `pack_size`, `pack_unit` |
+| `item_aliases` | above the project | every spelling that means that item |
+| `purchases` | per project | one row per **document** — supplier, date, invoice no, totals |
+| `purchase_lines` | per project | the items on that document, N per purchase |
+| `payments` | per project | one row per time money changed hands |
+| `receipts` | per project | attachments, now hung off the document |
+
+All eight follow the existing rules exactly: `user_id` with `on delete cascade`,
+RLS enabled, one `auth.uid() = user_id` policy, CHECK constraints that reject
+rather than coerce.
+
+**Four things about `purchases` worth knowing before you touch it:**
+
+- **`gross_total` is a Postgres GENERATED column** — `net_total + vat_total`,
+  stored, not writable. Read it; never try to set it. This is how §2 rule 1 is
+  honoured for a column the document itself carries.
+- **Balance and payment status are not columns.** `balance = gross_total − Σ
+  payments.amount`, and Paid / Partial / Pending derives from that. Computed by
+  `computePurchase` in `lib/purchases.ts` on every read, with the same `0.001`
+  tolerance `buildTrades` uses.
+- **`origin` and `entry_source` answer different questions.** `origin` is where
+  the data came from (`manual` / `excel` / `text` / `invoice_ocr` /
+  `legacy_import`); `entry_source` is which half of the app it belongs to
+  (`diary` / `ledger`). Do not merge them — see §5.
+- **`entry_status`** is the lifecycle flag copied from `expense_entries.status`
+  (`Planned` / `In Progress` / `Paid` / `Cancelled`). It is **not** a payment
+  state. It exists because every summary in the app excludes cancelled rows, and
+  that had to survive the copy.
+
+**`public.norm_key(text)`** — an IMMUTABLE SQL function added by `0008`: trim,
+lower-case, collapse internal whitespace. Every uniqueness index on the new
+tables uses it, and it is deliberately the same rule as `priceKey()` in
+`lib/summary.ts` and `normaliseName()` in `lib/purchases.ts`. All three must
+stay in step or the database, the Price Tracker and the alias matcher will
+disagree about what one item is.
+
+**What the backfill did** (`0008` §8): every `expense_entries` row became one
+`purchase` + exactly one `purchase_line`, plus a `payments` row where
+`paid_amount > 0` and a `receipts` row where `receipt_url` was set.
+`purchases.legacy_entry_id` points back at the row it came from — that is both
+the audit trail and what makes the migration re-runnable.
+
+Money mapping, which is the part that has been got wrong before (§3.1):
+
+| New column | From | Note |
+|---|---|---|
+| `purchases.net_total`, `purchase_lines.line_net` | `actual_amount` | ex-VAT |
+| `purchases.vat_total` | `round(actual_amount × vat_rate / 100, 2)` | |
+| `purchases.gross_total` | generated | `= computeEntry`'s `total_incl_vat` |
+| `purchases.quoted_gross` | `quoted_amount` | incl-VAT for this import — kept **outside** net/vat/gross |
+| `payments.amount` | `paid_amount` | incl-VAT, copied unchanged |
+| `purchase_lines.qty` / `unit_price` | `qty` / `unit_cost` | |
+| `purchase_lines.unit` | — | null: the source records no unit |
+| `purchases.purchase_date` | `paid_date` | see below |
+
+> ⚠️ **`purchase_date` is really the paid date.** The spreadsheet has no
+> purchase-date column at all — the only date it ever carried was a hand-typed
+> `Paid Date`, so that is what the backfill put there, and it is **null on the
+> 91 rows that were never paid**. This mirrors what the Price Tracker already
+> does (§6.8) rather than inventing a date, but it means a Phase 1 timeline
+> ordered by `purchase_date` is ordering by *payment*, not purchase, for all
+> legacy data. Real purchase dates only arrive with the Phase 3 importer.
+
+**Seeding was literal, on purpose.** Suppliers came from distinct
+`expense_entries.supplier` — which since 2026-08-17 finally holds real merchant
+names, because the import now reads them from the column they were actually
+typed into (§3.2). Items came from distinct normalised `description`, and
+each got its own original text as its first alias. Nothing is fuzzy-merged:
+near-duplicate spellings become two suppliers, and merging them is Phase 3's
+alias work, where a human confirms each one. `trade` was **not** used to seed
+suppliers: it holds trade categories (`General Builder`, `Plumber`), not
+merchant names. It is copied onto `purchases.trade` as free text, exactly as
+before.
+
+**Seeding is additive only.** Every insert is `on conflict … do nothing`, and
+nothing in `0008` ever *deletes* a supplier or an item. Because both tables sit
+above the project, deleting the project does not prune them either — so a
+re-import that drops rows leaves orphan merchants behind unless it clears these
+tables itself. `0009` does exactly that; see §12.
+
+**`0008` refuses to commit** unless the copy reconciles: per-row incl-VAT totals
+within half a penny, per-`entry_source` gross and paid totals within the
+accumulated rounding, the three row counts equal, and `expenses_view` reproducing
+`expense_entries` field by field. Any failure rolls the whole thing back.
+
 ---
 
 ## 5. `source` splits the app in two — the single biggest trap
@@ -264,22 +461,30 @@ validation and signed URLs — never expose it to the client.
 
 | | `diary` | `ledger` |
 |---|---|---|
-| Comes from | File 1, plus anything added in-app | File 2 import only |
-| Rows | 111 (weeks 1–23) | 96 (all stored at `week_number = 1`) |
+| Comes from | the spreadsheet, plus anything added in-app | nothing — the import that fed it was retired by `0009` |
+| Rows | 111 (weeks 1–23) | **0** |
 | Appears in | **Expenses tab** and **all Overview analytics**, **Dashboard cards** | **Trades & Labour**, **Materials & Suppliers**, **Price Tracker** |
-| Money | £151,644.78 actual incl-VAT | £98,932.12 quoted |
+| Money | £151,644.78 actual incl-VAT | £0.00 |
 
-> Ledger rows carry `week_number = 1` because File 2 has no week column
-> (`parse_ledger()` hard-codes it). Migration `0003` originally backfilled
-> "weeks 16+" as ledger, but `0005` re-imported them all at week 1 — **do not
-> use `week_number` to tell diary from ledger, use `source`.**
+> ⚠️ **Since 2026-08-14 the ledger side is empty**, because
+> `Renovation_Cost_Tracker-1.xlsx` turned out to be a different job (§3.0).
+> The `source` column, its CHECK constraint and every filter listed below are
+> **deliberately still in place** — they are correct, cheap, and the only thing
+> standing between the app and a double-count the day a second dataset arrives.
+> Do not delete them as dead code.
+>
+> **Consequence for reading the app today:** Trades & Labour and Materials &
+> Suppliers now show diary rows only, so their figures finally agree with the
+> Overview instead of describing a separate dataset. The Price Tracker is empty
+> until unit costs are entered — see §6.8.
 
-**They overlap.** The ledger is a second record of much of the same spend.
-`151,644.78 + 98,932.12 = 250,576.90` is a meaningless number — it is the
-double-count. A raw `sum(actual_amount)` across the table is not a project total.
+**Historical note.** Ledger rows carried `week_number = 1` because that workbook
+had no week column. Migration `0003` originally backfilled "weeks 16+" as
+ledger, `0005` re-imported them all at week 1, and `0009` removed them —
+**never use `week_number` to tell diary from ledger, use `source`.**
 
 **Where the filter lives** — every screen that reports *project spend* must
-apply it:
+apply it, and must keep applying it:
 
 - `components/project/ProjectDetail.tsx:73` — `diaryEntries`, feeds Overview
 - `components/project/ExpensesTab.tsx:66` — feeds the Expenses list
@@ -288,12 +493,25 @@ apply it:
 
 Trades / Materials / Prices deliberately use the **full** entry set.
 
-> ⚠️ **Known inconsistency.** The API summary routes
+**The new tables carry the same split.** `purchases.entry_source` is copied
+straight from `expense_entries.source` by the `0008` backfill and has the same
+`diary` / `ledger` CHECK. Everything above applies to it unchanged: a query that
+sums both is double-counting. Keep it distinct from `purchases.origin`, which
+records where the data came from and has nothing to do with this. See §4.6.
+
+The supplier and item screens are where that is enforced in the UI: every total
+on them is split by `entry_source` and never combined, down to the sort order.
+See §8.1 and `totalsBySource` in `lib/purchases.ts`.
+
+> ⚠️ **Known inconsistency, currently dormant.** The API summary routes
 > (`app/api/projects/[id]/summary/`, `…/summary/by-week`, `…/summary/by-category`,
 > `…/export/excel`, `…/export/pdf`) pass **unfiltered** `bundle.entries` into
 > `buildSummary`. They therefore return the double-counted figure, unlike the UI.
 > Nothing in the app currently consumes them, but the **Excel and PDF exports do**
-> — so exports do not match the screen. Not yet fixed.
+> — so exports did not match the screen. **With the ledger now empty this makes
+> no difference to any number**, so the exports happen to be correct today. The
+> bug is still there and still unfixed; it bites again the moment a `ledger` row
+> exists.
 
 ---
 
@@ -356,14 +574,20 @@ Rendered by `components/project/OverviewTab.tsx:57–85`.
 > penny while `forecast_total` is derived: across 111 rows the two differ by
 > £0.004, which would otherwise render as "-£0.00".
 
-> ⚠️ **Target Budget and spend still come from different datasets.** Budget =
-> File 2 ledger quoted (£98,932.12); spend = File 1 diary actual (£151,644.78).
-> The percentage is not "% of the job done"; it compares two spreadsheets that
-> overlap by an unknown amount. Both numbers are individually correct; the ratio
-> is soft — and since weeks 16–23 landed, spend now exceeds that budget, so the
-> header and the dashboard bar read **153%** and show red. The spreadsheet's own
-> `Target Budget` cell is blank, so there is nothing better to use. Changing it
-> is a one-line `update public.projects set target_budget = …`.
+> ✅ **Target Budget is now unset, and that is the fix, not a gap.** It used to
+> hold £98,932.12 — the total of `Renovation_Cost_Tracker-1.xlsx`, which is a
+> different job (§3.0). The header and the dashboard bar therefore read **153%**,
+> a ratio between two unrelated properties. `0009` sets `target_budget = 0`,
+> matching the spreadsheet's own blank `Target Budget (incl. VAT)` cell.
+>
+> **Zero is handled everywhere, deliberately** — the Target Budget card
+> (`OverviewTab.tsx:67`), the `% of budget` header (`ProjectDetail.tsx:94`), the
+> dashboard bar (`dashboard/page.tsx:59`) and the project list
+> (`projects/page.tsx:49`) all check `> 0` and hide rather than divide. Nothing
+> renders `Infinity` or `NaN`.
+>
+> To set a real ceiling, use the **Edit Project** form, or
+> `update public.projects set target_budget = … where name = '46 Glenferrie Road';`
 
 ### 6.3 Dashboard cards — `app/(app)/dashboard/page.tsx`
 
@@ -391,7 +615,7 @@ One row per `week_number`, sorted ascending. Cancelled excluded.
 Feeds `components/charts/WeeklySpendChart.tsx` and the read-only Week-by-Week
 table in `OverviewTab.tsx` (Week / Labour / Materials / VAT / Total).
 
-> ⚠️ **The Labour/Materials split will not match File 1's `Summary` tab, and
+> ⚠️ **The Labour/Materials split will not match the sheet's `Summary` tab, and
 > that is expected.** Two independent reasons:
 > 1. The Summary tab's two columns are **ex-VAT** (it sums `Labour Cost` and
 >    `Materials Cost` directly); the app's are **incl-VAT**.
@@ -463,6 +687,19 @@ Answers "did this item cost more this time?"
 **Inclusion:** `category === "Materials"` **and** `unit_cost > 0` **and** not
 cancelled. Rows failing any of these are invisible here.
 
+> ⚠️ **This tab is empty as of 2026-08-14, and that is correct.** The
+> spreadsheet's `Qty (Materials)` and `Unit Cost (£)` columns are blank on all
+> 111 rows, so no diary row passes `unit_cost > 0`. Everything the tab used to
+> show came from `Renovation_Cost_Tracker-1.xlsx`, whose `Unit Cost` column
+> held the size of each **instalment payment**, not a price per unit — which is
+> why Wunda UFH appeared to rise 761.9% between a deposit and its balance. That
+> import is gone (§3.0).
+>
+> The tab fills up honestly from here: enter `qty` and `unit cost` on a
+> Materials expense and the second purchase of the same description starts a
+> real comparison. `ExpenseForm`'s `lastPriceHint` and `priceWarning` (§10.1)
+> read the same data, so they wake up at the same moment.
+
 **Grouping key:** `priceKey()` (line 177) — `description` trimmed, lower-cased,
 internal whitespace collapsed. So `"Sand  "` and `"sand"` are the same item.
 
@@ -492,10 +729,10 @@ looking at, not the whole project.
 
 ## 7. Views
 
-**There are no SQL views or materialized views.** `grep` for `create view`
-across `supabase/` returns nothing.
+**There is exactly one SQL view and no materialized views.** `0008` added
+`public.expenses_view` — see the end of this section. Nothing reads it yet.
 
-Everything view-like is a **TypeScript function in `lib/summary.ts`**, computed
+Everything else view-like is a **TypeScript function in `lib/summary.ts`**, computed
 per request from `expense_entries`. Treat these seven as the app's "views":
 
 | Function | Line | Produces | Consumed by |
@@ -512,6 +749,49 @@ per request from `expense_entries`. Treat these seven as the app's "views":
 **Consequence:** changing a formula here changes every screen at once, with no
 migration and no backfill. That is the intended design.
 
+`lib/purchases.ts` is the same idea for the new tables — every figure on the
+supplier and item screens is derived here on read, and none of it is stored.
+
+| Function | Added | Produces |
+|---|---|---|
+| `computePurchase` / `computePurchases` | Phase 0 | `paid` (Σ payments), `balance` (`gross_total − paid`), `status` |
+| `paymentTotal` | Phase 0 | Σ `payments.amount` — incl-VAT, so measured against `gross_total`, never `net_total` |
+| `purchaseStatus` | Phase 0 | `Paid` if `paid > 0 && gross − paid <= 0.001`; `Partial` if `paid > 0`; else `Pending` |
+| `normaliseName` | Phase 0 | the matching key — same rule as `priceKey()` and `norm_key()` |
+| `ACTIVE_PURCHASE` | Phase 1 | `entry_status !== 'Cancelled'` — the `ACTIVE` of §6.2, for purchases |
+| `purchaseOrderKey` | Phase 1 | timeline sort key: `purchase_date` falling back to `created_at` |
+| `normaliseUnit` / `unitsComparable` | Phase 1 | whether two unit prices are per the same unit |
+| `comparePrice` | Phase 1 | `{ delta_pct, move }` vs the previous purchase — see §8.1 |
+| `totalsBySource` | Phase 1 | gross / paid / balance **per `entry_source`**, never combined |
+| `lastPurchaseDate` | Phase 1 | the newest non-null `purchase_date` in a set |
+| `buildItemTimeline` | Phase 1 | one item's `ItemPricePoint[]`, oldest → newest |
+
+`SETTLED_TOLERANCE` (`0.001`) is shared by `purchaseStatus` and `comparePrice`,
+and is the same value `buildTrades` uses — a float-rounding tolerance, not a
+business rule.
+
+### 7.1 `public.expenses_view` — the bridge back to the old shape
+
+Added by `0008`. Shaped like `expense_entries` (same column names and types) but
+sourced from `purchases` + `purchase_lines` + `payments` + `suppliers` +
+`receipts`. It exists so a later phase can point the existing screens at the new
+tables without rewriting them, and switch back if it goes wrong. **Nothing reads
+it today.**
+
+- **Created `with (security_invoker = true)`, and that is not optional.** A
+  plain Postgres view runs with its *owner's* rights and would hand every user
+  everyone else's rows, because RLS on the base tables is the only thing scoping
+  data in this app (§9). Requires Postgres 15+.
+- Two honest differences from the table: `id` is the **purchase** id, not the old
+  entry id (`legacy_entry_id` is exposed alongside it so the mapping stays
+  visible); and a purchase with **more than one line** collapses to a single row
+  whose description is the first line's, with `qty` and `unit_cost` reported as
+  `0` because there is no single answer. Every backfilled purchase has exactly
+  one line, so the view is exact for all current data — that changes the moment
+  Phase 2 or 3 creates a real multi-line invoice.
+- `0008` will not commit unless the view reproduces `expense_entries` field by
+  field across every row.
+
 ---
 
 ## 8. Screens and routes
@@ -526,6 +806,10 @@ migration and no backfill. That is the intended design.
 | `/projects/[id]` | `projects/[id]/page.tsx` → `ProjectDetail.tsx` | the 5 tabs |
 | `/projects/[id]/edit` | `…/edit/page.tsx` | edit project |
 | `/projects/[id]/expenses/new` | `…/expenses/new/page.tsx` | add expense |
+| `/suppliers` | `suppliers/page.tsx` | supplier list — see §8.1 |
+| `/suppliers/[id]` | `suppliers/[id]/page.tsx` | one supplier's statement |
+| `/items` | `items/page.tsx` | item list |
+| `/items/[id]` | `items/[id]/page.tsx` | one item's price timeline |
 | `/settings` | `settings/page.tsx` | trade lookups |
 | `/` | `app/page.tsx` | login |
 | `/reset-password` | `reset-password/page.tsx` | password reset |
@@ -565,6 +849,71 @@ add a column, add it to both**, or it will be invisible on a phone.
 | Materials & Suppliers | `MaterialsTab.tsx` | all entries |
 | Price Tracker | `PricesTab.tsx` | all entries |
 
+### 8.1 The supplier and item screens (Phase 1)
+
+Four routes, added 2026-08-14, reading the §4.6 transaction core. They are
+**read-only** — no form, no API route, no mutation of any kind; writes are
+Phase 2's job. All four are async Server Components with `dynamic =
+"force-dynamic"`, and all four ship **no client JavaScript**: the expand/collapse
+on a purchase is a plain `<details>` element, not React state.
+
+They are also **cross-project by design**. A supplier and an item sit above the
+project (§4.6), so these pages deliberately span every project at once — which
+is why none of them shows a "project total".
+
+| Route | Loader in `lib/data.ts` | Shows |
+|---|---|---|
+| `/suppliers` | `getSuppliers()` | every supplier: records, diary spend + owed, ledger spend + owed, last purchase. Sorted by record **count** |
+| `/suppliers/[id]` | `getSupplierBundle(id)` | four stat cards and one statement table **per `entry_source`**: date, invoice, project, gross, paid, balance, status, payment dates + methods, running total. Each row expands to its lines and payments |
+| `/items` | `getItems()` | every **Materials**-category item (Labour items are filtered out): category, unit, times bought, suppliers, latest unit price, trend, last bought. Sorted by times bought |
+| `/items/[id]` | `getItemBundle(id)` | the price timeline, oldest → newest across every supplier and project: date, source, supplier, project, invoice, qty, unit, unit price, line net, and the change vs the previous purchase |
+
+The loaders follow `getProjectBundle`'s shape: a fixed handful of queries per
+page, never one per row, and never a `.eq("user_id", …)` — RLS scopes it (§9).
+`selectIn()` skips a round trip when the id list is empty.
+
+**Three rules these screens are built on. Breaking any one of them makes the
+numbers lie:**
+
+1. **Diary and ledger money is never added up.** Every total on every one of
+   these pages is split by `entry_source` and labelled — separate columns on the
+   list, separate card groups and separate tables on the detail pages, and a
+   separate running total per group. This is §5 applied to `purchases`: the two
+   overlap, so a combined figure is the double-count. The supplier list is even
+   *sorted* on the record count rather than on money for the same reason.
+   `components/purchases/SourceNote.tsx` says so on screen.
+2. **Cancelled purchases are excluded everywhere**, matching `ACTIVE` in §6.2.
+3. **A percentage is never computed across two different units.** See below.
+
+**Unit handling — the point of the whole feature.** `comparePrice` in
+`lib/purchases.ts` only returns a percentage when the two purchases are per the
+same unit. Otherwise it returns `move: 'unit_change'` with a **null** delta, and
+`PriceMoveBadge` renders "bag → tonne — check pack size" instead of a number.
+Two rows that both record *no* unit compare as equal — that is the entire legacy
+dataset, where `purchase_lines.unit` is null everywhere, and it is the basis the
+Price Tracker already compares on. A recorded unit never compares equal to a
+missing one.
+
+**The delta chain runs within one `entry_source`.** Chaining a ledger price onto
+a diary price would compare a purchase against its own duplicate record and
+invent a price movement that never happened.
+
+**Lines with no unit price stay in the timeline** but carry no delta and do not
+advance the chain. This is not a gap to be filled: the spreadsheet's `Qty` and
+`Unit Cost` columns are empty on all 111 rows (§3.1), so every diary line
+legitimately has no price per unit, and the item pages say so rather than
+showing a zero. **Since `0009` that is now every line in the database**, so the
+item timelines show dates and quantities but no prices until unit costs start
+being entered. That is the honest state, not a regression — the prices these
+pages used to show came from the retired import and were instalment amounts
+(§3.0).
+
+> ⚠️ **The timeline is ordered by `purchase_date`, which for legacy data is
+> really the *paid* date, and is null on 91 rows** (§4.6). `purchaseOrderKey`
+> falls back to `created_at` for those, so an undated row sorts by import time —
+> the same caveat §6.8 records for the Price Tracker. Real purchase dates only
+> arrive with the Phase 3 importer.
+
 ### API — `app/api/`
 
 All handlers call `requireUser()` first.
@@ -585,6 +934,10 @@ All handlers call `requireUser()` first.
 | `/api/projects/[id]/export/excel` | GET | xlsx ⚠️ unfiltered |
 | `/api/projects/[id]/export/pdf` | GET | pdf ⚠️ unfiltered |
 | `/api/expenses/[eid]/receipt` | POST | upload to `receipts` bucket |
+| `/api/invoices/upload-url` | POST | signed upload URL + new `invoice_uploads` row (migration 0010) |
+| `/api/invoices/[id]` | GET | the upload row + a 5-min signed read URL for the file |
+| `/api/invoices/[id]/extract` | POST | download → extract → resolve; always ends on a terminal status |
+| `/api/invoices/[id]/commit` | POST | writes the reviewed invoice via `createPurchase`; no UI reaches this yet |
 | `/api/lookups/trades`, `/[id]` | GET/POST/PATCH/DELETE | trade lookups |
 | `/api/auth/signout` | POST | sign out |
 
@@ -678,14 +1031,15 @@ If the app shows no data:
    **new UUID**. Same email does *not* mean same user.
 3. Beware the decoy: `trg_seed_trades` gives a fresh account 13 trade lookups
    immediately, so "some data exists" is misleading.
-4. **Rebuild from the spreadsheets.** Set `USER_ID` at the top of
+4. **Rebuild from the spreadsheet.** Set `USER_ID` at the top of
    `scripts/build_import_sql.py` to the current UUID, run
    `python scripts/build_import_sql.py`, then run the regenerated
-   `supabase/migrations/0007_reimport_weeks_1_23.sql` in the SQL editor.
-   Do **not** also run `0005` or `0006` — both are superseded and carry
-   do-not-run banners.
+   `supabase/migrations/0009_reimport_file1_only.sql` in the SQL editor,
+   **followed by `0008_transaction_core.sql`** to rebuild the purchases,
+   suppliers and items from it. Do **not** also run `0005`, `0006` or `0007` —
+   all three are superseded and carry do-not-run banners.
 
-`0007` is **re-runnable** — it deletes the prior import of the project first,
+`0009` is **re-runnable** — it deletes the prior import of the project first,
 and it refuses to commit if any week total disagrees with the spreadsheet.
 
 Current UUID: `5d3fc9ff-92a3-4923-a18b-7eb5eade3105` (`admin@pk.com`).
@@ -705,17 +1059,32 @@ place. The same deletion would cause the same loss again.
 | `0004_reassign_orphaned_data.sql` | **deleted, never applied** — written against a wrong hypothesis | ❌ |
 | `0005_reimport_data.sql` | weeks 1–15 rebuild. **Superseded by 0007 — do not run.** Stored incl-VAT totals in `actual_amount`, causing double VAT | ⚠️ ran 2026-07-22 |
 | `0006_mark_paid_entries.sql` | marked the 20 paid diary rows. **Superseded by 0007 — do not run.** Would now overwrite `paid_amount` with the ex-VAT figure | ⚠️ ran 2026-07-22 |
-| `0007_reimport_weeks_1_23.sql` | full rebuild from both spreadsheets, weeks 1–23. **Generated** by `scripts/build_import_sql.py`. Idempotent, sets Paid status at import time, and **aborts the transaction unless every week total equals the spreadsheet's** | ❌ **not yet run** |
+| `0007_reimport_weeks_1_23.sql` | full rebuild from both spreadsheets, weeks 1–23. **Superseded by 0009 — do not run.** It re-imports the other job's 96 ledger rows and restores the £98,932.12 budget | ⚠️ ran 2026-08-14 |
+| `0008_transaction_core.sql` | the Route C transaction core: 8 new tables, `norm_key()`, RLS, the backfill of every expense row into one purchase + one line, and `expenses_view`. Additive — changes nothing that already existed. Re-runnable | ✅ ran 2026-08-14 |
+| `0009_reimport_file1_only.sql` | rebuild from `..._Updated.xlsx` **alone**: 111 diary rows, 0 ledger rows, `target_budget = 0`, and **33 real merchants in `supplier`** (§3.2). Also clears `suppliers` and `items`, which `0008` seeds but never prunes. **Generated** by `scripts/build_import_sql.py`. Idempotent, and **aborts the transaction unless every week total equals the spreadsheet's** | ⬜ **not yet run** |
 
-`0007` is a **generated file**. Edit the Python script and regenerate — never
+`0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.
+
+**Run `0009` first, then `0008` immediately after.** `0008` copies whatever is
+in `expense_entries` at the moment it runs, and `0009` deletes the project —
+`purchases.project_id` is `on delete cascade`, so the backfill goes with it.
+Between the two runs, `/suppliers` and `/items` are empty.
+
+**Why `0009` deletes `suppliers` and `items` itself:** they sit *above* the
+project (§4.6), so the project delete does not reach them, and `0008`'s seeding
+is `on conflict do nothing` — additive only, it never removes anything. Without
+that explicit delete, all 37 merchants seeded from the retired import would
+linger on `/suppliers` and `/items` with no purchase behind them. The aliases
+cascade, and `purchases.supplier_id` / `purchase_lines.item_id` are
+`on delete set null`, so nothing else is disturbed.
 
 ### Scripts
 
 | Script | Reads | Writes |
 |---|---|---|
-| `scripts/build_import_sql.py` | both spreadsheets | `0007_reimport_weeks_1_23.sql` |
-| `scripts/verify_against_spreadsheet.py` | the generated `0007` SQL + File 1 | nothing — prints a pass/fail report |
+| `scripts/build_import_sql.py` | `..._Updated.xlsx` only | `0009_reimport_file1_only.sql` |
+| `scripts/verify_against_spreadsheet.py` | the generated `0009` SQL + `..._Updated.xlsx` | nothing — prints a pass/fail report |
 | `scripts/gen_mark_paid_sql.py` | — | **disabled**; exits with an explanation |
 
 `verify_against_spreadsheet.py` is the regression test this project never had.
@@ -728,25 +1097,75 @@ means the app and the spreadsheet agree. Run it after any change to the import.
 
 ## 13. Current figures
 
-Project `46 Glenferrie Road`. The right-hand column is what `0007` produces —
-**it takes effect only once `0007` has been run in the SQL editor.**
+Project `46 Glenferrie Road`. **The right-hand column is what the app shows once
+`0009` is run** (it has not been run yet — see §12). `0008` is additive and
+moves none of it.
 
-| | After `0006` (2026-07-22) | After `0007` (2026-08-06) |
+| | After `0007` (2026-08-14) | After `0009` |
 |---|---|---|
-| Target Budget | £98,932.12 | £98,932.12 *(unchanged)* |
-| Total Quoted | £42,411.81 | £151,644.78 |
-| Actual Total (incl VAT) | £43,686.17 | £151,644.78 |
-| Variance vs Quote | £1,274.36 over | £0.00 |
+| Target Budget | £98,932.12 | **£0.00 — card hidden** |
+| Total Quoted | £151,644.78 | £151,644.78 *(unchanged)* |
+| Actual Total (incl VAT) | £151,644.78 | £151,644.78 *(unchanged)* |
+| Variance vs Quote | £0.00 | £0.00 *(unchanged)* |
 | Paid to Date | £13,273.40 | £13,273.40 *(unchanged)* |
-| Remaining to Pay | £30,412.77 | £138,371.38 |
-| Weeks Tracked | 15 | 23 |
-| Budget used | 44% | 153% |
-| Diary rows | 40 (20 Paid, 20 Planned) | 111 (20 Paid, 91 Planned) |
-| Ledger rows | 96 | 96 *(unchanged)* |
+| Remaining to Pay | £138,371.38 | £138,371.38 *(unchanged)* |
+| Weeks Tracked | 23 | 23 *(unchanged)* |
+| Budget used | 153% | **hidden** |
+| Diary rows | 111 (20 Paid, 91 Planned) | 111 *(unchanged)* |
+| Ledger rows | 96 | **0** |
+| Price Tracker items | 37 (11 with a fake delta) | **0 — empty state** |
+| Suppliers / Items (`0008`) | 37 / 143 | **33 / 52** — see the note below |
+| Rows carrying a supplier | 8 | **46** (45 Materials + `Stevenage Skips`) |
 
-Every figure in the right-hand column equals the corresponding cell in File 1's
-`Summary` tab — `Forecast Total (incl. VAT)`, `Paid to date`, and
+**Only two things moved: the budget, and the ledger.** Every diary figure is
+untouched, because the retired import never fed any of them — that is the proof
+it was a separate dataset all along.
+
+Every figure in the right-hand column equals the corresponding cell in the
+spreadsheet's `Summary` tab — `Target Budget (incl. VAT)` (blank),
+`Forecast Total (incl. VAT)`, `Paid to date`, and
 `Committed / no paid-date logged` respectively.
+
+> ✅ **Fixed 2026-08-17: `/suppliers` showed seven notes and one merchant.**
+> The `Supplier` column had only 8 non-empty cells and seven of them were
+> sentences typed into the wrong column. The real merchants were in
+> `Task / Description` all along. The importer now reads them from there against
+> an owner-confirmed list, and moves the seven notes into `notes` — see §3.2 for
+> the rule and the guard that keeps it honest.
+>
+> | Sheet row | Week | Description | Supplier cell contained | Now |
+> |---|---|---|---|---|
+> | 88 | 7 | Dave | `£300 PAID FROM OWED` | in `notes` |
+> | 98 | 8 | dave | `£400 paid from whats owed` | in `notes` |
+> | 100 | 8 | Owen Brickwork | `1 day - to DPC` | in `notes` |
+> | 111 | 9 | Owen Brickwork | `all brickwork completed` | in `notes` |
+> | 112 | 9 | Dave Builder | `steels in` | in `notes` |
+> | 113 | 9 | Labourers | `steels help plus disposal` | in `notes` |
+> | 114 | 9 | Toby | `Toby cleared out huge earth pile` | in `notes` |
+>
+> The **spreadsheet is still wrong** — this is corrected on import, not at
+> source. Anyone editing the sheet should type merchants into `Supplier` and
+> notes into `Dependencies/Notes`; if a *new* merchant is typed into a Materials
+> row's description, `check_suppliers()` stops the next import until the name is
+> added to `SUPPLIER_NAMES`.
+
+**The biggest merchants** (incl-VAT, from `python scripts/build_import_sql.py`):
+Lawsons £20,631.69 (3 rows) · Alspec Windows £13,472.80 (2) · Cabinets Direct
+(Kitchen) £5,000.00 · St Albans Bathroom Centre £4,850.00 · Miscl Roofing
+Materials £3,145.42 · Eaves Electrical £3,105.00 · Lionvest £3,050.78 ·
+CAD Stairs £3,000.00 · Mark Cornice £2,924.25 · Ryan Steels £2,370.00.
+
+> ⚠️ **Still open, and out of scope of the supplier fix: `items` are merchants
+> too.** `0008` seeds `items` from distinct `description`, and on Materials rows
+> the description *is* the merchant name — so `/items` lists `Lawsons` and
+> `Topps Tiles` as though they were materials. The sheet has no item column to
+> read instead, so there is nothing honest to import. Real item names arrive
+> with the Phase 3 importer, or as line items typed into new expenses.
+>
+> As of 2026-08-17, `getItems()` filters to `category === "Materials"`, so
+> Labour-category items (subcontractor/trade names seeded the same way) no
+> longer show on `/items` — but the merchant-as-item problem above is
+> unchanged for the Materials rows that remain.
 
 Use these as a regression baseline. If a change moves one of them, that should
 be intentional and recorded in `updates.md`. The cheapest way to check is
@@ -756,7 +1175,6 @@ be intentional and recorded in `updates.md`. The cheapest way to check is
 
 ## 14. Before you change anything — checklist
 
-1. Read this file and the last few entries in `updates.md`.
 2. Ask: does this touch a **diary/ledger** boundary? Re-read §5.
 3. Ask: am I about to store a **computed total**? Don't — §2.
 4. Ask: does this need a **migration**? If so, it must be run by hand in the
