@@ -31,6 +31,7 @@ export default async function NewExpensePage({
           trades={bundle.lookups}
           nextWeek={nextWeek}
           priorEntries={bundle.entries}
+          invoiceLines={bundle.invoiceLines}
         />
       </div>
     </div>

@@ -8,6 +8,9 @@
 // so it cannot drift either — read it, never write it.
 
 import type {
+  ExpenseEntry,
+  ExpenseEntryComputed,
+  InvoiceLineView,
   ItemPricePoint,
   Payment,
   Purchase,
@@ -198,6 +201,100 @@ export function comparePrice(
   return { delta_pct, move: delta_pct > 0 ? "up" : "down" };
 }
 
+// ============================================================
+// Expense form price advisories — one merged history per material
+// ============================================================
+// ExpenseForm's "have I paid more?" warning used to read expense_entries
+// alone. The spreadsheet import that filled that table was removed on
+// 2026-08-20, so it has nothing left to compare against — even though the
+// same material's price history now lives in purchase_lines, one row per
+// invoice line (about.md §8.1). This merges both into a single most-recent
+// priced observation per material so the warning can fire again.
+//
+// Same rules as the rest of the transaction core:
+//   • Cancelled rows are dropped, and so is the ledger side (about.md §5) —
+//     empty today, but the filter stays in place regardless.
+//   • A unit price of 0 is not a price and never enters the comparison.
+//   • Matching is on the normalised description — the same key priceKey()
+//     already uses for expense_entries, kept in step with normaliseName()
+//     here and public.norm_key() in the database.
+//   • The percentage itself is always comparePrice()'s, never recomputed by
+//     hand, so a unit mismatch renders as a note instead of an invented
+//     number — expense_entries has no unit column, so the entries side of
+//     this always carries unit: null, and comparePrice's own rule ("a known
+//     unit never compares equal to an unknown one") does the rest.
+
+export interface MaterialPriceObservation extends PricedObservation {
+  date: string | null;
+  supplier: string | null;
+}
+
+type PricedEntry = Pick<
+  ExpenseEntry,
+  | "id"
+  | "description"
+  | "category"
+  | "status"
+  | "source"
+  | "unit_cost"
+  | "supplier"
+  | "paid_date"
+  | "created_at"
+>;
+
+type PricedLine = Pick<
+  InvoiceLineView,
+  "description" | "unit_price" | "unit" | "date" | "supplier" | "entry_source"
+>;
+
+/**
+ * The most recent priced observation of each material, keyed by
+ * normaliseName(description), combining hand-entered diary rows with invoice
+ * lines for the same project.
+ */
+export function buildMaterialPriceIndex(
+  entries: PricedEntry[],
+  invoiceLines: PricedLine[],
+  excludeEntryId?: string
+): Map<string, MaterialPriceObservation> {
+  const held = new Map<string, MaterialPriceObservation & { rank: number }>();
+
+  const consider = (key: string, obs: MaterialPriceObservation, rank: number) => {
+    if (!key) return;
+    const current = held.get(key);
+    if (!current || rank >= current.rank) held.set(key, { ...obs, rank });
+  };
+
+  for (const e of entries) {
+    if (e.id === excludeEntryId) continue;
+    if (e.category !== "Materials") continue;
+    if (e.status === "Cancelled") continue;
+    if (e.source === "ledger") continue;
+    const unit_price = Number(e.unit_cost);
+    if (unit_price <= 0) continue;
+    const dateStr = e.paid_date || e.created_at;
+    consider(
+      normaliseName(e.description),
+      { unit_price, unit: null, date: e.paid_date, supplier: e.supplier },
+      new Date(dateStr).getTime()
+    );
+  }
+
+  for (const l of invoiceLines) {
+    if (l.entry_source === "ledger") continue;
+    if (l.unit_price <= 0) continue;
+    consider(
+      normaliseName(l.description),
+      { unit_price: l.unit_price, unit: l.unit, date: l.date, supplier: l.supplier },
+      l.date ? new Date(l.date).getTime() : Number.NEGATIVE_INFINITY
+    );
+  }
+
+  const result = new Map<string, MaterialPriceObservation>();
+  for (const [key, { rank, ...obs }] of held) result.set(key, obs);
+  return result;
+}
+
 // Split a set of purchases into one gross/paid/balance total per entry_source,
 // diary first. Never returns a combined figure — adding the two double-counts
 // the same spend (about.md §5).
@@ -299,4 +396,94 @@ export function buildItemTimeline(
       previous_unit: previous?.unit ?? null,
     };
   });
+}
+
+// ============================================================
+// Invoice → expense bridge
+// ============================================================
+// Convert purchases (the transaction core) into synthetic ExpenseEntryComputed
+// objects so they can be merged into the entries array that every calculation
+// function already consumes. Nothing changes in buildSummary / buildTrades /
+// buildMaterialLedger / buildPriceHistory — they all just see more rows.
+//
+// Mapping rationale
+//   • gross_total (net + vat generated column) → total_incl_vat / actual_amount
+//   • quoted_gross                             → quoted_amount (may be null)
+//   • paid (Σ payments)                        → paid_amount
+//   • balance (gross − paid)                   → remaining
+//   • vat_total                                → vat_amount
+//   • net_total                                → subtotal (ex-VAT)
+//   • category / trade / week_no / supplier    → forwarded as-is
+//   • source                                   → "invoice" (new union member)
+//
+// Price Tracker (buildPriceHistory) only fires for entries where
+// unit_cost > 0 AND category = "Materials". A purchase-level synthetic entry
+// has no unit cost (that lives on the lines), so it will not appear in the
+// Price Tracker — which is the correct, honest behaviour.
+
+export function purchasesToSyntheticEntries(
+  purchases: PurchaseComputed[],
+  supplierNames: Map<string, string>
+): ExpenseEntryComputed[] {
+  // Cancelled invoices are deliberately NOT filtered out here, unlike almost
+  // everywhere else. This feeds the Expenses list, and you cannot un-cancel
+  // what you cannot see — cancelling one from the status dropdown used to make
+  // the row vanish with no way back. Every consumer of these entries already
+  // drops `status === "Cancelled"` from its figures, so including them costs
+  // nothing but a visible row. The purchases screen lists them for the same
+  // reason (about.md §6.2).
+  return purchases
+    .map((p): ExpenseEntryComputed => {
+      const gross = Number(p.gross_total);
+      const vat = Number(p.vat_total);
+      const net = Number(p.net_total);
+      const paid = Number(p.paid);
+      const quoted = p.quoted_gross != null ? Number(p.quoted_gross) : gross;
+      const supplierName = p.supplier_id
+        ? (supplierNames.get(p.supplier_id) ?? null)
+        : null;
+
+      return {
+        // Required identity fields — fabricated so they never collide with real
+        // expense_entry rows (which use UUIDs from the database).
+        id: `inv:${p.id}`,
+        user_id: p.user_id,
+        project_id: p.project_id,
+        // Contextual fields
+        week_number: p.week_no ?? 1,
+        description: p.invoice_no
+          ? `Invoice ${p.invoice_no}${supplierName ? ` – ${supplierName}` : ""}`
+          : supplierName
+            ? `Invoice – ${supplierName}`
+            : "Invoice",
+        category: p.category ?? null,
+        trade: p.trade ?? null,
+        location_room: p.location_room ?? null,
+        notes: p.notes ?? null,
+        supplier: supplierName,
+        invoice_ref: p.invoice_no,
+        // Dates / payment
+        paid_date: p.purchase_date,
+        payment_method: null,
+        // Cost model — maps invoice totals onto the expense entry fields.
+        quoted_amount: quoted,
+        actual_amount: net,
+        paid_amount: paid,
+        qty: 0,
+        unit_cost: 0,
+        vat_rate: net > 0 ? Math.round((vat / net) * 100) : 0,
+        // Lifecycle
+        status: p.entry_status,
+        receipt_url: null,
+        source: "invoice",
+        created_at: p.created_at,
+        updated_at: p.updated_at,
+        // Computed fields (mirrors computeEntry logic)
+        materials_cost: 0,
+        subtotal: net,
+        vat_amount: vat,
+        total_incl_vat: gross,
+        remaining: gross - paid,
+      };
+    });
 }

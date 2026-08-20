@@ -22,30 +22,36 @@ const BUCKET = "invoices";
 // job is entirely getting the extraction into that form's shape; nothing
 // here writes anything — POST /api/invoices/[id]/commit does that, once the
 // form is submitted.
+//
+// It carries no project in its route. The upload arrived without one
+// (migration 0012) and the form's own Project field decides where it is
+// filed, which is why this lives under /invoices rather than under a project.
 export default async function ReviewInvoicePage({
   params,
 }: {
-  params: { id: string; uploadId: string };
+  params: { uploadId: string };
 }) {
   const supabase = createClient();
-  const [{ data: uploadRow }, bundle] = await Promise.all([
-    supabase.from("invoice_uploads").select("*").eq("id", params.uploadId).single(),
-    getPurchaseFormBundle(params.id),
-  ]);
-  if (!uploadRow || !bundle) notFound();
+  const { data: uploadRow } = await supabase
+    .from("invoice_uploads")
+    .select("*")
+    .eq("id", params.uploadId)
+    .single();
+  if (!uploadRow) notFound();
   const upload = uploadRow as InvoiceUpload;
+
+  // An upload started inside a project keeps that project pre-selected; one
+  // from the nav bar has none, and the form asks.
+  const bundle = await getPurchaseFormBundle(upload.project_id);
+  if (!bundle) notFound();
 
   const crumbs = (
     <nav className="mb-4 text-sm text-gray-500">
-      <Link href={`/projects/${params.id}`} className="hover:underline">
-        {bundle.project.name}
-      </Link>{" "}
-      /{" "}
-      <Link href={`/projects/${params.id}/purchases`} className="hover:underline">
+      <Link href="/invoices" className="hover:underline">
         Invoices
       </Link>{" "}
       /{" "}
-      <Link href={`/projects/${params.id}/purchases/upload`} className="hover:underline">
+      <Link href="/invoices/upload" className="hover:underline">
         Upload
       </Link>{" "}
       / Review
@@ -61,15 +67,15 @@ export default async function ReviewInvoicePage({
           title="Already saved"
           description="This upload was already committed to an invoice."
           action={
-            upload.invoice_id ? (
+            upload.invoice_id && upload.project_id ? (
               <Link
-                href={`/projects/${params.id}/purchases/${upload.invoice_id}/edit`}
+                href={`/projects/${upload.project_id}/purchases/${upload.invoice_id}/edit`}
                 className="btn-primary"
               >
                 Open the invoice
               </Link>
             ) : (
-              <Link href={`/projects/${params.id}/purchases`} className="btn-primary">
+              <Link href="/invoices" className="btn-primary">
                 Back to invoices
               </Link>
             )
@@ -92,7 +98,7 @@ export default async function ReviewInvoicePage({
               : "Come back once it finishes reading, or refresh in a moment."
           }
           action={
-            <Link href={`/projects/${params.id}/purchases/upload`} className="btn-primary">
+            <Link href="/invoices/upload" className="btn-primary">
               Back to upload queue
             </Link>
           }
@@ -113,10 +119,10 @@ export default async function ReviewInvoicePage({
           description="The stored result doesn't match the expected shape. Retry the upload, or enter the invoice by hand."
           action={
             <div className="flex flex-wrap justify-center gap-2">
-              <Link href={`/projects/${params.id}/purchases/upload`} className="btn-secondary">
+              <Link href="/invoices/upload" className="btn-secondary">
                 Back to upload queue
               </Link>
-              <Link href={`/projects/${params.id}/purchases/new`} className="btn-primary">
+              <Link href="/invoices/new" className="btn-primary">
                 Enter manually
               </Link>
             </div>
@@ -186,7 +192,7 @@ export default async function ReviewInvoicePage({
   const isPdf = upload.mime_type === "application/pdf";
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="mx-auto max-w-7xl">
       {crumbs}
       <h1 className="mb-1 text-2xl font-bold text-gray-900">Review invoice</h1>
       <p className="mb-3 text-sm text-gray-500">
@@ -196,7 +202,11 @@ export default async function ReviewInvoicePage({
       </p>
       <InvoiceScopeNote className="mb-4" />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      {/* The document is the reference, the form is the work — so the form
+          gets the larger share. The preview is capped short enough that the
+          fields beside it are readable without scrolling past it; click
+          "Open full size" for the document itself. */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_3fr]">
         <div className="lg:sticky lg:top-4 lg:self-start">
           <div className="card overflow-hidden p-0">
             {signed?.signedUrl ? (
@@ -204,14 +214,14 @@ export default async function ReviewInvoicePage({
                 <iframe
                   src={signed.signedUrl}
                   title={upload.original_name ?? "Invoice"}
-                  className="h-[70vh] w-full"
+                  className="h-[45vh] w-full lg:h-[60vh]"
                 />
               ) : (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={signed.signedUrl}
                   alt={upload.original_name ?? "Invoice"}
-                  className="max-h-[80vh] w-full object-contain"
+                  className="max-h-[45vh] w-full object-contain lg:max-h-[60vh]"
                 />
               )
             ) : (
@@ -220,6 +230,16 @@ export default async function ReviewInvoicePage({
               </p>
             )}
           </div>
+          {signed?.signedUrl && (
+            <a
+              href={signed.signedUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-2 inline-block text-sm text-brand hover:underline"
+            >
+              Open full size ↗
+            </a>
+          )}
         </div>
 
         <PurchaseForm

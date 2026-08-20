@@ -1,70 +1,121 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch } from "@/lib/fetcher";
-import { computeEntries, formatCurrency } from "@/lib/calculations";
+import { formatCurrency } from "@/lib/calculations";
 import {
   buildSummary,
   buildByWeek,
   buildByCategory,
-  buildTrades,
-  buildMaterialLedger,
-  buildPriceHistory,
-  buildPriceAlerts,
 } from "@/lib/summary";
+import {
+  buildItemPriceAlerts,
+  buildItemPriceRows,
+  buildSupplierRows,
+  buildTradeRows,
+  labourLines,
+  materialLines,
+} from "@/lib/invoiceViews";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useToast } from "@/components/ui/Toast";
+import { InvoiceBanner } from "./InvoiceBanner";
 import OverviewTab from "./OverviewTab";
 import ExpensesTab from "./ExpensesTab";
 import TradesTab from "./TradesTab";
+import LabourTab from "./LabourTab";
 import MaterialsTab from "./MaterialsTab";
+import SuppliersTab from "./SuppliersTab";
 import PricesTab from "./PricesTab";
 import type {
   Project,
-  ExpenseEntry,
   ExpenseEntryComputed,
+  InvoiceLineView,
+  PurchaseComputed,
   TradeLookup,
   ProjectWeek,
+  PurchaseTotals,
 } from "@/types";
 
-type Tab = "overview" | "expenses" | "trades" | "materials" | "prices";
+type Tab =
+  | "overview"
+  | "expenses"
+  | "trades"
+  | "labour"
+  | "materials"
+  | "suppliers"
+  | "prices";
 
+// "Trades & Labour" and "Materials & Suppliers" were each two questions sharing
+// one screen. They are now four tabs, because the answers come from different
+// shapes of data: Trades and Suppliers roll up whole invoices (payment is a
+// document-level fact), while Labour and Materials list individual lines.
 const TABS: { key: Tab; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "expenses", label: "Expenses" },
-  { key: "trades", label: "Trades & Labour" },
-  { key: "materials", label: "Materials & Suppliers" },
+  { key: "trades", label: "Trades" },
+  { key: "labour", label: "Labour" },
+  { key: "materials", label: "Materials" },
+  { key: "suppliers", label: "Suppliers" },
   { key: "prices", label: "Price Tracker" },
 ];
+const TAB_KEYS = new Set<string>(TABS.map((t) => t.key));
+
+// Tab selection is otherwise component-local state, so a plain link back to
+// this page always landed on Overview. A `?tab=` query param lets a caller
+// (e.g. the Expenses tab's invoice Edit link) say where to land instead —
+// read once on mount, same as the default always was.
+function initialTabFrom(value: string | null): Tab {
+  return value && TAB_KEYS.has(value) ? (value as Tab) : "overview";
+}
 
 export default function ProjectDetail({
   project,
   initialEntries,
   trades,
   initialWeeks,
+  invoiceTotals,
+  invoiceLines,
+  purchases,
+  supplierNames,
 }: {
   project: Project;
   initialEntries: ExpenseEntryComputed[];
   trades: TradeLookup[];
   initialWeeks: ProjectWeek[];
+  invoiceTotals: PurchaseTotals[];
+  invoiceLines: InvoiceLineView[];
+  purchases: PurchaseComputed[];
+  supplierNames: Record<string, string>;
 }) {
   const router = useRouter();
   const toast = useToast();
-  const [tab, setTab] = useState<Tab>("overview");
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<Tab>(() =>
+    initialTabFrom(searchParams.get("tab"))
+  );
   const [entries, setEntries] = useState<ExpenseEntryComputed[]>(initialEntries);
   const [exportOpen, setExportOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // The server is the only thing that can rebuild the invoice-derived tabs, so
+  // a change refetches the entry list AND asks Next to re-render the page. The
+  // entry list arrives first and keeps the Expenses tab responsive; the refresh
+  // catches everything else up a moment later.
+  //
+  // This endpoint returns diary entries and invoices merged, exactly as
+  // getProjectBundle does. It used to return expense_entries alone, which is
+  // why marking an invoice paid made the whole list vanish: the invoice rows
+  // were simply not in the reply.
   const reloadEntries = useCallback(async () => {
-    const raw = await apiFetch<ExpenseEntry[]>(
+    const raw = await apiFetch<ExpenseEntryComputed[]>(
       `/api/projects/${project.id}/expenses`
     );
-    // The API already returns computed entries, but recompute defensively.
-    setEntries(computeEntries(raw as ExpenseEntry[]));
-  }, [project.id]);
+    setEntries(raw);
+    router.refresh();
+  }, [project.id, router]);
 
   // Overview reflects the week-by-week Expenses diary only (source !== 'ledger'),
   // so its analytics cover the 15 diary weeks — not the imported File 2 ledger.
@@ -82,13 +133,28 @@ export default function ProjectDetail({
     [diaryEntries, initialWeeks]
   );
   const byCategory = useMemo(() => buildByCategory(diaryEntries), [diaryEntries]);
-  const tradeSummary = useMemo(() => buildTrades(entries), [entries]);
-  const materialLedger = useMemo(() => buildMaterialLedger(entries), [entries]);
-  const priceHistory = useMemo(() => buildPriceHistory(entries), [entries]);
-  const priceAlerts = useMemo(
-    () => buildPriceAlerts(priceHistory),
-    [priceHistory]
+
+  // The five invoice-driven tabs. All of them read purchase lines rather than
+  // expense entries — see the header of lib/invoiceViews.ts for why.
+  const supplierNameMap = useMemo(
+    () => new Map(Object.entries(supplierNames)),
+    [supplierNames]
   );
+  const tradeRows = useMemo(
+    () => buildTradeRows(purchases, invoiceLines, supplierNameMap),
+    [purchases, invoiceLines, supplierNameMap]
+  );
+  const supplierRows = useMemo(
+    () => buildSupplierRows(purchases, invoiceLines, supplierNameMap),
+    [purchases, invoiceLines, supplierNameMap]
+  );
+  const materials = useMemo(() => materialLines(invoiceLines), [invoiceLines]);
+  const labour = useMemo(() => labourLines(invoiceLines), [invoiceLines]);
+  const priceRows = useMemo(
+    () => buildItemPriceRows(invoiceLines),
+    [invoiceLines]
+  );
+  const priceAlerts = useMemo(() => buildItemPriceAlerts(priceRows), [priceRows]);
 
   const budgetPct =
     summary.target_budget > 0
@@ -195,6 +261,17 @@ export default function ProjectDetail({
         </div>
       </div>
 
+      {/* What has been invoiced against this project, above the tabs so it is
+          visible from every one of them. */}
+      {invoiceTotals.length > 0 && (
+        <div className="mb-4">
+          <InvoiceBanner
+            totals={invoiceTotals}
+            purchasesHref={`/projects/${project.id}/purchases`}
+          />
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="mb-4 flex gap-1 overflow-x-auto border-b border-gray-200">
         {TABS.map((t) => (
@@ -227,12 +304,31 @@ export default function ProjectDetail({
           project={project}
           entries={entries}
           trades={trades}
+          invoiceLines={invoiceLines}
           onChanged={reloadEntries}
         />
       )}
-      {tab === "trades" && <TradesTab trades={tradeSummary} />}
-      {tab === "materials" && <MaterialsTab rows={materialLedger} />}
-      {tab === "prices" && <PricesTab items={priceHistory} />}
+      {tab === "trades" && <TradesTab projectId={project.id} rows={tradeRows} />}
+      {tab === "labour" && (
+        <LabourTab projectId={project.id} lines={labour} />
+      )}
+      {tab === "materials" && (
+        <MaterialsTab projectId={project.id} lines={materials} />
+      )}
+      {tab === "suppliers" && (
+        <SuppliersTab
+          projectId={project.id}
+          rows={supplierRows}
+          lines={invoiceLines}
+        />
+      )}
+      {tab === "prices" && (
+        <PricesTab
+          projectId={project.id}
+          rows={priceRows}
+          hasLines={invoiceLines.length > 0}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmDelete}

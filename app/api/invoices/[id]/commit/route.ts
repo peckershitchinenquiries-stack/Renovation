@@ -31,6 +31,10 @@ interface SupplierDecision {
 interface CommitBody {
   purchase: PurchaseInput;
   supplier?: SupplierDecision | null;
+  // Which project to file this invoice against, chosen on the review screen.
+  // Optional only for an upload that already carries one (the in-project flow
+  // that predates migration 0012); one of the two must be present.
+  project_id?: string | null;
 }
 
 // Step 3: write the reviewed invoice into `purchases`.
@@ -67,6 +71,25 @@ export async function POST(
     body.purchase as unknown as Record<string, unknown>
   );
   if (hasErrors(errors)) return error("Validation failed", 422, errors);
+
+  // Where this invoice gets filed. The review screen's Project field wins over
+  // whatever the upload was created with, so changing your mind on the review
+  // screen actually moves it; the upload's own project_id is the fallback for
+  // an upload that was started inside a project.
+  const projectId = body.project_id?.trim() || upload.project_id;
+  if (!projectId)
+    return error("Choose a project for this invoice before saving.", 400, {
+      project_id: "Choose a project",
+    });
+
+  // RLS-backed: another user's project reads as absent, so this is a 404 and
+  // never a foreign-key error halfway through createPurchase.
+  const { data: project } = await auth.supabase
+    .from("projects")
+    .select("id")
+    .eq("id", projectId)
+    .single();
+  if (!project) return error("Project not found", 404);
 
   const decision = body.supplier ?? null;
 
@@ -110,7 +133,7 @@ export async function POST(
     purchase = await createPurchase(
       auth.supabase,
       auth.user.id,
-      upload.project_id,
+      projectId,
       finalInput
     );
   } catch (e) {
@@ -145,9 +168,12 @@ export async function POST(
     }
   }
 
+  // project_id is written back alongside the status: 0012 lets it be null only
+  // while an upload is still in flight, and its CHECK refuses a committed row
+  // without one.
   const { data: updatedUpload, error: uploadUpdateError } = await auth.supabase
     .from("invoice_uploads")
-    .update({ status: "committed", invoice_id: purchase.id })
+    .update({ status: "committed", invoice_id: purchase.id, project_id: projectId })
     .eq("id", upload.id)
     .select("*")
     .single();

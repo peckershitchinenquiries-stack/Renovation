@@ -1,46 +1,27 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { getProject } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
 
 // Two ways into the same document: read it off a photo, or type it in by
 // hand. Both end up as one purchase — this screen just decides how you get
-// there. Manual entry is exactly the pre-existing /purchases/new screen.
-export default async function AddPurchasePage({
-  params,
-}: {
-  params: { id: string };
-}) {
-  const project = await getProject(params.id);
-  if (!project) notFound();
-
+// there.
+//
+// This used to live at /projects/[id]/purchases/add, which meant you had to
+// know which job an invoice belonged to before you could even photograph it.
+// The project is now asked for on the form itself, at the moment the invoice
+// is saved, so this sits in the nav bar instead.
+export default function AddInvoicePage() {
   return (
     <div className="mx-auto max-w-2xl">
-      <nav className="mb-4 text-sm text-gray-500">
-        <Link href={`/projects/${project.id}`} className="hover:underline">
-          {project.name}
-        </Link>{" "}
-        /{" "}
-        <Link
-          href={`/projects/${project.id}/purchases`}
-          className="hover:underline"
-        >
-          Invoices
-        </Link>{" "}
-        / Add
-      </nav>
-      <h1 className="mb-1 text-2xl font-bold text-gray-900">
-        Add an invoice
-      </h1>
+      <h1 className="mb-1 text-2xl font-bold text-gray-900">Add an invoice</h1>
       <p className="mb-4 text-sm text-gray-500">
         Upload a photo or PDF and let it read the details, or type everything
-        in yourself.
+        in yourself. Either way you pick the project when you save it.
       </p>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Link
-          href={`/projects/${project.id}/purchases/upload`}
+          href="/invoices/upload"
           className="card flex min-h-touch flex-col items-start gap-2 p-5 text-left transition hover:border-brand hover:shadow-md"
         >
           <span className="text-3xl" aria-hidden>
@@ -56,7 +37,7 @@ export default async function AddPurchasePage({
         </Link>
 
         <Link
-          href={`/projects/${project.id}/purchases/new`}
+          href="/invoices/new"
           className="card flex min-h-touch flex-col items-start gap-2 p-5 text-left transition hover:border-brand hover:shadow-md"
         >
           <span className="text-3xl" aria-hidden>

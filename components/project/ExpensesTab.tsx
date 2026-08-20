@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import { apiFetch } from "@/lib/fetcher";
 import { formatCurrency } from "@/lib/calculations";
 import { Badge } from "@/components/ui/Badge";
@@ -9,12 +10,14 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
 import ExpenseForm from "@/components/forms/ExpenseForm";
+import { fmtDate } from "@/components/project/format";
 import {
   EXPENSE_CATEGORIES,
   EXPENSE_STATUSES,
   PAYMENT_METHODS,
   type Project,
   type ExpenseEntryComputed,
+  type InvoiceLineView,
   type TradeLookup,
 } from "@/types";
 
@@ -27,28 +30,23 @@ const EMPTY_FILTERS = {
   payment_method: "",
 };
 
-const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-// Format a stored 'YYYY-MM-DD' paid_date without timezone drift.
-function fmtDate(d: string | null): string {
-  if (!d) return "—";
-  const [y, m, day] = d.split("-");
-  if (!y || !m || !day) return d;
-  return `${Number(day)} ${MONTHS[Number(m) - 1] ?? m} ${y}`;
-}
+// Rows whose id looks like `inv:<uuid>` are invoices shown in the diary, not
+// expense rows. They live in `purchases` and are edited on the invoice form —
+// see the Expenses list's row actions and the PATCH handler for why.
+const isInvoice = (e: { id: string }) => e.id.startsWith("inv:");
+const purchaseIdOf = (e: { id: string }) => e.id.slice(4);
 
 export default function ExpensesTab({
   project,
   entries,
   trades,
+  invoiceLines,
   onChanged,
 }: {
   project: Project;
   entries: ExpenseEntryComputed[];
   trades: TradeLookup[];
+  invoiceLines: InvoiceLineView[];
   onChanged: () => Promise<void>;
 }) {
   const toast = useToast();
@@ -132,11 +130,32 @@ export default function ExpensesTab({
         body: JSON.stringify({
           status: "Paid",
           // What gets handed over is the incl-VAT total, not the ex-VAT cost.
+          // Sent as the cumulative figure, so a part-paid invoice is topped up
+          // to its total rather than paid twice — see patchInvoice.
           paid_amount: Number(e.total_incl_vat.toFixed(2)),
-          paid_date: e.paid_date || new Date().toISOString().slice(0, 10),
+          // For an invoice, paid_date is the DOCUMENT's date, not a payment
+          // date — paying a three-month-old invoice today must not record the
+          // payment three months ago. An expense row's paid_date is its own,
+          // so that one is kept.
+          paid_date: isInvoice(e)
+            ? new Date().toISOString().slice(0, 10)
+            : e.paid_date || new Date().toISOString().slice(0, 10),
         }),
       });
       toast("Marked as paid", "success");
+      await onChanged();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Update failed", "error");
+    }
+  }
+
+  async function updateStatus(e: ExpenseEntryComputed, newStatus: string) {
+    try {
+      await apiFetch(`/api/projects/${project.id}/expenses/${e.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: newStatus }),
+      });
+      toast("Status updated", "success");
       await onChanged();
     } catch (err) {
       toast(err instanceof Error ? err.message : "Update failed", "error");
@@ -156,19 +175,27 @@ export default function ExpensesTab({
   }
 
   async function openReceipt(e: ExpenseEntryComputed) {
+    const newTab = window.open("about:blank", "_blank", "noopener");
+    if (!newTab) {
+      toast("Popup blocked. Please allow popups.", "error");
+      return;
+    }
     try {
       const { url } = await apiFetch<{ url: string }>(
         `/api/expenses/${e.id}/receipt`
       );
-      window.open(url, "_blank", "noopener");
+      newTab.location.href = url;
     } catch {
+      newTab.close();
       toast("Could not open receipt", "error");
     }
   }
 
   const rowActions = (e: ExpenseEntryComputed) => (
     <>
-      {e.status !== "Paid" && e.status !== "Cancelled" ? (
+      {/* Offered while anything is still owed, so a part-paid invoice can be
+          settled without opening it. */}
+      {e.status !== "Cancelled" && (e.status !== "Paid" || e.remaining > 0.005) ? (
         <button
           type="button"
           className="text-emerald-700 hover:underline"
@@ -177,20 +204,38 @@ export default function ExpensesTab({
           Mark Paid
         </button>
       ) : null}
-      <button
-        type="button"
-        className="text-gray-600 hover:underline"
-        onClick={() => openRepeat(e)}
-      >
-        Repeat
-      </button>
-      <button
-        type="button"
-        className="text-brand hover:underline"
-        onClick={() => openEdit(e)}
-      >
-        Edit
-      </button>
+      {isInvoice(e) ? (
+        // An invoice's supplier, lines and amounts are properties of the
+        // document, and only the invoice form can change them without leaving
+        // the header disagreeing with the lines it is made of.
+        <Link
+          href={`/projects/${project.id}/purchases/${purchaseIdOf(e)}/edit?returnTo=${encodeURIComponent(
+            `/projects/${project.id}?tab=expenses`
+          )}`}
+          className="text-brand hover:underline"
+          aria-label="Edit invoice"
+        >
+          Edit
+        </Link>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="text-gray-600 hover:underline"
+            onClick={() => openRepeat(e)}
+          >
+            Repeat
+          </button>
+          <button
+            type="button"
+            className="text-brand hover:underline"
+            aria-label="Edit expense"
+            onClick={() => openEdit(e)}
+          >
+            Edit
+          </button>
+        </>
+      )}
       <button
         type="button"
         className="text-red-600 hover:underline"
@@ -319,11 +364,16 @@ export default function ExpensesTab({
       {entries.length === 0 ? (
         <EmptyState
           title="No expenses yet"
-          description="Add your first expense entry for this project."
+          description="Add an expense here for anything you paid for without an invoice. Invoices you log appear in this list too, marked as invoices."
           action={
-            <button className="btn-primary" onClick={openAdd}>
-              Add Expense
-            </button>
+            <div className="flex flex-wrap justify-center gap-2">
+              <button className="btn-primary" onClick={openAdd}>
+                Add Expense
+              </button>
+              <Link href="/invoices" className="btn-secondary">
+                Log an invoice
+              </Link>
+            </div>
           }
         />
       ) : (
@@ -346,6 +396,7 @@ export default function ExpensesTab({
                         </button>
                       ) : null}
                       <span className="font-medium">{e.description}</span>
+                      {isInvoice(e) && <Badge label="Invoice" />}
                     </div>
                     <p className="mt-0.5 text-xs text-gray-500">
                       Week {e.week_number}
@@ -357,7 +408,17 @@ export default function ExpensesTab({
                     <div className="font-semibold">
                       {formatCurrency(e.total_incl_vat)}
                     </div>
-                    <Badge label={e.status} />
+                    <select
+                      className="input mt-1 text-xs py-0.5 px-2 h-auto"
+                      value={e.status}
+                      onChange={(ev) => updateStatus(e, ev.target.value)}
+                    >
+                      {EXPENSE_STATUSES.map((s) => (
+                        <option key={s} value={s}>
+                          {s}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
 
@@ -460,6 +521,7 @@ export default function ExpensesTab({
                           </button>
                         ) : null}
                         <span>{e.description}</span>
+                        {isInvoice(e) && <Badge label="Invoice" />}
                       </div>
                       {e.supplier ? (
                         <p className="text-xs text-gray-400">{e.supplier}</p>
@@ -491,7 +553,17 @@ export default function ExpensesTab({
                       ) : null}
                     </td>
                     <td className="py-2 pr-2">
-                      <Badge label={e.status} />
+                      <select
+                        className="input text-xs py-1 px-2 h-auto"
+                        value={e.status}
+                        onChange={(ev) => updateStatus(e, ev.target.value)}
+                      >
+                        {EXPENSE_STATUSES.map((s) => (
+                          <option key={s} value={s}>
+                            {s}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td className="py-2 pr-2">
                       <div className="flex justify-end gap-2 text-xs">
@@ -541,6 +613,7 @@ export default function ExpensesTab({
           expense={editing ?? undefined}
           template={template ?? undefined}
           priorEntries={entries}
+          invoiceLines={invoiceLines}
           onSaved={async () => {
             setDrawerOpen(false);
             await onChanged();
@@ -551,14 +624,24 @@ export default function ExpensesTab({
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}
-        title="Delete expense"
+        title={
+          deleteTarget && isInvoice(deleteTarget)
+            ? "Delete invoice"
+            : "Delete expense"
+        }
         danger
         confirmLabel="Delete"
         message={
-          deleteTarget ? (
-            <>Delete &ldquo;{deleteTarget.description}&rdquo;?</>
-          ) : (
+          !deleteTarget ? (
             ""
+          ) : isInvoice(deleteTarget) ? (
+            <>
+              Delete the invoice &ldquo;{deleteTarget.description}&rdquo;? Its
+              lines and payments go with it, and every figure derived from them
+              — Trades, Materials, Suppliers and the Price Tracker — drops it.
+            </>
+          ) : (
+            <>Delete &ldquo;{deleteTarget.description}&rdquo;?</>
           )
         }
         onConfirm={() => {

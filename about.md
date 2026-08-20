@@ -464,7 +464,7 @@ accumulated rounding, the three row counts equal, and `expenses_view` reproducin
 |---|---|---|
 | Comes from | the spreadsheet, plus anything added in-app | nothing — the import that fed it was retired by `0009` |
 | Rows | 111 (weeks 1–23) | **0** |
-| Appears in | **Expenses tab** and **all Overview analytics**, **Dashboard cards** | **Trades & Labour**, **Materials & Suppliers**, **Price Tracker** |
+| Appears in | **Expenses tab** and **all Overview analytics**, **Dashboard cards** | nothing — see the note below |
 | Money | £151,644.78 actual incl-VAT | £0.00 |
 
 > ⚠️ **Since 2026-08-14 the ledger side is empty**, because
@@ -474,10 +474,12 @@ accumulated rounding, the three row counts equal, and `expenses_view` reproducin
 > standing between the app and a double-count the day a second dataset arrives.
 > Do not delete them as dead code.
 >
-> **Consequence for reading the app today:** Trades & Labour and Materials &
-> Suppliers now show diary rows only, so their figures finally agree with the
-> Overview instead of describing a separate dataset. The Price Tracker is empty
-> until unit costs are entered — see §6.8.
+> **Consequence for reading the app today (updated 2026-08-20):** Trades,
+> Labour, Materials, Suppliers and the Price Tracker no longer read
+> `expense_entries` at all — they are built from invoices (§6.6–§6.8), so the
+> `source` split does not reach them. It still governs the Expenses tab, the
+> Overview analytics and the Dashboard cards, which is where it always
+> mattered.
 
 **Historical note.** Ledger rows carried `week_number = 1` because that workbook
 had no week column. Migration `0003` originally backfilled "weeks 16+" as
@@ -492,7 +494,8 @@ apply it, and must keep applying it:
 - `app/(app)/dashboard/page.tsx` — feeds the dashboard cards
   *(added 2026-07-22; its absence was a real bug — the card read 144%)*
 
-Trades / Materials / Prices deliberately use the **full** entry set.
+Trades / Labour / Materials / Suppliers / Prices no longer read entries at all
+(§6.6–§6.8), so there is nothing for the filter to do on them.
 
 **The new tables carry the same split.** `purchases.entry_source` is copied
 straight from `expense_entries.source` by the `0008` backfill and has the same
@@ -635,89 +638,114 @@ Two slices only: `Materials` (category = Materials) and `Labour` (everything
 else). Both `Σ total_incl_vat`, cancelled excluded.
 Feeds `components/charts/CategoryDonut.tsx`.
 
-### 6.6 Trades & Labour tab — `buildTrades`, `lib/summary.ts:91`
+### 6.6 Trades and Labour tabs — `lib/invoiceViews.ts`
 
-Input: **all entries** (diary + ledger). Grouped by `trade`, null → `"Unassigned"`.
-Sorted by `actual` descending.
+> **Changed 2026-08-20.** These read **invoices**, not `expense_entries`. The
+> old `buildTrades` in `lib/summary.ts` still exists and still works — the API
+> route `/api/projects/[id]/trades` and both exports call it — but no screen
+> does. The reason for the move is §3.1: the spreadsheet recorded a total per
+> row and nothing else, so nothing below could be computed from it.
 
-| Field | Formula |
-|---|---|
-| `quoted` | `Σ quoted_amount` (ex-VAT) |
-| `actual` | `Σ total_incl_vat` (incl-VAT) |
-| `paid` | `Σ paid_amount` (ex-VAT) |
-| `remaining` | `actual − paid` |
-| `status` | `Paid` if `paid > 0 && remaining <= 0.001`; `Partial` if `paid > 0`; else `Pending` |
+Everything on these two tabs starts from `buildInvoiceLines`, which flattens
+this project's `purchase_lines` and carries down what the parent `purchases`
+row knows (supplier, date, week, trade, category, status). Cancelled purchases
+are dropped, and so is any line whose purchase is missing.
 
-The `0.001` is a float-rounding tolerance, not a business rule.
+Per line: `vat_amount = round2(line_net × vat_rate / 100)`, and
+`line_gross = line_net + vat_amount`. VAT is rounded per line and then added —
+the same order `purchaseTotalsFromLines` used when the header was written, so a
+line total here and the header it came from agree to the penny.
 
-### 6.7 Materials & Suppliers tab
-
-**Two different shapes** — do not confuse them.
-
-**`buildMaterials` (line 116)** — grouped by supplier, used by the API route
-and both exports. Only `category === "Materials"`, cancelled excluded. Supplier
-null → `"Unknown supplier"`.
+**Trades — `buildTradeRows`.** Grouped by `purchases.trade`, null →
+`"Unassigned"`, sorted by `gross` descending.
 
 | Field | Formula |
 |---|---|
-| `cost` | `Σ total_incl_vat` |
-| `total` | `Σ total_incl_vat` — **identical to `cost`** |
-| `paid` | `Σ paid_amount` |
-| `remaining` | `cost − paid` |
-| `vat` | `Σ vat_amount` |
-| `entries` | row count |
-| `payment_methods` | distinct non-null methods |
+| `invoice_count` / `line_count` | documents in the group / their lines |
+| `quoted` | `Σ quoted_gross`, treating null as 0 |
+| `net` / `vat` / `gross` | `Σ net_total` / `Σ vat_total` / `Σ gross_total` |
+| `paid` | `Σ payments.amount` for those documents |
+| `balance` | `gross − paid` |
+| `status` | `purchaseStatus(gross, paid)` — the same rule the invoice screens use |
 
-> Note: the `MaterialSummary` type comments `cost` as "Σ actual_amount", but
-> the code sums `total_incl_vat`. **The code is what runs.** `cost` and `total`
-> being equal is redundancy, not a bug.
+> **Why this groups whole invoices and not lines.** Payment is recorded against
+> a document. Splitting one across that document's lines would invent a figure
+> the payment record never stated. Trades and Suppliers therefore roll up
+> purchases; Labour and Materials list lines and show no paid column at all.
 
-**`buildMaterialLedger` (line 150)** — flat, one row per purchase; this is what
-the **UI tab** renders. Sorted by `week_number`, then `paid_date`. Supplier
-null → `"—"`. Fields map straight across; `total` = `total_incl_vat`,
-`remaining` = the row's computed `remaining`.
+**Labour — `labourLines`.** One row per line where the invoice's
+`category === "Labour"`. Only an explicit Labour counts: guessing that an
+uncategorised line is labour would move real money between two screens on no
+evidence, and Labour is the figure that gets quoted at people.
 
-Because it is derived from `expense_entries`, **adding a Materials row in the
-Expenses form automatically appears in this tab.** There is no separate
-materials table.
+### 6.7 Materials and Suppliers tabs — `lib/invoiceViews.ts`
 
-### 6.8 Price Tracker — `buildPriceHistory`, `lib/summary.ts:184`
+**Materials — `materialLines`.** One row per invoice line where the category is
+**not** `"Labour"` — so Materials, Skip/Disposal, Other **and uncategorised**.
 
-Answers "did this item cost more this time?"
-
-**Inclusion:** `category === "Materials"` **and** `unit_cost > 0` **and** not
-cancelled. Rows failing any of these are invisible here.
-
-> ⚠️ **This tab is empty as of 2026-08-14, and that is correct.** The
-> spreadsheet's `Qty (Materials)` and `Unit Cost (£)` columns are blank on all
-> 111 rows, so no diary row passes `unit_cost > 0`. Everything the tab used to
-> show came from `Renovation_Cost_Tracker-1.xlsx`, whose `Unit Cost` column
-> held the size of each **instalment payment**, not a price per unit — which is
-> why Wunda UFH appeared to rise 761.9% between a deposit and its balance. That
-> import is gone (§3.0).
+> The asymmetry against Labour above is deliberate. `purchases.category` is
+> optional and the invoice extractor does not set it, so uncategorised is the
+> common case. Requiring `category === "Materials"` hid every uploaded invoice:
+> the tab read "no materials" while the lines sat in the database. Uncategorised
+> lines are counted here and the tab says how many, so the split can be
+> corrected on the invoice.
 >
-> The tab fills up honestly from here: enter `qty` and `unit cost` on a
-> Materials expense and the second purchase of the same description starts a
-> real comparison. `ExpenseForm`'s `lastPriceHint` and `priceWarning` (§10.1)
-> read the same data, so they wake up at the same moment.
+> `isLabour` in `lib/summary.ts` follows the same rule, which is what keeps the
+> Overview donut and this tab describing the same money.
 
-**Grouping key:** `priceKey()` (line 177) — `description` trimmed, lower-cased,
-internal whitespace collapsed. So `"Sand  "` and `"sand"` are the same item.
+Each row shows date, week, item, supplier, qty + unit, unit price, net, VAT and
+total, and links to its invoice. `buildMaterials` and `buildMaterialLedger` in
+`lib/summary.ts` are unchanged and still feed `/api/projects/[id]/materials`
+and both exports.
 
-**Ordering:** by `paid_date`, falling back to `created_at` when null
-(`purchaseDate`, line 181). **A missing paid date makes an item sort by import
-time**, which can scramble the sequence.
+**Suppliers — `buildSupplierRows`.** The same invoices grouped by
+`supplier_id`, with one shared bucket for headers naming no supplier
+(`"No supplier"`). Same columns as Trades, plus the distinct categories bought,
+and expandable to the lines bought from that merchant.
+
+This is the **project-scoped** view. `/suppliers` in the nav bar is the
+cross-project one (§8.1) and is a different question.
+
+### 6.8 Price Tracker — `buildItemPriceRows`, `lib/invoiceViews.ts`
+
+Answers "did this item cost more this time?" — the reason the spreadsheet was
+dropped in favour of invoices at all.
+
+**Inclusion:** any line with `unit_price > 0` on a non-cancelled purchase.
+`£0 per unit` is not a price; letting one in would invent a −100% drop followed
+by an infinite rise. Category is **not** a condition, so a day rate is tracked
+alongside a bag of cement.
+
+**Grouping key:** `items.id` when the line was matched to an item, so two
+spellings that resolved to the same item share one timeline. Unmatched lines
+fall back to the normalised description — the same rule as `priceKey()` and
+`public.norm_key()`.
+
+**Ordering:** by `purchases.purchase_date`, with `invoice_no` breaking ties so
+undated lines stay in a stable order between renders.
 
 | Field | Formula |
 |---|---|
-| `delta_pct` | `(unit_cost − previous unit_cost) / previous × 100`; `0` for the first purchase |
-| `direction` | `first` \| `same` (\|Δ\| < 0.001) \| `up` \| `down` |
-| `first_price` / `latest_price` | first / last `unit_cost` in the sorted list |
-| `latest_delta_pct` | the last purchase's `delta_pct` |
-| `trend` | the last purchase's `direction` |
-| `item` | the **most recent** row's description, original casing |
+| `delta_pct` / `move` | `comparePrice(current, previous)` in `lib/purchases.ts` |
+| `first_price` / `latest_price` | first / last `unit_price` in the sorted list |
+| `latest_delta_pct` / `trend` | the last point's `delta_pct` / `move` |
+| `total_qty` / `total_net` | `Σ qty` / `Σ line_net` |
+| `units` / `suppliers` | every distinct unit / merchant this item was bought in or from |
+| `item` | the **most recent** line's item name — what the last document called it |
 
-Sorted with the biggest recent increase first.
+Sorted with the biggest recent rise first; a null `latest_delta_pct` (first buy,
+or a unit change) sorts last.
+
+> ⚠️ **A percentage is only shown when both prices are per the same unit.**
+> `comparePrice` returns `move: "unit_change"` and `delta_pct: null` when the
+> unit differs, and `PriceMoveBadge` renders that as `bag → tonne — check pack
+> size` rather than a number. `£12 a bag` against `£12 a tonne` is not a 0%
+> change, and a price alert that lies once gets ignored for ever.
+>
+> The old `buildPriceHistory` had neither the unit check nor a null delta — it
+> is what reported Wunda UFH rising 761.9% between a deposit and its balance
+> (§3.0). It still exists for `/api/projects/[id]/prices` and the Excel export,
+> and still carries that weakness.
 
 ### 6.9 Expenses tab totals — `components/project/ExpensesTab.tsx`
 
@@ -802,11 +830,16 @@ it today.**
 | Route | File | Shows |
 |---|---|---|
 | `/dashboard` | `dashboard/page.tsx` | project cards: Spent, Budget, % bar |
-| `/projects` | `projects/page.tsx` | project list |
 | `/projects/new` | `projects/new/page.tsx` | create project |
 | `/projects/[id]` | `projects/[id]/page.tsx` → `ProjectDetail.tsx` | the 5 tabs |
 | `/projects/[id]/edit` | `…/edit/page.tsx` | edit project |
 | `/projects/[id]/expenses/new` | `…/expenses/new/page.tsx` | add expense |
+| `/projects/[id]/purchases` | `…/purchases/page.tsx` | invoices filed against this project (read + edit only — adding is at `/invoices`) |
+| `/projects/[id]/purchases/[pid]/edit` | `…/purchases/[pid]/edit/page.tsx` | edit one invoice |
+| `/invoices` | `invoices/page.tsx` | add an invoice: upload or manual — see §8.2 |
+| `/invoices/upload` | `invoices/upload/page.tsx` | upload queue |
+| `/invoices/new` | `invoices/new/page.tsx` | manual entry |
+| `/invoices/[uploadId]/review` | `invoices/[uploadId]/review/page.tsx` | review an extracted invoice |
 | `/suppliers` | `suppliers/page.tsx` | supplier list — see §8.1 |
 | `/suppliers/[id]` | `suppliers/[id]/page.tsx` | one supplier's statement |
 | `/items` | `items/page.tsx` | item list |
@@ -815,25 +848,57 @@ it today.**
 | `/` | `app/page.tsx` | login |
 | `/reset-password` | `reset-password/page.tsx` | password reset |
 
-> The table above predates Phase 2 and was never brought up to date with the
-> `purchases` routes — it is missing `/projects/[id]/purchases`,
-> `/purchases/new` and `/purchases/[pid]/edit` even though all three exist and
-> work. Flagged, not fixed, here — out of scope for this change.
+> Brought up to date 2026-08-19, when the invoice routes moved to `/invoices`
+> (§8.2). The stale `/projects` row went at the same time — that page no longer
+> exists; the dashboard is the only project list (see `AppNav.tsx`).
 
 ### 8.2 Invoice upload (Phase 5a) — getting a file into extraction
 
-Three more routes, added 2026-08-17, all under `/projects/[id]/purchases/`:
+Four routes, added 2026-08-17 and **moved out from under `/projects/[id]/` on
+2026-08-19** — they now live at the top level, under `/invoices`:
 
 | Route | File | Shows |
 |---|---|---|
-| `/purchases/add` | `add/page.tsx` | chooser: **Upload invoice** or **Enter manually** |
-| `/purchases/upload` | `upload/page.tsx` → `UploadInvoicePanel.tsx` | drag-drop / camera upload queue, one row per file |
-| `/purchases/upload/[uploadId]/review` | `upload/[uploadId]/review/page.tsx` | the review-and-correct screen (Phase 5b) — see below |
+| `/invoices` | `invoices/page.tsx` | chooser: **Upload invoice** or **Enter manually** |
+| `/invoices/upload` | `invoices/upload/page.tsx` → `UploadInvoicePanel.tsx` | drag-drop / camera upload queue, one row per file |
+| `/invoices/new` | `invoices/new/page.tsx` | manual entry — the same `PurchaseForm` |
+| `/invoices/[uploadId]/review` | `invoices/[uploadId]/review/page.tsx` | the review-and-correct screen (Phase 5b) — see below |
 
-Both places that used to link straight to `/purchases/new` (the "+ Log
-invoice" button and the empty-state action on `/purchases`) now link to
-`/purchases/add` instead. `/purchases/new` itself is unchanged — manual entry
-reaches exactly the same `PurchaseForm` it always did.
+**Why they are not under a project any more.** They used to be, and that
+forced the project to be the *first* question: you had to open a project
+before you could photograph anything. In practice it is the *last* thing you
+know — you have a pile of invoices and decide which job each belongs to while
+looking at it. So **the project is now a field on `PurchaseForm` itself**,
+asked at the moment the invoice is saved, and `Invoices` is a top-level nav
+item alongside Suppliers and Items (which are cross-project for the same
+reason — §4.6).
+
+What that required:
+
+- `invoice_uploads.project_id` became **nullable** (migration `0012`). An
+  upload in flight genuinely has no project; a `committed` one always does,
+  and a CHECK enforces exactly that. Nothing else in the codebase ever read
+  the column — every other query finds an upload by its own id — so widening
+  it moved no figure.
+- `POST /api/invoices/upload-url` takes `project_id` optionally, and stores a
+  project-less file under `{user.id}/unassigned/…`. The file is never moved
+  once a project is chosen: the row records where an invoice belongs, not the
+  path.
+- `POST /api/invoices/[id]/commit` takes `project_id` from the review screen,
+  falling back to the upload's own, 400s if it has neither, verifies the
+  caller owns it (RLS read), files the purchase there and writes it back onto
+  the upload row.
+- `getPurchaseFormBundle` accepts `null`. Almost nothing it loads was ever
+  project-scoped — suppliers, items, trades and price history are all
+  deliberately cross-project — so the only casualties were `project` itself
+  (now nullable) and a single `next_week`, which is why the bundle now also
+  carries `next_week_by_project`: a week number means nothing until you know
+  whose week it is, so picking a project re-defaults the week, but never over
+  a week that was typed by hand.
+
+Each project keeps its `/projects/[id]/purchases` list — that is where you
+land after saving — but its "+ Log invoice" button and empty-state action now
+point at `/invoices`. There is one add flow, not one per project.
 
 **`UploadInvoicePanel.tsx`** (Client Component) drives each file through:
 `POST /api/invoices/upload-url` → `PUT` straight to the returned signed URL
@@ -851,21 +916,27 @@ only backs off (never stops outright) once Realtime confirms it connected —
 so a dropped Realtime connection still resolves, just more slowly. A `failed`
 row shows the stored error with **Retry** (re-`POST`s `/extract` on the same
 row if the file already made it to storage, or resumes from the top if it
-didn't) and **Enter manually instead**, which goes to the same unchanged
-`/purchases/new`.
+didn't) and **Enter manually instead**, which goes to `/invoices/new`.
 
 **The review screen (Phase 5b).** An `extracted` row links to
-`/purchases/upload/[uploadId]/review`, a Server Component. It re-validates
+`/invoices/[uploadId]/review`, a Server Component. It re-validates
 `extraction_raw` with `parseExtraction`, re-resolves the supplier and every
 line's item against the *current* `suppliers`/`items` tables (not the
 snapshot the extract route saw — a supplier added since then still matches),
 builds a `PurchaseFormPrefill`, and renders the signed-URL original next to
 `components/forms/PurchaseForm.tsx`, prefilled. **There is exactly one
-purchase form component in the codebase** — `new/page.tsx`, `[pid]/edit/page.tsx`
-and this review page all render the same `PurchaseForm`, which gained six new
-*optional* props (`prefill`, `invoiceUploadId`, `supplierResolution`,
-`lineResolutions`, `extractedTotals`, `documentNotes`) that manual entry and
-editing never pass, so neither of those paths' behaviour changed.
+purchase form component in the codebase** — `invoices/new/page.tsx`,
+`[pid]/edit/page.tsx` and this review page all render the same `PurchaseForm`,
+which gained six new *optional* props (`prefill`, `invoiceUploadId`,
+`supplierResolution`, `lineResolutions`, `extractedTotals`, `documentNotes`)
+that manual entry and editing never pass, so neither of those paths' behaviour
+changed.
+
+The two panes are **2fr / 3fr**, not half and half: the document is the
+reference, the form is the work. The preview is capped at 60% of screen height
+(45% on a phone) with an "Open full size ↗" link under it — before
+2026-08-19 it ran to 70–80vh at half width, which pushed the extracted numbers
+into columns too narrow to read.
 
 What the added props drive:
 
@@ -945,22 +1016,60 @@ deliberately **excludes** `/projects/new`, which is its own nav item — before
 ### Responsive pattern for tables
 
 Every data table renders twice: a `sm:hidden` card list and a
-`hidden sm:block` table, from the same array. This applies to the Expenses,
-Trades, Materials and Price Tracker tabs and the Week-by-Week table. **If you
-add a column, add it to both**, or it will be invisible on a phone.
+`hidden sm:block` table, from the same array. This applies to all seven project
+tabs and the Week-by-Week table. **If you add a column, add it to both**, or it
+will be invisible on a phone.
 
-### The five tabs — `components/project/`
+### The seven tabs — `components/project/`
 
-`ProjectDetail.tsx` is the client shell. It holds entries in state, derives
-`diaryEntries`, and computes all seven summaries with `useMemo`.
+`ProjectDetail.tsx` is the client shell. It holds entries in state and computes
+every summary with `useMemo`, from **two different sources** — which is the
+thing to know before changing any of them.
 
 | Tab | Component | Basis |
 |---|---|---|
-| Overview | `OverviewTab.tsx` | **diary only** |
-| Expenses | `ExpensesTab.tsx` | **diary only** |
-| Trades & Labour | `TradesTab.tsx` | all entries |
-| Materials & Suppliers | `MaterialsTab.tsx` | all entries |
-| Price Tracker | `PricesTab.tsx` | all entries |
+| Overview | `OverviewTab.tsx` | entries, **non-ledger only** |
+| Expenses | `ExpensesTab.tsx` | entries, **non-ledger only** |
+| Trades | `TradesTab.tsx` | invoices (`purchases`) |
+| Labour | `LabourTab.tsx` | invoice lines, category = Labour |
+| Materials | `MaterialsTab.tsx` | invoice lines, category ≠ Labour |
+| Suppliers | `SuppliersTab.tsx` | invoices, grouped by supplier |
+| Price Tracker | `PricesTab.tsx` | invoice lines with a unit price |
+
+> **Split 2026-08-20.** "Trades & Labour" and "Materials & Suppliers" were each
+> two questions sharing one screen. They are four tabs now because the answers
+> come from different shapes of data: Trades and Suppliers roll up whole
+> invoices (payment is a document-level fact), Labour and Materials list
+> individual lines. See §6.6–§6.8.
+
+The Expenses tab shows **both**: hand-entered `expense_entries` and the
+project's invoices, the latter as synthetic entries with an `inv:<uuid>` id
+(`purchasesToSyntheticEntries`, `lib/purchases.ts`). Invoice rows carry an
+"Invoice" badge, and their **Edit** opens the invoice form rather than the
+expense drawer — an invoice's supplier, lines and VAT belong to the document,
+and only that form can change them without leaving the header disagreeing with
+the lines it is made of. **Mark Paid** on an invoice writes a `payments` row for
+the difference between what you say is paid and what the payment rows already
+total, so pressing it twice cannot pay it twice.
+
+> ⚠️ `/api/projects/[id]/expenses` must return the invoices too, not just
+> `expense_entries` — the tab refetches it after every change. When it returned
+> the table alone, changing a status emptied the whole list, because with the
+> spreadsheet import gone that table is empty.
+
+**Edit from the Expenses tab returns to the Expenses tab (2026-08-20).** The
+invoice Edit link carries `?returnTo=/projects/<id>?tab=expenses`, validated by
+`lib/safeReturnTo.ts` (same-origin relative path only — anything else is
+ignored) before `PurchaseForm` ever calls `router.push()` with it. Both Save
+and Cancel honour it; it is `undefined` for `invoices/new` and the review
+screen, so their redirect to the project's invoice list is unchanged. Tab
+selection in `ProjectDetail.tsx` is otherwise component-local `useState`, so a
+plain link back here always landed on Overview — it now reads a `?tab=` query
+param once on mount (`initialTabFrom`), defaulting to Overview exactly as
+before when the param is absent or not a real tab key. The redirect pairs
+`router.push()` with `router.refresh()`, which is what makes the invoice show
+its new values immediately: without it, the target route could be served from
+the router cache with the pre-edit figures.
 
 ### 8.1 The supplier and item screens (Phase 1)
 
@@ -976,7 +1085,7 @@ is why none of them shows a "project total".
 
 | Route | Loader in `lib/data.ts` | Shows |
 |---|---|---|
-| `/suppliers` | `getSuppliers()` | every supplier: records, diary spend + owed, ledger spend + owed, last purchase. Sorted by record **count** |
+| `/suppliers` | `getSuppliers()` | every supplier: records, total spend + owed, last purchase. Sorted by record **count** |
 | `/suppliers/[id]` | `getSupplierBundle(id)` | four stat cards and one statement table **per `entry_source`**: date, invoice, project, gross, paid, balance, status, payment dates + methods, running total. Each row expands to its lines and payments |
 | `/items` | `getItems()` | every **Materials**-category item (Labour items are filtered out): category, unit, times bought, suppliers, latest unit price, trend, last bought. Sorted by times bought |
 | `/items/[id]` | `getItemBundle(id)` | the price timeline, oldest → newest across every supplier and project: date, source, supplier, project, invoice, qty, unit, unit price, line net, and the change vs the previous purchase |
@@ -988,13 +1097,20 @@ page, never one per row, and never a `.eq("user_id", …)` — RLS scopes it (§
 **Three rules these screens are built on. Breaking any one of them makes the
 numbers lie:**
 
-1. **Diary and ledger money is never added up.** Every total on every one of
-   these pages is split by `entry_source` and labelled — separate columns on the
-   list, separate card groups and separate tables on the detail pages, and a
-   separate running total per group. This is §5 applied to `purchases`: the two
-   overlap, so a combined figure is the double-count. The supplier list is even
-   *sorted* on the record count rather than on money for the same reason.
-   `components/purchases/SourceNote.tsx` says so on screen.
+1. **Diary and ledger money is never added up** on the three detail/index
+   pages that carry per-`entry_source` breakdowns: `/suppliers/[id]`,
+   `/items`, `/items/[id]` — separate card groups and tables, and a separate
+   running total per group. This is §5 applied to `purchases`: the two
+   overlap, so a combined figure is the double-count.
+   `components/purchases/SourceNote.tsx` says so on screen. **Exception:** the
+   `/suppliers` list shows one summed "Total spend"/"Total owed" pair
+   (2026-08-20). This is not the same double-count risk as elsewhere: every
+   row this page reads comes from a committed invoice, and invoice commit
+   always writes `entry_source: 'diary'` (`lib/purchaseWrite.ts`) — `ledger`
+   was specific to the old dual-Excel import (§3.0) this project no longer
+   has a code path for, so there is nothing left to double-count. The
+   supplier list is still *sorted* on the record count rather than on money,
+   matching the other three pages.
 2. **Cancelled purchases are excluded everywhere**, matching `ACTIVE` in §6.2.
 3. **A percentage is never computed across two different units.** See below.
 
@@ -1047,10 +1163,10 @@ All handlers call `requireUser()` first.
 | `/api/projects/[id]/export/excel` | GET | xlsx ⚠️ unfiltered |
 | `/api/projects/[id]/export/pdf` | GET | pdf ⚠️ unfiltered |
 | `/api/expenses/[eid]/receipt` | POST | upload to `receipts` bucket |
-| `/api/invoices/upload-url` | POST | signed upload URL + new `invoice_uploads` row (migration 0010) |
+| `/api/invoices/upload-url` | POST | signed upload URL + new `invoice_uploads` row (migration 0010). `project_id` optional since `0012` — a project-less file lands under `{user}/unassigned/…` |
 | `/api/invoices/[id]` | GET | the upload row + a 5-min signed read URL for the file |
 | `/api/invoices/[id]/extract` | POST | download → extract → resolve; always ends on a terminal status |
-| `/api/invoices/[id]/commit` | POST | writes the reviewed invoice via `createPurchase`; no UI reaches this yet |
+| `/api/invoices/[id]/commit` | POST | writes the reviewed invoice via `createPurchase`, into the project the review screen's `project_id` names (falling back to the upload's own); writes that project back onto the upload row |
 | `/api/lookups/trades`, `/[id]` | GET/POST/PATCH/DELETE | trade lookups |
 | `/api/auth/signout` | POST | sign out |
 
@@ -1097,15 +1213,15 @@ These mirror the DB CHECK constraints. If you change a constraint, change both.
 
 ### 10.1 Non-blocking warnings in the expense form
 
-Separate from validation: `components/forms/ExpenseForm.tsx` computes four
+Separate from validation: `components/forms/ExpenseForm.tsx` computes five
 advisories that **never block saving**. They exist to catch mistakes at entry
-time rather than in a report weeks later. All are pure `useMemo` over
-`priorEntries` — no DB round-trip.
+time rather than in a report weeks later. All are pure `useMemo` over props —
+no DB round-trip.
 
 | Warning | Fires when | Rendered |
 |---|---|---|
 | `lastPriceHint` | Materials, description matches a past purchase, no unit cost typed yet | grey box: what it cost last time |
-| `priceWarning` | as above, plus a unit cost is entered | red / green / grey box with `± %` vs last purchase |
+| `priceWarning` | as above, plus a unit cost is entered | red / green / grey / amber box with `± %` vs last purchase, or "unit → unit — check pack size" |
 | `duplicateWarning` | same normalised description **and** same week **and** actual within £0.005 of an existing non-cancelled entry | amber, under Description |
 | `overpaidWarning` | `paid_amount − actual_amount > 0.005` | amber, replaces the Amounts hint |
 | `unitMismatch` | Materials, `qty > 0` and `unit_cost > 0` and `\|qty × unit_cost − actual\| > 0.01` | amber, with a one-click fix |
@@ -1114,9 +1230,35 @@ time rather than in a report weeks later. All are pure `useMemo` over
 normalisation the Price Tracker groups on, so the two always agree on what
 counts as "the same item".
 
-**`priorEntries` must be passed in or all of these silently do nothing.** It
-defaults to `[]`. Both call sites pass it: `ExpensesTab.tsx` (full entry set)
-and `AddExpensePanel.tsx` via `expenses/new/page.tsx` (`bundle.entries`).
+**`lastPriceHint` and `priceWarning` read `buildMaterialPriceIndex()`
+(`lib/purchases.ts`), not `priorEntries` alone (2026-08-20).** The spreadsheet
+import that used to fill `expense_entries` was removed on 2026-08-14, so
+`priorEntries` alone has nothing left to compare against for most projects.
+`buildMaterialPriceIndex()` merges `priorEntries` (hand-entered diary rows)
+with this project's `invoiceLines` (real per-line invoice prices) into one
+most-recent-observation-per-material lookup, keyed the same way
+`priceKey()`/`normaliseName()`/`public.norm_key()` already agree on. It
+excludes cancelled rows and the ledger side on both inputs, and drops any
+price `<= 0`.
+
+`expense_entries` has no `unit` column, so the typed unit cost is always
+compared with `unit: null` via the existing `comparePrice()` (also
+`lib/purchases.ts`, the same function `PurchaseForm.tsx` uses). Its own rule —
+a known unit never compares equal to an unknown one — means a match against
+another unit-less observation (i.e. another diary row) still shows a
+percentage, while a match against a priced invoice line with a recorded unit
+correctly suppresses the percentage and shows the "check pack size" message
+via `PriceMoveBadge` instead of inventing a number across two different units.
+
+**`priorEntries` and `invoiceLines` must both be passed in, or the price
+warnings silently do nothing** — `invoiceLines` is a required prop precisely
+because a missing one was the original bug (it used to be possible to forget
+it with no compiler error). Both call sites pass both: `ExpensesTab.tsx`
+(`entries` + `invoiceLines`, both from `ProjectDetail`'s `getProjectBundle`
+load) and `AddExpensePanel.tsx` via `expenses/new/page.tsx`
+(`bundle.entries` + `bundle.invoiceLines`). `duplicateWarning`,
+`overpaidWarning` and `unitMismatch` are unchanged and still read
+`priorEntries` only.
 
 ### 10.2 Entry shortcuts
 
@@ -1133,6 +1275,28 @@ and `AddExpensePanel.tsx` via `expenses/new/page.tsx` (`bundle.entries`).
 - Optional fields (date paid, payment method, room, invoice ref, notes, receipt)
   sit behind a collapsed toggle, so a quick on-site entry is short. The toggle
   auto-opens when editing an entry that already uses any of them.
+
+### 10.3 The Trade field — `components/forms/TradeSelect.tsx` (2026-08-20)
+
+Shared by `ExpenseForm.tsx` and `PurchaseForm.tsx` (which covers manual
+invoice entry, invoice edit and the post-extraction review screen — one
+component, three callers). A `<select>` populated from `trade_lookups`, plus
+a `+ Add new trade` option that reveals an inline name field and a Save
+button without leaving the form — it `POST`s `/api/lookups/trades`, and on
+success appends the new row to that form's own copy of the list and selects
+it. A duplicate name (the table's `unique (user_id, name)`) comes back as the
+route's existing 409 and is shown under the field, not as a crash or a
+silent no-op.
+
+**Still stores a plain string, exactly as before.** There is no FK from
+`expense_entries.trade` or `purchases.trade` to `trade_lookups.id` — matching
+is by convention only — so this select needed no migration and no backfill.
+
+**A row whose trade isn't in the list keeps it.** Editing an entry typed
+before this select existed (or whose lookup has since been renamed or
+deleted) shows its current value as a selected option marked "(not in
+list)", rather than silently blanking the field — the value only changes
+once the user picks something else.
 
 ---
 
@@ -1183,6 +1347,7 @@ place. The same deletion would cause the same loss again.
 | `0009_reimport_file1_only.sql` | rebuild from `..._Updated.xlsx` **alone**: 111 diary rows, 0 ledger rows, `target_budget = 0`, and **33 real merchants in `supplier`** (§3.2). Also clears `suppliers` and `items`, which `0008` seeds but never prunes. **Generated** by `scripts/build_import_sql.py`. Idempotent, and **aborts the transaction unless every week total equals the spreadsheet's** | ⬜ **not yet run** |
 | `0010_invoice_upload.sql` | `invoice_uploads`, supplier VAT number / address, pg_trgm + the two `match_*` RPCs. Additive and re-runnable | ⚠️ run status not recorded here — the upload and review screens only work once it has been run; see `updates.md` |
 | `0011_vat_reduced_rate.sql` | widens the `vat_rate` CHECK on **both** `expense_entries` and `purchase_lines` from `(0,20)` to `(0,5,20)`, so a reduced-rate invoice can be stored as the rate it prints (§8.2). Drops whatever CHECK on those tables mentions `vat_rate`, whatever it is named, and re-adds a named one — re-runnable. Cannot invalidate a row: every existing row holds 0 or 20, so no §13 figure moves | ⬜ **not yet run** |
+| `0012_upload_before_project.sql` | makes `invoice_uploads.project_id` **nullable**, so an invoice can be uploaded before anyone has said which job it belongs to (§8.2), plus a CHECK that a `committed` upload must still have one. Re-runnable, only widens what is allowed, and raises rather than commits if the column is still NOT NULL afterwards. No §13 figure moves | ⬜ **not yet run** |
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.
@@ -1217,6 +1382,19 @@ means the app and the spreadsheet agree. Run it after any change to the import.
 ---
 
 ## 13. Current figures
+
+> ⚠️ **Historical as of 2026-08-20 — read this first.** The owner has since
+> **removed the spreadsheet-imported data**, because too many of its rows
+> recorded a total with no quantity and no unit price, which is exactly what the
+> Price Tracker needs (§3.1). The project is being rebuilt from invoices, one at
+> a time, and `expense_entries` is empty or nearly so.
+>
+> Everything below therefore describes the app **as it was under the
+> spreadsheet import**, and is kept as the record of what that dataset
+> contained — not as a description of what the screens show today. It is no
+> longer a regression baseline; there is nothing to regress against until enough
+> invoices are in to make one. When there are, replace this section rather than
+> appending to it.
 
 Project `46 Glenferrie Road`. **The right-hand column is what the app shows once
 `0009` is run** (it has not been run yet — see §12). `0008` is additive and
@@ -1283,10 +1461,13 @@ CAD Stairs £3,000.00 · Mark Cornice £2,924.25 · Ryan Steels £2,370.00.
 > read instead, so there is nothing honest to import. Real item names arrive
 > with the Phase 3 importer, or as line items typed into new expenses.
 >
-> As of 2026-08-17, `getItems()` filters to `category === "Materials"`, so
-> Labour-category items (subcontractor/trade names seeded the same way) no
-> longer show on `/items` — but the merchant-as-item problem above is
-> unchanged for the Materials rows that remain.
+> As of **2026-08-20**, `getItems()` excludes `category === "Labour"` rather
+> than requiring `category === "Materials"`. The stricter test was hiding every
+> item an uploaded invoice created: the extractor sets no category, so those
+> items are null, and `/items` reported "no items" while the lines sat in the
+> database. Labour-category items (subcontractor names seeded by `0008` the same
+> way) are still excluded, which was the point of the 2026-08-17 filter. The
+> merchant-as-item problem above is unchanged for the seeded Materials rows.
 
 Use these as a regression baseline. If a change moves one of them, that should
 be intentional and recorded in `updates.md`. The cheapest way to check is

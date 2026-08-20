@@ -46,8 +46,19 @@ export function buildSummary(
   };
 }
 
-// Labour vs Materials is now split by category (Materials → materials bucket,
-// everything else → labour bucket) using each entry's total incl. VAT.
+// Which side of the Labour / Materials split a row falls on.
+//
+// Only an explicit "Labour" counts as labour. Everything else — Materials,
+// Skip/Disposal, Other, and rows with no category at all — is materials. That
+// matches materialLines() in lib/invoiceViews.ts, so the Overview donut and the
+// Materials tab always describe the same money.
+//
+// The asymmetry is deliberate: category is optional on an invoice and the
+// extractor does not set it, so uncategorised rows are the common case, and
+// counting them as labour (which is what "Materials or else labour" did) put
+// every uploaded invoice in the wrong half of the chart.
+const isLabour = (e: ExpenseEntryComputed) => e.category === "Labour";
+
 export function buildByWeek(
   entries: ExpenseEntryComputed[],
   weeks: ProjectWeek[] = []
@@ -68,8 +79,8 @@ export function buildByWeek(
         total: 0,
         completion_pct: completionByWeek.get(e.week_number) ?? 0,
       };
-    if (e.category === "Materials") row.materials += e.total_incl_vat;
-    else row.labour += e.total_incl_vat;
+    if (isLabour(e)) row.labour += e.total_incl_vat;
+    else row.materials += e.total_incl_vat;
     row.vat += e.vat_amount;
     row.total += e.total_incl_vat;
     map.set(e.week_number, row);
@@ -82,8 +93,8 @@ export function buildByCategory(entries: ExpenseEntryComputed[]): CategoryTotal[
   let materials = 0;
   for (const e of entries) {
     if (e.status === "Cancelled") continue;
-    if (e.category === "Materials") materials += e.total_incl_vat;
-    else labour += e.total_incl_vat;
+    if (isLabour(e)) labour += e.total_incl_vat;
+    else materials += e.total_incl_vat;
   }
   return [
     { category: "Labour", total: labour },

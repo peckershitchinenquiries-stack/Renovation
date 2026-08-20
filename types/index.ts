@@ -40,10 +40,14 @@ export interface ExpenseEntry {
   vat_rate: number;
   status: ExpenseStatus;
   receipt_url: string | null;
-  // 'diary' = week-by-week Expenses entries (File 1 + anything added in-app).
-  // 'ledger' = imported reference rows (File 2) shown only in the Trades /
-  // Materials & Suppliers tabs, not in the week-by-week Expenses list.
-  source: "diary" | "ledger";
+  // 'diary'   = week-by-week Expenses entries (File 1 + anything added in-app).
+  // 'ledger'  = imported reference rows (File 2) shown only in the Trades /
+  //             Materials & Suppliers tabs, not in the week-by-week Expenses list.
+  // 'invoice' = synthetic entry generated from a Purchase row (purchases table).
+  //             Treated like a diary entry for every calculation; read-only in
+  //             the UI because it is managed via the Invoices page, not the
+  //             expense-entry form.
+  source: "diary" | "ledger" | "invoice";
   created_at: string;
   updated_at: string;
 }
@@ -498,13 +502,29 @@ export interface InvoiceRef {
 }
 
 export interface PurchaseFormBundle {
-  project: Project;
+  // Null when the form was opened without a project — the nav-bar invoice
+  // flow, where the project is chosen on the form itself rather than by the
+  // route. Every other field here is already cross-project.
+  project: Project | null;
+  // Every project the user owns, for that chooser. Always populated, so the
+  // in-project flows can offer it too.
+  projects: ProjectRef[];
   suppliers: SupplierRef[];
   items: ItemRef[];
   trades: TradeLookup[];
   units: string[]; // units already used, for the unit type-ahead
+  // The week to default to, per project — "week 7" means nothing until you
+  // know whose week 7. `next_week` is this map read for `project`, kept for
+  // the project-scoped callers; it falls back to 1 when there is no project.
   next_week: number;
+  next_week_by_project: Record<string, number>;
   invoices: InvoiceRef[];
+}
+
+// Just enough of a project to name it in a dropdown.
+export interface ProjectRef {
+  id: string;
+  name: string;
 }
 
 // One purchase loaded back into the form for editing.
@@ -553,7 +573,10 @@ export type ExtractionMethod = "text" | "vision";
 export interface InvoiceUpload {
   id: string;
   user_id: string;
-  project_id: string;
+  // Null until the review screen files this invoice against a project
+  // (migration 0012). A 'committed' upload always has one — the database
+  // refuses that row otherwise.
+  project_id: string | null;
   storage_path: string;
   original_name: string | null;
   mime_type: string | null;
@@ -570,6 +593,121 @@ export interface InvoiceUpload {
   invoice_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// ============================================================
+// Project view models built from invoice data (purchases + purchase_lines)
+// ============================================================
+// The week-by-week spreadsheet was removed because too many of its rows had no
+// quantity and no unit price, which is exactly what the Price Tracker needs.
+// Invoices carry both, so the Trades / Labour / Materials / Suppliers / Price
+// Tracker screens are now derived from `purchase_lines` and their parent
+// `purchases` rather than from `expense_entries`.
+//
+// Everything below is computed on read in lib/invoiceViews.ts. None of it is
+// stored, and none of it mixes diary and ledger money (about.md §5) — the
+// ledger has been empty since migration 0009 and these views simply carry
+// whatever entry_source their purchases have.
+
+// One line of one invoice, flattened with everything its header knows. This is
+// the row every screen below is built from.
+export interface InvoiceLineView {
+  line_id: string;
+  purchase_id: string;
+  project_id: string;
+  week_no: number | null;
+  date: string | null; // purchases.purchase_date
+  invoice_no: string | null;
+  supplier_id: string | null;
+  supplier: string; // "No supplier" when the header has none
+  item_id: string | null;
+  // The canonical item name when the line was matched to one, otherwise the
+  // description exactly as the document wrote it. Never blank.
+  item_name: string;
+  description: string; // description_raw, verbatim
+  category: ExpenseCategory | null;
+  trade: string | null;
+  qty: number;
+  unit: string | null;
+  unit_price: number;
+  line_net: number; // ex-VAT
+  vat_rate: number;
+  vat_amount: number;
+  line_gross: number; // line_net + vat_amount
+  entry_status: ExpenseStatus;
+  entry_source: PurchaseEntrySource;
+  // Payment is recorded per document, not per line, so a line cannot say what
+  // *it* cost you. This is the parent invoice's state, shown as context.
+  purchase_status: PurchaseStatus;
+}
+
+// One row of the Trades screen: every invoice filed under the same trade.
+export interface TradeInvoiceRow {
+  trade: string; // "Unassigned" when the invoice names none
+  invoice_count: number;
+  line_count: number;
+  suppliers: string[];
+  quoted: number; // Σ quoted_gross, 0 when nothing was quoted
+  net: number;
+  vat: number;
+  gross: number;
+  paid: number;
+  balance: number; // gross − paid
+  status: PurchaseStatus;
+  last_date: string | null;
+}
+
+// One row of the Suppliers screen, scoped to a single project.
+export interface SupplierInvoiceRow {
+  supplier_id: string | null;
+  supplier: string;
+  invoice_count: number;
+  line_count: number;
+  net: number;
+  vat: number;
+  gross: number;
+  paid: number;
+  balance: number;
+  status: PurchaseStatus;
+  last_date: string | null;
+  categories: string[];
+}
+
+// One appearance of an item on one invoice, on the Price Tracker's timeline.
+export interface ItemPriceRowPoint {
+  line_id: string;
+  purchase_id: string;
+  date: string | null;
+  supplier: string;
+  invoice_no: string | null;
+  qty: number;
+  unit: string | null;
+  unit_price: number;
+  line_net: number;
+  // Null whenever no honest percentage exists — first buy, or the unit
+  // changed. Callers must render `move: "unit_change"` as a note about the
+  // units, never as a number.
+  delta_pct: number | null;
+  move: PriceMove;
+  previous_unit: string | null;
+}
+
+// One item on the Price Tracker: what it cost the first time, what it costs
+// now, and every buy in between.
+export interface ItemPriceRow {
+  item_id: string | null;
+  item: string;
+  units: string[]; // every unit this item has been bought in
+  purchase_count: number;
+  total_qty: number;
+  total_net: number;
+  suppliers: string[];
+  first_price: number;
+  latest_price: number;
+  latest_delta_pct: number | null;
+  trend: PriceMove;
+  last_date: string | null;
+  points: ItemPriceRowPoint[]; // oldest → newest
 }
 
 export const PURCHASE_ORIGINS: PurchaseOrigin[] = [

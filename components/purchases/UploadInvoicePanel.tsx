@@ -9,13 +9,16 @@ import { Spinner } from "@/components/ui/States";
 import type { InvoiceUpload } from "@/types";
 
 // Step 1 of invoice ingestion, from the browser's side: get a file into
-// Storage and through extraction, with an honest status the whole way. The
-// review screen this hands off to doesn't exist yet — see the stub at
-// purchases/upload/[uploadId]/review.
+// Storage and through extraction, with an honest status the whole way. It
+// hands off to /invoices/[uploadId]/review.
 //
 // Per file: POST /api/invoices/upload-url -> PUT straight to the signed url
 // -> POST /api/invoices/[id]/extract. The file itself never passes through a
 // Next.js route (about.md's Vercel 4.5MB body cap is why).
+//
+// No project is involved at any point here. Since migration 0012 an upload
+// carries no project until the review screen files it against one, which is
+// what lets this panel live in the nav bar rather than inside a project.
 
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
 const ACCEPT = ALLOWED_TYPES.join(",");
@@ -76,7 +79,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function UploadInvoicePanel({ projectId }: { projectId: string }) {
+export default function UploadInvoicePanel() {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -205,7 +208,9 @@ export default function UploadInvoicePanel({ projectId }: { projectId: string })
             {
               method: "POST",
               body: JSON.stringify({
-                project_id: projectId,
+                // No project: which job this invoice belongs to is decided on
+                // the review screen, once you can see the document
+                // (migration 0012).
                 filename: file.name,
                 mime_type: file.type,
                 file_size: file.size,
@@ -244,7 +249,7 @@ export default function UploadInvoicePanel({ projectId }: { projectId: string })
         patchItem(key, { phase: "failed", error: message });
       }
     },
-    [projectId, patchItem, watchUpload, applyServerStatus]
+    [patchItem, watchUpload, applyServerStatus]
   );
 
   const enqueueFiles = useCallback(
@@ -361,7 +366,6 @@ export default function UploadInvoicePanel({ projectId }: { projectId: string })
             <UploadRow
               key={item.key}
               item={item}
-              projectId={projectId}
               onRetry={() => retry(item.key)}
               onRemove={() => remove(item.key)}
             />
@@ -374,12 +378,10 @@ export default function UploadInvoicePanel({ projectId }: { projectId: string })
 
 function UploadRow({
   item,
-  projectId,
   onRetry,
   onRemove,
 }: {
   item: QueueItem;
-  projectId: string;
   onRetry: () => void;
   onRemove: () => void;
 }) {
@@ -415,7 +417,7 @@ function UploadRow({
         <div className="mt-2 flex items-center justify-between">
           <p className="text-xs text-emerald-700">Read successfully.</p>
           <Link
-            href={`/projects/${projectId}/purchases/upload/${item.uploadId}/review`}
+            href={`/invoices/${item.uploadId}/review`}
             className="btn-secondary"
           >
             Review
@@ -430,10 +432,7 @@ function UploadRow({
             <button type="button" className="btn-secondary" onClick={onRetry}>
               Retry
             </button>
-            <Link
-              href={`/projects/${projectId}/purchases/new`}
-              className="btn-secondary"
-            >
+            <Link href="/invoices/new" className="btn-secondary">
               Enter manually instead
             </Link>
             <button

@@ -1,33 +1,63 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { computeEntries, formatCurrency } from "@/lib/calculations";
+import { computePurchases, ACTIVE_PURCHASE } from "@/lib/purchases";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/States";
-import type { Project, ExpenseEntry } from "@/types";
+import type { Project, ExpenseEntry, Purchase, Payment } from "@/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   const supabase = createClient();
-  const [{ data: projects }, { data: rawEntries }] = await Promise.all([
+  const [
+    { data: projects },
+    { data: rawEntries },
+    { data: rawPurchases },
+    { data: rawPayments },
+  ] = await Promise.all([
     supabase.from("projects").select("*").order("created_at", { ascending: false }),
     supabase.from("expense_entries").select("*"),
+    supabase.from("purchases").select("*").neq("entry_status", "Cancelled"),
+    supabase.from("payments").select("*"),
   ]);
 
-  // Spend must come from the week-by-week diary only. 'ledger' rows are the
-  // imported Trades / Materials reference set — summing both double-counts the
-  // same spend (and the target budget is itself derived from the ledger).
-  // Mirrors the filter in ProjectDetail.tsx so card and Overview agree.
+  // 'ledger' rows are the imported reference set that overlapped the diary, so
+  // they are excluded — summing both double-counts the same spend (about.md
+  // §5). Mirrors the filter in ProjectDetail.tsx so this card and the project's
+  // Overview agree.
   const entries = computeEntries((rawEntries ?? []) as ExpenseEntry[]).filter(
     (e) => e.source !== "ledger"
   );
   const spentByProject = new Map<string, number>();
+  const addSpend = (projectId: string, amount: number) =>
+    spentByProject.set(projectId, (spentByProject.get(projectId) ?? 0) + amount);
+
   for (const e of entries) {
     if (e.status === "Cancelled") continue;
-    spentByProject.set(
-      e.project_id,
-      (spentByProject.get(e.project_id) ?? 0) + e.total_incl_vat
-    );
+    addSpend(e.project_id, e.total_incl_vat);
+  }
+
+  const computedPurchases = computePurchases(
+    (rawPurchases ?? []) as Purchase[],
+    (rawPayments ?? []) as Payment[]
+  ).filter(ACTIVE_PURCHASE);
+
+  const invoicedByProject = new Map<string, { gross: number; paid: number; balance: number; count: number }>();
+  for (const p of computedPurchases) {
+    const existing = invoicedByProject.get(p.project_id) ?? { gross: 0, paid: 0, balance: 0, count: 0 };
+    existing.gross += Number(p.gross_total);
+    existing.paid += p.paid;
+    existing.balance += p.balance;
+    existing.count += 1;
+    invoicedByProject.set(p.project_id, existing);
+    // Invoices are spend. They used to be counted only in the separate
+    // "Invoices" block below, which meant a project funded entirely by
+    // invoices — every project, now the spreadsheet import has gone — showed
+    // "Spent £0.00" next to a real invoice total. There is no double-count
+    // risk: a purchase and an expense_entry are two different rows, and
+    // nothing writes both for one payment.
+    addSpend(p.project_id, Number(p.gross_total));
   }
 
   const list = (projects ?? []) as Project[];
@@ -58,6 +88,7 @@ export default async function DashboardPage() {
             const budget = Number(p.target_budget);
             const usedPct = budget > 0 ? Math.round((spent / budget) * 100) : 0;
             const over = budget > 0 && spent > budget;
+            const inv = invoicedByProject.get(p.id);
             return (
               <Link
                 key={p.id}
@@ -95,6 +126,39 @@ export default async function DashboardPage() {
                     >
                       {usedPct}% of budget used
                     </p>
+                  </div>
+                )}
+                {inv && inv.count > 0 && (
+                  <div className="mt-3 border-t border-gray-100 pt-3">
+                    <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-gray-400">
+                      Invoices ({inv.count})
+                    </p>
+                    <div className="grid grid-cols-3 gap-1 text-xs text-gray-600">
+                      <div>
+                        <span className="block text-gray-400">Invoiced</span>
+                        <span className="font-medium text-gray-900">
+                          {formatCurrency(inv.gross)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="block text-gray-400">Paid</span>
+                        <span className="font-medium text-gray-900">
+                          {formatCurrency(inv.paid)}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="block text-gray-400">Owed</span>
+                        <span
+                          className={`font-medium ${
+                            inv.balance > 0.001
+                              ? "text-red-600"
+                              : "text-emerald-600"
+                          }`}
+                        >
+                          {formatCurrency(inv.balance)}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 )}
               </Link>

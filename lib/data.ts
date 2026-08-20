@@ -7,12 +7,16 @@ import {
   computePurchases,
   lastPurchaseDate,
   purchaseOrderKey,
+  purchasesToSyntheticEntries,
   totalsBySource,
 } from "@/lib/purchases";
+import { buildInvoiceLines } from "@/lib/invoiceViews";
 import type {
   Project,
+  ProjectRef,
   ExpenseEntry,
   ExpenseEntryComputed,
+  InvoiceLineView,
   TradeLookup,
   ProjectWeek,
   InvoiceRef,
@@ -34,6 +38,7 @@ import type {
   PurchaseFormBundle,
   PurchaseLine,
   PurchaseLineDetail,
+  PurchaseTotals,
   Supplier,
   SupplierAlias,
   SupplierBundle,
@@ -52,12 +57,24 @@ export async function getProject(id: string): Promise<Project | null> {
   return (data as Project) ?? null;
 }
 
-export async function getProjectBundle(id: string): Promise<{
+export interface ProjectBundle {
   project: Project;
   entries: ExpenseEntryComputed[];
   lookups: TradeLookup[];
   weeks: ProjectWeek[];
-} | null> {
+  invoiceTotals: PurchaseTotals[];
+  // The transaction core for this project, flattened one line per row. This is
+  // what the Trades / Labour / Materials / Suppliers / Price Tracker tabs are
+  // built from — see lib/invoiceViews.ts for why they no longer read
+  // expense_entries.
+  invoiceLines: InvoiceLineView[];
+  // Whole documents, for the screens that report paid / outstanding: payment is
+  // recorded per invoice, never per line.
+  purchases: PurchaseComputed[];
+  supplierNames: Record<string, string>;
+}
+
+export async function getProjectBundle(id: string): Promise<ProjectBundle | null> {
   const supabase = createClient();
   const { data: project } = await supabase
     .from("projects")
@@ -66,22 +83,97 @@ export async function getProjectBundle(id: string): Promise<{
     .single();
   if (!project) return null;
 
-  const [{ data: rawEntries }, { data: lookups }, { data: weeks }] =
-    await Promise.all([
-      supabase
-        .from("expense_entries")
-        .select("*")
-        .eq("project_id", id)
-        .order("week_number", { ascending: true }),
-      supabase.from("trade_lookups").select("*"),
-      supabase.from("project_weeks").select("*").eq("project_id", id),
-    ]);
+  // First pass: expense entries, lookups, weeks, and purchases for this project.
+  const [
+    { data: rawEntries },
+    { data: lookups },
+    { data: weeks },
+    { data: rawPurchases },
+  ] = await Promise.all([
+    supabase
+      .from("expense_entries")
+      .select("*")
+      .eq("project_id", id)
+      .order("week_number", { ascending: true }),
+    supabase.from("trade_lookups").select("*"),
+    supabase.from("project_weeks").select("*").eq("project_id", id),
+    // Cancelled purchases are fetched, not filtered in SQL: the Expenses list
+    // shows them so they can be un-cancelled, and every figure derived below
+    // applies ACTIVE_PURCHASE for itself.
+    supabase.from("purchases").select("*").eq("project_id", id),
+  ]);
+
+  // Second pass: payments and lines scoped to this project's purchase IDs
+  // only. selectIn handles the empty-array case without a wasted round trip.
+  const purchaseIds = ((rawPurchases ?? []) as Purchase[]).map((p) => p.id);
+  const [projectPayments, purchaseLines] = await Promise.all([
+    selectIn<Payment>(supabase, "payments", "purchase_id", purchaseIds),
+    selectIn<PurchaseLine>(supabase, "purchase_lines", "purchase_id", purchaseIds),
+  ]);
+
+  const computedPurchases = computePurchases(
+    (rawPurchases ?? []) as Purchase[],
+    projectPayments
+  );
+
+  // Resolve supplier names for purchases so the synthetic entries carry a
+  // readable supplier label (e.g. "Invoice 1234 – Lawsons").
+  const supplierIds = [
+    ...new Set(
+      ((rawPurchases ?? []) as Purchase[])
+        .map((p) => p.supplier_id)
+        .filter((id): id is string => Boolean(id))
+    ),
+  ];
+  let supplierNames = new Map<string, string>();
+  if (supplierIds.length > 0) {
+    const { data: suppliers } = await supabase
+      .from("suppliers")
+      .select("id, name")
+      .in("id", supplierIds);
+    supplierNames = new Map(
+      ((suppliers ?? []) as { id: string; name: string }[]).map((s) => [
+        s.id,
+        s.name,
+      ])
+    );
+  }
+
+  // Build synthetic expense entries from invoice data and merge them in.
+  // Invoice entries use source: "invoice" so they are distinguishable from
+  // diary/ledger rows if needed (e.g. to render them read-only in the UI).
+  const invoiceEntries = purchasesToSyntheticEntries(
+    computedPurchases,
+    supplierNames
+  );
+
+  const diaryEntries = computeEntries((rawEntries ?? []) as ExpenseEntry[]);
+
+  // Item names, so a line matched to an item shows the canonical spelling and
+  // its price history groups with every other spelling of the same thing.
+  const items = await selectIn<Item>(
+    supabase,
+    "items",
+    "id",
+    distinct(purchaseLines.map((l) => l.item_id))
+  );
 
   return {
     project: project as Project,
-    entries: computeEntries((rawEntries ?? []) as ExpenseEntry[]),
+    // Merge invoice synthetic entries after diary/ledger rows so the existing
+    // sort-by-week_number on diary entries is preserved at the front.
+    entries: [...diaryEntries, ...invoiceEntries],
     lookups: (lookups ?? []) as TradeLookup[],
     weeks: (weeks ?? []) as ProjectWeek[],
+    invoiceTotals: totalsBySource(computedPurchases.filter(ACTIVE_PURCHASE)),
+    invoiceLines: buildInvoiceLines(
+      computedPurchases,
+      purchaseLines,
+      supplierNames,
+      new Map(items.map((i) => [i.id, i.canonical_name]))
+    ),
+    purchases: computedPurchases,
+    supplierNames: Object.fromEntries(supplierNames),
   };
 }
 
@@ -162,6 +254,8 @@ export async function getSuppliers(): Promise<SupplierListRow[]> {
         last_purchase_date: lastPurchaseDate(list),
       };
     })
+    // Only show suppliers that have at least one purchase (non-zero entries).
+    .filter((row) => row.purchase_count > 0)
     // Busiest first. Sorted on the record COUNT, not on money — ranking by a
     // diary + ledger total would be ranking by the double-count (about.md §5).
     .sort(
@@ -308,7 +402,11 @@ export async function getItems(): Promise<ItemListRow[]> {
   const noNames = new Map<string, string>();
 
   return ((items ?? []) as Item[])
-    .filter((item) => item.category === "Materials")
+    // Labour is a service, not a thing with a price per unit to track, so it
+    // is the only category kept out. This used to require category ===
+    // "Materials", which silently hid every item an invoice created without a
+    // category set — the page said "no items" while the lines existed.
+    .filter((item) => item.category !== "Labour")
     .map((item) => {
       const itemLines = linesByItem.get(item.id) ?? [];
       const points = buildItemTimeline(
@@ -339,6 +437,8 @@ export async function getItems(): Promise<ItemListRow[]> {
         ),
       } satisfies ItemListRow;
     })
+    // Only show items that have at least one purchase line (QTY > 0).
+    .filter((row) => row.line_count > 0)
     .sort(
       (a, b) =>
         b.line_count - a.line_count ||
@@ -355,18 +455,23 @@ export async function getItems(): Promise<ItemListRow[]> {
  * have bought before and what it cost last time, so the price and duplicate
  * warnings can be computed as you type without a round trip per keystroke.
  */
+/**
+ * Everything the invoice form needs, optionally scoped to a project.
+ *
+ * `projectId` is null for the nav-bar flow, where the project is a field on
+ * the form rather than part of the route (about.md §8.2). Almost nothing here
+ * was ever project-scoped — suppliers, items, trades and price history are
+ * deliberately cross-project — so the only thing null costs is `project`
+ * itself and a definite `next_week`, which is why the week is now returned per
+ * project instead.
+ */
 export async function getPurchaseFormBundle(
-  projectId: string
+  projectId: string | null
 ): Promise<PurchaseFormBundle | null> {
   const supabase = createClient();
-  const { data: project } = await supabase
-    .from("projects")
-    .select("*")
-    .eq("id", projectId)
-    .single();
-  if (!project) return null;
-
   const [
+    { data: project },
+    { data: projects },
     { data: suppliers },
     { data: supplierAliases },
     { data: items },
@@ -377,6 +482,10 @@ export async function getPurchaseFormBundle(
     { data: units },
     { data: entryWeeks },
   ] = await Promise.all([
+    projectId
+      ? supabase.from("projects").select("*").eq("id", projectId).single()
+      : Promise.resolve({ data: null }),
+    supabase.from("projects").select("id, name").order("name"),
     supabase.from("suppliers").select("*").order("name"),
     supabase.from("supplier_aliases").select("*"),
     supabase.from("items").select("*").order("canonical_name"),
@@ -387,8 +496,14 @@ export async function getPurchaseFormBundle(
     // last time" — the legacy diary rows have none at all (about.md §3.1).
     supabase.from("purchase_lines").select("*").gt("unit_price", 0),
     supabase.from("purchase_lines").select("unit").not("unit", "is", null),
-    supabase.from("expense_entries").select("week_number").eq("project_id", projectId),
+    // Every project's weeks, not just one — the form can now switch project
+    // and must be able to answer "next week" for whichever is picked.
+    supabase.from("expense_entries").select("project_id, week_number"),
   ]);
+
+  // A named project that doesn't exist (or isn't the caller's) is still a 404;
+  // no project asked for is not.
+  if (projectId && !project) return null;
 
   const supplierRows = (suppliers ?? []) as Supplier[];
   const supplierNames = new Map(supplierRows.map((s) => [s.id, s.name]));
@@ -471,22 +586,37 @@ export async function getPurchaseFormBundle(
       gross: Number(p.gross_total),
     }));
 
-  const weekNumbers = [
-    ...((entryWeeks ?? []) as { week_number: number }[]).map((w) => w.week_number),
-    ...((purchases ?? []) as Purchase[])
-      .filter((p) => p.project_id === projectId && p.week_no)
-      .map((p) => p.week_no as number),
-  ];
+  // Highest week seen per project, from both records — the week-by-week diary
+  // and the invoices already filed. One more than that is where the next
+  // document goes.
+  const highestWeek = new Map<string, number>();
+  const noteWeek = (id: string | null, week: number | null | undefined) => {
+    if (!id || !week) return;
+    highestWeek.set(id, Math.max(highestWeek.get(id) ?? 0, week));
+  };
+  for (const w of (entryWeeks ?? []) as {
+    project_id: string;
+    week_number: number;
+  }[])
+    noteWeek(w.project_id, w.week_number);
+  for (const p of (purchases ?? []) as Purchase[]) noteWeek(p.project_id, p.week_no);
+
+  const projectRefs = (projects ?? []) as ProjectRef[];
+  const nextWeekByProject: Record<string, number> = {};
+  for (const p of projectRefs)
+    nextWeekByProject[p.id] = (highestWeek.get(p.id) ?? 0) + 1;
 
   return {
-    project: project as Project,
+    project: (project as Project) ?? null,
+    projects: projectRefs,
     suppliers: supplierRefs,
     items: itemRefs,
     trades: (trades ?? []) as TradeLookup[],
     units: distinct(((units ?? []) as { unit: string | null }[]).map((u) => u.unit)).sort(
       (a, b) => a.localeCompare(b)
     ),
-    next_week: weekNumbers.length ? Math.max(...weekNumbers) + 1 : 1,
+    next_week: projectId ? nextWeekByProject[projectId] ?? 1 : 1,
+    next_week_by_project: nextWeekByProject,
     invoices,
   };
 }

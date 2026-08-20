@@ -18,6 +18,11 @@ export default async function ProjectPage({
       initialEntries={bundle.entries}
       trades={bundle.lookups}
       initialWeeks={bundle.weeks}
+      invoiceTotals={bundle.invoiceTotals}
+      invoiceLines={bundle.invoiceLines}
+      purchases={bundle.purchases}
+      supplierNames={bundle.supplierNames}
     />
   );
 }
+

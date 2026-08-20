@@ -1971,3 +1971,729 @@ were exercised against 18 hand-checked cases covering `10.000EA`, `5 EA`,
 must not produce a fabricated quantity, and the 0/5/20/17.5 rates.
 Not yet run against a live extraction — that needs a real invoice through
 `GEMINI_API_KEY`.
+
+---
+
+### 2026-08-19 — Invoices move to the nav bar; the project is chosen when you save
+
+**What changed (in plain English):**
+Logging an invoice no longer starts inside a project. There is a new
+**Invoices** item in the top menu, next to Dashboard, Suppliers and Items. It
+offers the same two choices the in-project screen used to — *Upload invoice* or
+*Enter manually* — and asks which project the invoice belongs to on the form
+itself, at the moment you save it. After saving you land on that project's
+invoice list.
+
+The old way in (Project → Invoices → + Log invoice → Upload/Manual) is gone.
+Each project still has its **Invoices** page listing what has been filed
+against it; only the "add" buttons there now point at the top-menu flow.
+
+The review screen was also rebalanced: the picture of the invoice was taking
+up half the width and most of the height, squeezing the fields you actually
+have to read and correct. The document now takes two fifths of the width and
+is capped at 60% of screen height, with an "Open full size ↗" link under it;
+the form gets the remaining three fifths, and the Qty and VAT boxes on each
+line were widened so the extracted numbers are readable.
+
+**Why:**
+User request: *"the goal is invoice option should be available for any project
+so that i don't need to go to project, then invoice"*, and *"while reviewing
+the invoice the uploaded document taking more space and the fields space is
+very small and unable to see the extracted numbers"*.
+
+In practice the project is the *last* thing you know — you have a pile of
+invoices and decide which job each belongs to while looking at it. Requiring
+the project first meant navigating into a project before you could photograph
+anything.
+
+**Where the information came from:**
+User request. No spreadsheet involved; no figure was recalculated.
+
+**Files used (read, not changed):**
+- `supabase/migrations/0010_invoice_upload.sql` — confirmed `project_id` was
+  `not null`, and that nothing else keys off it
+- `app/api/invoices/[id]/extract/route.ts`, `app/api/invoices/[id]/route.ts` —
+  checked they only ever read an upload by its own id, never by project
+- `lib/purchaseWrite.ts`, `lib/validation.ts`
+
+**Files changed:**
+- `supabase/migrations/0012_upload_before_project.sql` — **new.** Makes
+  `invoice_uploads.project_id` nullable, plus a CHECK that a *committed*
+  upload must still have one
+- `components/ui/AppNav.tsx` — added the **Invoices** nav item (desktop and
+  mobile drawer)
+- `app/(app)/invoices/page.tsx` — **new.** The two-option chooser, moved here
+  from `projects/[id]/purchases/add`
+- `app/(app)/invoices/upload/page.tsx` — **new.** Upload queue, no project
+- `app/(app)/invoices/{upload,new,[uploadId]/review}/loading.tsx` — **new.**
+  Skeletons, carried over from the two deleted routes that had them
+- `app/(app)/invoices/new/page.tsx` — **new.** Manual entry, no project
+- `app/(app)/invoices/[uploadId]/review/page.tsx` — **new.** The review screen,
+  moved out from under `projects/[id]`; also the 2fr/3fr split, the 60vh cap
+  and the "Open full size" link
+- `app/(app)/projects/[id]/purchases/add/`, `…/purchases/new/`,
+  `…/purchases/upload/` — **deleted**, replaced by the four `/invoices` routes
+  above
+- `app/(app)/projects/[id]/purchases/page.tsx` — "+ Log invoice" now points at
+  `/invoices`; the empty state and blurb say where adding happens
+- `app/(app)/projects/[id]/purchases/[pid]/edit/page.tsx` — handles
+  `bundle.project` now being nullable
+- `components/forms/PurchaseForm.tsx` — the project is a form field: a
+  "Which project" card shown only when the route didn't already say, the week
+  number re-defaults per project (never over a week you typed), the project is
+  validated before save, sent to the commit route, and used for the redirect;
+  Qty and VAT line boxes widened from 1 to 2 of 12 columns
+- `components/purchases/UploadInvoicePanel.tsx` — dropped its `projectId` prop
+  entirely; uploads carry no project, and it links to `/invoices/[id]/review`
+- `app/api/invoices/upload-url/route.ts` — `project_id` is now optional; a
+  project-less file is stored under `{user}/unassigned/…`
+- `app/api/invoices/[id]/commit/route.ts` — takes `project_id` from the review
+  screen (falling back to the upload's own), verifies the caller owns it,
+  files the purchase there and writes it back onto the upload row
+- `lib/data.ts` — `getPurchaseFormBundle` accepts `null`; returns every project
+  and a `next_week_by_project` map
+- `types/index.ts` — `PurchaseFormBundle.project` is nullable; added
+  `projects`, `next_week_by_project` and a `ProjectRef` type
+- `about.md` — §8.2 rewritten for the new flow; §12 migrations table
+- `updates.md` — this entry
+
+**Database:**
+`supabase/migrations/0012_upload_before_project.sql` is **written but NOT
+run.** Run it in the Supabase SQL editor before uploading anything from the new
+screen — until then every upload fails with a not-null violation on
+`project_id`, because the app now sends null. It is re-runnable and only widens
+what is allowed, so it cannot invalidate an existing row; it raises an
+exception rather than committing if the column is still NOT NULL afterwards,
+and prints a count of project-less uploads per status at the end.
+
+**Result / numbers after:**
+No figure moved — §13 is unchanged. Nothing was rewritten, no total is computed
+differently, and the diary/ledger split is untouched: this is entirely about
+which screen you reach a form from and where its result is filed.
+`npm run build` passes (it is the full typecheck). The new screens were **not**
+exercised against the running app — the browser used for checking has no login
+session, so the upload → extract → review → save round trip still needs one
+real invoice put through it after migration 0012 has been run.
+
+---
+
+### 2026-08-20 — Project screens rebuilt on invoice lines; Trades/Labour and Materials/Suppliers split
+
+**What changed (in plain English):**
+The project screen now has seven tabs instead of five. "Trades & Labour" became
+**Trades** and **Labour**; "Materials & Suppliers" became **Materials** and
+**Suppliers**. All four of those, plus the **Price Tracker**, are now built from
+the invoices filed against the project — their lines, quantities and unit
+prices — instead of from the week-by-week `expense_entries` table.
+
+Three bugs went with it:
+
+1. **The Expenses list emptied itself.** Changing an entry's status or saving an
+   edit refetched `/api/projects/[id]/expenses`, which returned `expense_entries`
+   only. With the spreadsheet import removed, that table is empty, so every
+   invoice row vanished and the screen looked broken. That endpoint now returns
+   the invoices too, exactly as the page's first load does.
+2. **"Mark Paid" on an invoice did nothing.** A purchase has no paid column —
+   what has been paid is the sum of its `payments` rows — so the amount was
+   silently dropped. It now writes a payment for the *difference* between what
+   you say is paid and what the payment rows already total, so pressing it twice
+   cannot pay an invoice twice.
+3. **The Price Tracker was empty.** It read `expense_entries.unit_cost`, which
+   the spreadsheet almost never filled in. It now reads `purchase_lines`, where
+   every line carries qty, unit and price each — which is the whole reason the
+   spreadsheet was dropped in favour of invoices.
+
+**Why:**
+The spreadsheet was removed because too many of its rows recorded a total and
+nothing else. Invoices carry the detail, but only the Invoices screen was
+reading them: every analysis screen still read the now-empty expenses table, so
+they showed nothing. The user is about to enter roughly twenty more invoices and
+needs the analytics to fill in as they go.
+
+**Where the information came from:**
+User request, plus the shape of the existing `purchases` / `purchase_lines` /
+`payments` tables from migration 0008.
+
+**Files used (read, not changed):**
+- `lib/purchaseWrite.ts`, `lib/invoice/resolve.ts`, `lib/calculations.ts`
+- `app/api/projects/[id]/{materials,prices,trades}/route.ts`,
+  `app/api/projects/[id]/export/{pdf,excel}/route.ts` — checked that the old
+  `lib/summary.ts` builders they call still work; they do, untouched
+
+**Files changed:**
+- `lib/invoiceViews.ts` — **new.** Every builder the five invoice-driven tabs
+  use: `buildInvoiceLines` (flattens lines with their header's supplier, date,
+  trade and category), `buildTradeRows`, `buildSupplierRows`, `materialLines`,
+  `labourLines`, `buildItemPriceRows`, `buildItemPriceAlerts`
+- `types/index.ts` — added `InvoiceLineView`, `TradeInvoiceRow`,
+  `SupplierInvoiceRow`, `ItemPriceRow`, `ItemPriceRowPoint`
+- `lib/data.ts` — `getProjectBundle` also returns `invoiceLines`, `purchases`
+  and `supplierNames`, and no longer filters Cancelled purchases out in SQL;
+  `getItems` no longer requires `category === "Materials"`, which had been
+  hiding every item an uploaded invoice created (the extractor sets no category)
+- `lib/purchases.ts` — `purchasesToSyntheticEntries` keeps Cancelled invoices,
+  so one can be un-cancelled from the Expenses list
+- `lib/summary.ts` — the Labour/Materials split is now "Labour, or else
+  materials" rather than "Materials, or else labour", so uncategorised invoices
+  stop landing in the Labour half of the Overview donut
+- `components/project/ProjectDetail.tsx` — seven tabs; the invoice-derived
+  memos; refetch now also calls `router.refresh()` so the server-rendered tabs
+  catch up; mounts the previously-unused `InvoiceBanner`
+- `components/project/TradesTab.tsx` — rewritten against `TradeInvoiceRow`
+- `components/project/LabourTab.tsx` — **new**
+- `components/project/MaterialsTab.tsx` — rewritten; one row per invoice line
+  with qty, unit and unit price, plus search and a supplier filter
+- `components/project/SuppliersTab.tsx` — **new**; expandable to the lines
+  bought from each merchant
+- `components/project/PricesTab.tsx` — rewritten against `ItemPriceRow`; uses
+  `PriceMoveBadge`, so a pack-size change reads "bag → tonne — check pack size"
+  instead of a made-up percentage
+- `components/project/format.ts` — **new.** `fmtDate` (moved out of two tabs
+  that each had a copy), `fmtQty`, `fmtUnitPrice`
+- `components/project/OverviewTab.tsx` — price alerts take `ItemPriceRow[]`
+- `components/project/ExpensesTab.tsx` — invoice rows carry an "Invoice" badge,
+  their Edit opens the invoice form instead of the expense form, Mark Paid is
+  offered whenever anything is still owed, and the delete dialog says what
+  deleting an invoice takes with it
+- `components/ui/Badge.tsx` — an "Invoice" style
+- `app/api/projects/[id]/expenses/route.ts` — GET merges invoices into the
+  reply and applies the same filters to them
+- `app/api/projects/[id]/expenses/[eid]/route.ts` — the `inv:` branch is now
+  `patchInvoice`: status updates `entry_status`, a paid amount becomes a
+  `payments` row for the difference, paying less than is already recorded is
+  refused with an explanation, and a full-form edit is refused pointing at the
+  invoice form
+- `app/(app)/projects/[id]/page.tsx` — passes the three new props
+- `app/(app)/dashboard/page.tsx` — "Spent" now includes invoiced amounts. Every
+  project is funded by invoices since the import was removed, so every card read
+  "Spent £0.00" next to a real invoice total
+- `about.md` — §5, §6 and §8 updated for the new tabs and data source
+- `updates.md` — this entry
+
+**Database:**
+None. No migration was written and none was run. Everything here reads tables
+that migrations 0008 and 0010–0012 already created.
+
+**Result / numbers after:**
+No stored figure changed — nothing was rewritten and no total is stored. What
+moved is what the screens can see:
+
+- Price Tracker: empty → one row per item bought at a recorded unit price, with
+  the change against the previous buy of the same item **in the same unit**.
+- Materials: was a `MaterialLedgerRow` list off `expense_entries` (empty) → one
+  row per invoice line, with qty, unit and unit price.
+- Dashboard "Spent": `£0.00` on every card → diary spend **plus** invoiced
+  gross.
+- Overview Labour vs Materials: an invoice with no category set counted as
+  Labour → counts as Materials, matching the Materials tab.
+
+`npm run build` and `npm run lint` both pass. The builders were exercised
+directly against realistic rows (two invoices from one supplier with cement at
+£5 then £6 a bag, a Labour invoice, an uncategorised one, a Cancelled one, and a
+bag→tonne unit change): the cancelled invoice is excluded everywhere, Trades
+splits Plumbing from Unassigned, Suppliers produces a "No supplier" bucket, the
+Price Tracker reports cement +20.0% up, and the unit change reports no
+percentage at all. The screens themselves were **not** clicked through — the
+browser available for checking has no login session — so the seven tabs still
+want one pass by eye once the next invoice is in.
+
+---
+
+### 2026-08-20 — Wrote a portable knowledge base for handing to another project
+
+**What changed (in plain English):**
+Added `KNOWLEDGE_BASE.md` — one self-contained document describing what
+RenovaTrack is, how it is built, every rule the numbers depend on, what has gone
+wrong historically and why, and what state the app is in today. It is written to
+be read *without* the repository open, so it can be dropped into a different
+project as background for planning.
+
+It is a summary, not a replacement: `about.md` stays the working reference for
+anyone changing this code, and `updates.md` stays the history. Nothing in the
+application changed.
+
+**Why:**
+User request: the owner is starting a new project and wants this project's
+knowledge carried over for planning. `about.md` is ~1,400 lines and assumes the
+reader has the repo in front of them; `updates.md` is chronological rather than
+structural. Neither travels well on its own.
+
+**Where the information came from:**
+This repository only — `about.md`, `updates.md`, `CLAUDE.md`, `README.md`,
+`package.json`, `types/index.ts`, `lib/` (data, calculations, summary,
+invoiceViews, purchases, purchaseWrite, validation, invoice/*), the
+`app/(app)/` and `app/api/` route trees, `components/`,
+`supabase/migrations/0010` and `0012`, and `git status` / `git log` for the
+uncommitted-work note. No spreadsheet was opened and no figure was recalculated.
+
+**Files used (read, not changed):**
+- `about.md`, `updates.md`, `CLAUDE.md`, `README.md`
+- `package.json`, `.env.local.example`, `.claude/launch.json`
+- `types/index.ts`
+- `lib/data.ts`, `lib/purchases.ts`, `lib/invoiceViews.ts`, `lib/summary.ts`,
+  `lib/calculations.ts`, `lib/validation.ts`, `lib/purchaseWrite.ts`
+- `lib/invoice/extract.ts`, `lib/invoice/normalise.ts`, `lib/invoice/resolve.ts`,
+  `lib/invoice/reconcile.ts`, `lib/invoice/schema.ts`
+- `components/ui/AppNav.tsx`, `components/project/ProjectDetail.tsx`
+- `supabase/migrations/0010_invoice_upload.sql`,
+  `supabase/migrations/0012_upload_before_project.sql`
+
+**Files changed:**
+- `KNOWLEDGE_BASE.md` — **new.** 15 sections: what the product is and how it
+  evolved; stack and environment; repo map; the two data-flow directions; the
+  full data model (the original four tables, the eight-table transaction core,
+  invoice uploads, the one view); eight named invariants; the diary/ledger split
+  in full; a calculation reference; screens, tabs and the API surface; the
+  five-stage invoice ingestion pipeline; validation and the non-blocking
+  advisories; a history of the seven incidents and what each one taught; open
+  risks and current state; the repo's working conventions; and what to carry
+  into a new project versus do differently.
+- `updates.md` — this entry
+
+**Database:**
+None. No migration was written and none was run.
+
+**Result / numbers after:**
+No figure moved — this change is documentation only and touches no code path.
+The knowledge base repeats the `about.md` §13 figures only as history, and
+flags them as no longer being a regression baseline. It also records two things
+a reader must verify against the live database rather than trust: the run status
+of migrations `0009`, `0011` and `0012`, and that the 2026-08-20 tab-split work
+is still uncommitted in the working tree.
+
+---
+
+### 2026-08-20 — Invoice row action on the Expenses tab renamed "Open invoice" → "Edit"
+
+**What changed (in plain English):**
+On the Expenses tab, the button on an invoice-backed row used to say "Open
+invoice". It now says "Edit", matching the label already used on ordinary
+expense rows. Behaviour is unchanged — it still opens the invoice form, not the
+expense drawer — and the "Invoice" badge next to the description stays, since
+that badge is now the only visual cue telling the two Edit paths apart. Both
+Edit buttons (the expense one and the invoice one) got distinct
+`aria-label`s ("Edit expense" / "Edit invoice") so a screen reader user isn't
+looking at two identically-announced controls on the same row list.
+
+**Why:**
+User request. `about.md` §8 already described this control as "Edit" — it was
+written that way during the 2026-08-20 tab-split work — so the code had drifted
+from its own documentation rather than the other way round; no doc change was
+needed here.
+
+**Where the information came from:**
+User request. Grepped the whole repo for "Open invoice" and case variants to
+confirm there was exactly one occurrence and no second copy on the dashboard or
+elsewhere.
+
+**Files used (read, not changed):**
+- `about.md` §8 (Expenses tab description)
+- `app/(app)/dashboard/page.tsx` — confirmed it doesn't surface this row action
+
+**Files changed:**
+- `components/project/ExpensesTab.tsx` — the invoice row's Link text changed
+  from "Open invoice" to "Edit", with `aria-label="Edit invoice"` added; the
+  plain expense row's Edit button got `aria-label="Edit expense"` for the same
+  reason. Both mobile card and desktop table render call the same shared
+  `rowActions(e)` function, so this single edit covers both renders.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No figure moved — a label-only change. `npx tsc --noEmit` is clean. Not
+clicked through in a browser — as in the two most recent sessions, the browser
+available here has no login session, so this needs one visual pass by the
+owner: open a project's Expenses tab, confirm an invoice row shows "Edit" (with
+its Invoice badge) and a plain expense row also shows "Edit", and that both
+still open the correct form.
+
+---
+
+### 2026-08-20 — Editing an invoice from the Expenses tab now returns to the Expenses tab
+
+**What changed (in plain English):**
+Opening an invoice from the Expenses tab and pressing Save (or Cancel) used to
+land on that project's invoice list. It now lands back on the Expenses tab you
+came from, showing the invoice's new figures straight away. Editing an invoice
+from anywhere else — the project's own Invoices page, or logging a brand new
+one from the top-menu Invoices flow — is unchanged: those still go to the
+invoice list, exactly as before.
+
+**Trace of the path, done before changing anything (as asked):**
+Expenses tab's invoice row → `Link` to
+`/projects/[id]/purchases/[pid]/edit` → a Server Component that loads the
+purchase and renders `PurchaseForm` with no extra props → in `PurchaseForm`,
+both Save and Cancel unconditionally did `router.push(`/projects/${projectId}/purchases`)`
+(the invoice list), regardless of where the form was opened from. Confirmed
+this is a genuine dead end, not a red herring: nothing about being reached from
+the Expenses tab was recorded anywhere along that path. Separately, even a
+plain link back to `/projects/[id]` would have landed on the Overview tab —
+`ProjectDetail.tsx`'s tab selection is `useState<Tab>("overview")` with no
+memory of which tab a caller wanted.
+
+**Why:**
+User request, and a genuine navigation dead end: editing one field of an
+invoice from the Expenses tab dropped you onto a different screen (the invoice
+list) instead of back where you were looking.
+
+**Where the information came from:**
+Reading `components/project/ExpensesTab.tsx`,
+`app/(app)/projects/[id]/purchases/[pid]/edit/page.tsx`,
+`components/forms/PurchaseForm.tsx` and `components/project/ProjectDetail.tsx`
+end to end, tracing the exact path above. No spreadsheet or database figure
+involved.
+
+**Files used (read, not changed):**
+- `app/(app)/invoices/new/page.tsx`,
+  `app/(app)/invoices/[uploadId]/review/page.tsx` — confirmed neither passes
+  (or needs to pass) a return target, so their redirect is unaffected
+- `about.md` §8, §8.2
+
+**Files changed:**
+- `lib/safeReturnTo.ts` — **new.** One pure function, `safeReturnTo(value)`:
+  accepts only a same-origin relative path (starts with a single `/`, not
+  `//`, no backslash), returns `null` for anything else. A `returnTo` value
+  travels through a query string, which is input from whoever typed the URL,
+  not from this app — so it is validated before ever reaching
+  `router.push()`, not sanitised or partially trusted.
+- `app/(app)/projects/[id]/purchases/[pid]/edit/page.tsx` — reads
+  `searchParams.returnTo`, validates it with `safeReturnTo`, and passes it to
+  `PurchaseForm` as the new `returnTo` prop
+- `components/forms/PurchaseForm.tsx` — added the optional `returnTo` prop
+  (only `purchases/[pid]/edit` ever sets it; `invoices/new` and the review
+  screen do not, so their behaviour is unchanged by construction, not by a
+  conditional). Re-validates `returnTo` with `safeReturnTo` a second time
+  inside the component itself, since this one form is shared by three
+  different callers and none of them should have to be trusted blindly by the
+  others. Both the post-save redirect (edit and create) and Cancel now use
+  `safeTarget ?? ` the previous default target
+- `components/project/ExpensesTab.tsx` — the invoice row's Edit link now
+  carries `?returnTo=` set to `/projects/<id>?tab=expenses` (URL-encoded)
+- `components/project/ProjectDetail.tsx` — tab selection now reads a `?tab=`
+  query param once on mount (`initialTabFrom`, checked against the real tab
+  keys), defaulting to Overview exactly as before when the param is missing or
+  not a real tab
+- `about.md` — new paragraph in §8 (the seven tabs) documenting the returnTo
+  mechanism, the query-param validation, and why `router.refresh()` after
+  `router.push()` is what makes the new figures show up immediately rather
+  than a stale, router-cached page
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No figure moved — this is a navigation fix only. `npx tsc --noEmit` and
+`npm run build` both pass clean; the build log shows no Suspense-boundary
+warning for the new `useSearchParams()` call in `ProjectDetail.tsx` (the route
+was already `export const dynamic = "force-dynamic"`, so it never attempts the
+static render that warning guards against). Not clicked through in a browser —
+no login session is available here, same limitation as recent sessions. Needs
+one manual pass: open a project, go to Expenses, click Edit on an invoice row,
+change a figure, Save, and confirm you land back on the Expenses tab of the
+same project with the new figure showing; then repeat and press Cancel instead
+of Save, confirming it also returns to Expenses with nothing changed. Also
+confirm logging a brand-new invoice from the top-menu Invoices flow, and
+editing an invoice from the project's own Invoices page, both still land on
+the invoice list as before.
+
+---
+
+### 2026-08-20 — Trade field: a shared select with an inline "+ Add new trade", on both forms
+
+**What changed (in plain English):**
+The Trade field on the expense form and the invoice form (manual entry,
+invoice edit, and the post-extraction review screen — all three share one
+form component) now offers a "+ Add new trade" option in the dropdown. Picking
+it opens a small name field and a Save button right there, without leaving the
+form; saving adds the trade to Settings' trade list and selects it on the row
+you were editing. The trade is still stored as a plain name string, exactly as
+before — nothing here needed a migration.
+
+Editing an existing expense or invoice whose trade isn't in the list (typed by
+hand before this existed, or a lookup that has since been renamed or deleted)
+now shows that value as a selected option marked "(not in list)", instead of
+the field silently looking blank.
+
+**Diagnosis before changing anything, as asked:** both `ExpenseForm.tsx` and
+`PurchaseForm.tsx`'s Trade field were **already** a `<select>` populated from
+`trade_lookups`, not the free-text/datalist input the brief described — so
+"replace the free-text input with a select" was already done, presumably in
+an earlier session. What was actually missing was the inline "add new trade"
+option and the "not in list" handling for an existing value, which is the
+part this change adds. `getPurchaseFormBundle` (used by all three invoice
+paths) and `getProjectBundle` (used by the expense form) already load
+`trade_lookups` in their existing batched query set, so no loader needed a new
+query either.
+
+**The "Trade T" investigation:** searched the codebase for a trade named or
+containing a bare `T` — not in the 13 seeded defaults in
+`supabase/migrations/0001_init.sql`'s `trg_seed_trades` function, and not
+hardcoded anywhere in `types/index.ts` or elsewhere in the app. That rules out
+option (c) from the brief (code or seed). This session has no live database
+access — migrations are pasted into the Supabase SQL editor by hand, and
+nothing in this environment can run a `select` against the real data — so (a)
+a genuine `trade_lookups` row versus (b) a stray free-text value on
+`expense_entries.trade` or `purchases.trade` could not be told apart from
+here. **SQL to run by hand in the Supabase SQL editor**, which answers both at
+once and counts how many rows would be affected either way:
+
+```sql
+-- 1. Is "T" a real trade_lookups row?
+select id, name, default_rate, default_markup_pct
+from public.trade_lookups
+where name = 'T';
+
+-- 2. Or free text sitting on expense_entries.trade? (also catches near
+--    variants — trailing space, lowercase — in case it isn't an exact "T")
+select trade, count(*) as row_count
+from public.expense_entries
+where trade is not null and length(trim(trade)) <= 2
+group by trade;
+
+-- 3. Or on purchases.trade, the invoice-side equivalent?
+select trade, count(*) as row_count
+from public.purchases
+where trade is not null and length(trim(trade)) <= 2
+group by trade;
+```
+
+Nothing was deleted based on a guess, per the brief. If query 1 returns a row,
+it is a genuine (if oddly named) trade lookup and this change is enough on its
+own — it will keep appearing in the dropdown until renamed or deleted by hand
+in Settings. If queries 2 or 3 return rows instead, it was always free text
+that the old datalist-shaped input (or hand-typing before any of this
+existed) let through; today's select-only change means no *new* row can be
+created with it, and an *existing* row carrying it will show up as "T (not in
+list)" the next time that row is opened for editing, exactly as designed
+above — it doesn't vanish from the database, only from being offered as a
+default choice.
+
+**Where the information came from:**
+User request. Code search across `supabase/migrations/0001_init.sql`,
+`types/index.ts`, `app/api/lookups/trades/*`, `components/settings/TradeLookups.tsx`.
+No spreadsheet involved; no live database query was possible from here.
+
+**Files used (read, not changed):**
+- `components/forms/ExpenseForm.tsx`, `components/forms/PurchaseForm.tsx` —
+  confirmed both already rendered `<select>`, not a datalist
+- `app/api/lookups/trades/route.ts` — confirmed `POST` already returns a 409
+  with a readable message on the `unique (user_id, name)` conflict, so the new
+  inline "Save" just needed to surface that message rather than add new
+  server-side handling
+- `components/settings/TradeLookups.tsx` — the existing add-a-trade pattern on
+  the Settings page, for consistency (same route, same payload shape)
+- `lib/data.ts` — confirmed `getPurchaseFormBundle` and `getProjectBundle`
+  already batch-load `trade_lookups`
+- `supabase/migrations/0001_init.sql` — the 13 seeded default trade names
+- `app/(app)/invoices/new/page.tsx`, `app/(app)/invoices/[uploadId]/review/page.tsx`,
+  `app/(app)/projects/[id]/purchases/[pid]/edit/page.tsx` — confirmed all
+  three load `getPurchaseFormBundle`, so `bundle.trades` reaches every caller
+  of `PurchaseForm`
+
+**Files changed:**
+- `components/forms/TradeSelect.tsx` — **new.** The shared control: a
+  `<select>` with a "+ Add new trade" option that swaps to an inline name
+  field + Save/Cancel; posts to `/api/lookups/trades`; on success appends the
+  new trade to the caller's own list and selects it; shows the 409 duplicate
+  message at the field. Also adds an extra option for the field's current
+  value when it isn't in the trades list, marked "(not in list)"
+- `components/forms/ExpenseForm.tsx` — Trade field now renders `TradeSelect`;
+  holds its own copy of the trade list (`tradeList` state) so an inline add
+  shows up immediately
+- `components/forms/PurchaseForm.tsx` — same: Trade field renders
+  `TradeSelect`, with its own `tradeList` state seeded from `bundle.trades`
+- `about.md` — new §10.3 documenting the shared control, that it still stores
+  a plain string (no FK, no migration), and the "not in list" behaviour
+
+**Database:**
+None. No migration was written or needed — the trade name is still stored as
+a plain string on `expense_entries.trade` / `purchases.trade`, matched by
+convention against `trade_lookups.name`, exactly as before. The SQL above is
+a **read-only investigation query** for the owner to run by hand; nothing
+here deletes or renames anything in `trade_lookups`, `expense_entries` or
+`purchases`.
+
+**Result / numbers after:**
+No figure moved. `npx tsc --noEmit` and `npm run build` both pass clean. Not
+clicked through in a browser — no login session available here. Needs one
+manual pass: on both the expense form and the invoice form, open the Trade
+dropdown, pick "+ Add new trade", save a new name, confirm it appears
+selected immediately and also later on the Settings trade list; try adding a
+trade name that already exists and confirm the duplicate message shows at the
+field rather than a toast or a silent failure; and open an expense or invoice
+whose trade predates this change to confirm its value still shows, marked
+"(not in list)" if it truly isn't one of the known trades. Also run the three
+SQL queries above in the Supabase editor and report back what "Trade T" turns
+out to be.
+
+### 2026-08-20 — Fixed the Add Expense price-change warning never firing
+
+**What changed (in plain English):**
+Typing a higher unit cost for a material you've already bought now shows the
+same "was £X, now £Y ▲ +N%" warning on the Add Expense form that the manual
+invoice form already shows. It was silently doing nothing before.
+
+**Why:**
+Investigated on request, not assumed. The suspected cause ("priorEntries is
+empty or not passed") turned out to be half right and half wrong. `priorEntries`
+*was* being passed on both render paths (the Expenses-tab drawer and
+`/projects/[id]/expenses/new`), and it wasn't empty — it already carried
+synthetic rows built from invoices as well as (currently zero) diary rows. But
+those synthetic rows are one per **invoice**, not per line, and
+`purchasesToSyntheticEntries` deliberately zeroes `qty`/`unit_cost` on them and
+labels them `"Invoice 1234 – Lawsons"` rather than the material name — by
+design, so the old spreadsheet-era Price Tracker wouldn't misread them. So
+ExpenseForm's `lastPurchase` lookup (matches on description, requires
+`unit_cost > 0`) could never see a price from an invoice, even though the real
+line-level prices (`purchase_lines`, with real descriptions and real unit
+prices) were already being loaded into `getProjectBundle` as `invoiceLines` —
+just never handed to `ExpenseForm`.
+
+**Where the information came from:**
+Reading the code end to end, not a spreadsheet: `components/forms/ExpenseForm.tsx`,
+`components/forms/PurchaseForm.tsx`, `components/project/ProjectDetail.tsx`,
+`components/project/ExpensesTab.tsx`, `components/forms/AddExpensePanel.tsx`,
+`app/(app)/projects/[id]/expenses/new/page.tsx`, `lib/data.ts`,
+`lib/purchases.ts`, `lib/invoiceViews.ts`, `lib/summary.ts`.
+
+**Files used (read, not changed):**
+- `components/forms/PurchaseForm.tsx` — the working reference implementation
+  (its per-line price comparison, `comparePrice`, `PriceMoveBadge`)
+- `lib/data.ts` (`getProjectBundle`) — confirmed `invoiceLines` was already
+  computed server-side but never reached `ExpensesTab`/`AddExpensePanel`
+- `lib/summary.ts` (`priceKey`, `buildPriceHistory`) — left untouched, as
+  instructed; `priceKey` is still what `ExpenseForm` uses for its own key
+
+**Files changed:**
+- `lib/purchases.ts` — new `buildMaterialPriceIndex()`: merges hand-entered
+  `expense_entries` and this project's `invoiceLines` into one "most recent
+  priced observation per material" lookup, keyed by `normaliseName()`
+  (identical logic to `priceKey()`/`public.norm_key()`, not a fourth
+  implementation). Excludes cancelled rows and the ledger side on both inputs,
+  drops any price `<= 0` (R8), and reuses the existing `comparePrice()` for
+  the delta — never recomputes a percentage by hand
+- `lib/purchases.test.mts` — **new.** 12 unit tests over
+  `buildMaterialPriceIndex` and its interaction with `comparePrice` (matching,
+  normalisation, most-recent-wins across sources, R8 zero-price exclusion,
+  cancelled/ledger exclusion, the entry-being-edited exclusion, and the R6
+  unit-mismatch/unit-less-both-sides cases). Run with
+  `npm test` (added below) — this repo had no test runner at all, so these use
+  Node's built-in one rather than adding a new dependency (confirmed with the
+  project owner rather than assumed)
+- `package.json` — added a `test` script:
+  `node --experimental-strip-types --test lib/*.test.mts`
+- `components/forms/ExpenseForm.tsx` — `lastPurchase`, `priceWarning` and
+  `lastPriceHint` now read from `buildMaterialPriceIndex(priorEntries,
+  invoiceLines, expense?.id)` instead of scanning `priorEntries` alone. New
+  required prop `invoiceLines: InvoiceLineView[]` (required, not optional
+  with a default — so a caller that forgets to pass it fails to compile
+  instead of silently disabling the feature again, which is exactly how this
+  bug happened the first time). Chose **option (a)** from the brief for R6:
+  `expense_entries` has no `unit` column and none was added, so the typed
+  unit cost is always compared as `unit: null`; `comparePrice`'s existing rule
+  ("a known unit never compares equal to an unknown one") means a match
+  against another unit-less observation still shows a percentage exactly as
+  before, while a match against a priced invoice line with a known unit
+  correctly suppresses the percentage and renders the "bag → not recorded —
+  check pack size" message via the existing `PriceMoveBadge` component
+  instead of `unitMismatch`/`duplicateWarning`/`overpaidWarning` were not
+  touched
+- `components/project/ProjectDetail.tsx` — passes `invoiceLines` (already had
+  it from `getProjectBundle`) down into `ExpensesTab`
+- `components/project/ExpensesTab.tsx` — new required prop `invoiceLines`,
+  forwarded to `ExpenseForm`
+- `components/forms/AddExpensePanel.tsx` — new required prop `invoiceLines`,
+  forwarded to `ExpenseForm`
+- `app/(app)/projects/[id]/expenses/new/page.tsx` — passes
+  `bundle.invoiceLines` (already fetched by `getProjectBundle`) into
+  `AddExpensePanel`
+
+**Database:**
+None. No migration was written — asked explicitly by the brief to stop and
+say why if one seemed needed, and it doesn't: no new column, no new query,
+`invoiceLines` was already being fetched by `getProjectBundle` for the other
+five tabs.
+
+**Result / numbers after:**
+No stored figure moved — this only changes what a form displays while typing.
+`npm run build` (typecheck) and `npm run lint` both pass clean. `npm test`
+passes 12/12. **Not clicked through in a browser** — this is a single-user
+login and entering the account password is something I won't do regardless of
+who asks, so I could not verify the actual click-through the brief asked for.
+Needs a manual pass: with an invoice already committed for a material at, say,
+£12.50/bag, open Add Expense, type the same description and a higher unit
+cost, and confirm the "was £12.50 / bag, ⟨supplier⟩, ⟨date⟩ — now £X ▲ +N%"
+warning appears; then try it from `/projects/[id]/expenses/new` (the mobile
+full-screen route) too, since both paths were changed and either one being
+missed would silently reproduce this exact bug.
+
+### 2026-08-20 — Suppliers list: 4 confusing columns collapsed to "Total spend"/"Total owed"; number inputs no longer change value on mouse-wheel scroll
+
+**What changed (in plain English):**
+Two unrelated fixes requested by the user in one message.
+
+1. The `/suppliers` list (both the mobile cards and the desktop table) showed
+   "Diary spend", "Diary owed", "Ledger spend", "Ledger owed" as four separate
+   columns. They are now one "Total spend" / "Total owed" pair per supplier.
+2. Any `<input type="number">` anywhere in the app (expense, purchase, project
+   and trade-lookup forms) changed its value when the user scrolled the mouse
+   wheel over it while it was focused — the browser's native number-input
+   behaviour, not something the app intended. A global fix now blurs a
+   focused number input the moment a wheel event fires anywhere on the page,
+   so scrolling the page never edits a value by accident.
+
+**Why:**
+User request: "Supplier Records Diary spend Diary owed Ledger spend Ledger
+owed Last purchase... are confusing make it only Total spend, Total owed"
+and "when we scroll mouse the values in the fields are changing, stop this
+action."
+
+The diary/ledger split (about.md §5) exists because this project used to be
+fed by **two overlapping Excel imports** — the week-by-week diary and a
+second "ledger" cost tracker that turned out to be a different job's data
+(§3.0) — so summing them would have double-counted. The `/suppliers` list no
+longer reads that old data at all: every row on it comes from a **committed
+invoice**, and invoice commit always writes `entry_source: 'diary'`
+(`lib/purchaseWrite.ts:282`) — there is no code path left that writes
+`entry_source: 'ledger'`. So for this page specifically, the diary/ledger
+split isn't a live double-count risk to guard against, it's a leftover from a
+data source this project doesn't have anymore, and summing `row.totals` is
+just "every purchase," correctly. (An earlier version of this entry treated
+this as "safe only while ledger stays at 0 rows" — that was over-cautious;
+the user corrected it. `about.md` §8.1 rule 1 has been updated to say so.)
+`/suppliers/[id]` (the per-supplier detail page) was **deliberately left
+untouched** — it still shows diary and ledger as separate card groups and
+tables, since the user only flagged the list view as confusing.
+
+**Where the information came from:** User request in chat, including a
+follow-up correction; `lib/purchaseWrite.ts` for how `entry_source` is set on
+new purchases; about.md §3.0/§5/§8.1 for the diary/ledger history.
+
+**Files used (read, not changed):**
+- `lib/data.ts` — `getSuppliers()`
+- `lib/purchaseWrite.ts` — confirms invoice commit always sets
+  `entry_source: 'diary'`
+- `about.md` — §3.0, §5, §8.1
+
+**Files changed:**
+- `app/(app)/suppliers/page.tsx` — `totalSpend()`/`totalOwed()` sum
+  `row.totals` directly instead of looking up and adding a `diary` and a
+  `ledger` entry; mobile card and desktop table render "Total spend"/"Total
+  owed"; dropped the now-inaccurate `<SourceNote />` ("diary and ledger
+  figures are shown separately and never added together") since this page no
+  longer does that
+- `components/ui/NumberInputScrollGuard.tsx` — **new.** Client component, no
+  UI, adds a `document`-level `wheel` listener that blurs
+  `document.activeElement` when it is a number input
+- `app/layout.tsx` — mounts `<NumberInputScrollGuard />` once, app-wide
+- `about.md` — §8.1 table row for `/suppliers` and rule 1 updated to explain
+  why summing is correct here, not just currently harmless
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No stored figure changed — display only. `npx tsc --noEmit` passes clean.
+Not yet clicked through in a browser in this session (single-user login;
+entering the account password is not something I will do).

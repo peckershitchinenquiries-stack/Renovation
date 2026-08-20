@@ -42,16 +42,19 @@ export default async function ProjectPurchasesPage({
           <h1 className="text-xl font-bold text-gray-900 sm:text-2xl">
             Invoices &amp; purchases
           </h1>
-          <Link
-            href={`/projects/${project.id}/purchases/add`}
-            className="btn-primary"
-          >
+          {/* Adding happens from the nav bar's Invoices menu, not here: an
+              invoice is filed against a project on the form itself now, so
+              there is one add flow rather than one per project. This page is
+              the record of what has been filed against this one. */}
+          <Link href="/invoices" className="btn-primary">
             + Log invoice
           </Link>
         </div>
         <p className="mt-1 text-sm text-gray-500">
           Every document filed against this project — one row per invoice, with
-          its own lines and payments underneath.
+          its own lines and payments underneath. Add one from{" "}
+          <span className="font-medium">Invoices</span> in the menu above, where
+          you pick the project as you save.
         </p>
       </div>
 
@@ -90,12 +93,9 @@ export default async function ProjectPurchasesPage({
       {rows.length === 0 ? (
         <EmptyState
           title="No purchases yet"
-          description="Log the first invoice for this project — pick the supplier, then add a line for each thing on the document."
+          description="Log the first invoice from the Invoices menu — upload a photo or type it in, then choose this project as you save it."
           action={
-            <Link
-              href={`/projects/${project.id}/purchases/add`}
-              className="btn-primary"
-            >
+            <Link href="/invoices" className="btn-primary">
               Log invoice
             </Link>
           }

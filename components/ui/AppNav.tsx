@@ -10,7 +10,10 @@ const NAV = [
   // projects with less information, so it was removed.
   { href: "/dashboard", label: "Dashboard", icon: "▦" },
   // Suppliers and Items are cross-project: they sit above the project, which is
-  // the point of the transaction core (about.md §4.6).
+  // the point of the transaction core (about.md §4.6). Invoices joins them here
+  // so uploading one doesn't require opening a project first — the page itself
+  // asks which project it belongs to.
+  { href: "/invoices", label: "Invoices", icon: "🧾" },
   { href: "/suppliers", label: "Suppliers", icon: "🏬" },
   { href: "/items", label: "Items", icon: "📦" },
   { href: "/projects/new", label: "Add Project", icon: "＋" },

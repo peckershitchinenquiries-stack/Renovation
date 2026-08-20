@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiFetch, ApiError } from "@/lib/fetcher";
@@ -14,6 +14,7 @@ import {
   round2,
 } from "@/lib/purchases";
 import { validatePurchase, hasErrors } from "@/lib/validation";
+import { safeReturnTo } from "@/lib/safeReturnTo";
 import { RECONCILE_TOLERANCE } from "@/lib/invoice/reconcile";
 import type { SupplierResolution, ItemResolution } from "@/lib/invoice/resolve";
 import { Badge } from "@/components/ui/Badge";
@@ -22,6 +23,7 @@ import { Spinner } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
 import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
 import { SupplierFields } from "@/components/purchases/SupplierFields";
+import TradeSelect from "@/components/forms/TradeSelect";
 import {
   EXPENSE_CATEGORIES,
   EXPENSE_STATUSES,
@@ -32,6 +34,7 @@ import {
   type PurchaseEditBundle,
   type PurchaseFormBundle,
   type PurchaseInput,
+  type TradeLookup,
 } from "@/types";
 
 // One invoice, entered by hand, with as many lines as the document has.
@@ -196,25 +199,49 @@ export default function PurchaseForm({
   lineResolutions,
   extractedTotals,
   documentNotes,
+  returnTo,
 }: {
   bundle: PurchaseFormBundle;
   purchase?: PurchaseEditBundle;
   // The next four are only ever set together, by the invoice review screen
-  // (app/(app)/projects/[id]/purchases/upload/[uploadId]/review). Manual
-  // entry and editing never pass them, so every branch below that checks
-  // for them is new code the old paths never reach.
+  // (app/(app)/invoices/[uploadId]/review). Manual entry and editing never
+  // pass them, so every branch below that checks for them is new code the
+  // old paths never reach.
   prefill?: PurchaseFormPrefill;
   invoiceUploadId?: string;
   supplierResolution?: SupplierResolution | null;
   lineResolutions?: ItemResolution[];
   extractedTotals?: { net_total: number | null; vat_total: number | null } | null;
   documentNotes?: string[];
+  // Where Cancel and a successful Save should land instead of the default
+  // invoice list — e.g. back on the Expenses tab this invoice was opened
+  // from. Only `purchases/[pid]/edit` passes one today; invoices/new and the
+  // review screen leave it undefined, so their behaviour is unchanged.
+  // Re-validated here (not just where the query string was read) because
+  // this is the one form shared by all three callers.
+  returnTo?: string;
 }) {
   const router = useRouter();
   const toast = useToast();
   const uid = useId();
   const editing = Boolean(purchase);
-  const projectId = bundle.project.id;
+
+  // Which project this invoice gets filed against.
+  //
+  // Fixed when the route already says so (editing, or any project-scoped
+  // screen); chosen here otherwise — the nav-bar flow uploads a document
+  // before anyone has decided which job it belongs to, so the decision lands
+  // at the moment it is saved instead (about.md §8.2). It starts blank rather
+  // than guessing: filing an invoice against the wrong job is a wrong number
+  // nobody chose, and a blank the form refuses to save is a question.
+  const fixedProjectId = purchase?.purchase.project_id ?? bundle.project?.id ?? null;
+  const [projectId, setProjectId] = useState<string>(fixedProjectId ?? "");
+  const choosingProject = !fixedProjectId;
+
+  // Re-validated even though the caller already checked: this is the one
+  // form three different routes render, so trust nothing an untrusted query
+  // string put on the props of any one of them.
+  const safeTarget = safeReturnTo(returnTo);
 
   const [header, setHeader] = useState<HeaderState>(() => ({
     supplier_name: purchase?.supplier_name ?? initialSupplierName(supplierResolution),
@@ -223,8 +250,11 @@ export default function PurchaseForm({
       prefill?.purchase_date ??
       new Date().toISOString().slice(0, 10),
     invoice_no: purchase?.purchase.invoice_no ?? prefill?.invoice_no ?? "",
+    // Blank until a project is picked — a week number means nothing on its own
+    // (see chooseProject), so there is nothing honest to prefill it with yet.
     week_no:
-      purchase?.purchase.week_no?.toString() ?? String(bundle.next_week),
+      purchase?.purchase.week_no?.toString() ??
+      (bundle.project ? String(bundle.next_week) : ""),
     category: purchase?.purchase.category ?? prefill?.category ?? "Materials",
     trade: purchase?.purchase.trade ?? "",
     location_room: purchase?.purchase.location_room ?? prefill?.location_room ?? "",
@@ -321,6 +351,12 @@ export default function PurchaseForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Local copy so a trade added inline (TradeSelect's "+ Add new trade")
+  // shows up in this form's own dropdown immediately, without a round trip.
+  const [tradeList, setTradeList] = useState<TradeLookup[]>(bundle.trades);
+  // Once the week has been typed by hand, changing project must not overwrite
+  // it — see chooseProject.
+  const weekTouched = useRef(editing || Boolean(purchase?.purchase.week_no));
 
   // ---- reference look-ups, all exact on the normalised text ----
 
@@ -467,7 +503,22 @@ export default function PurchaseForm({
   // ---- editing helpers ----
 
   function setField(field: keyof HeaderState, value: string) {
+    if (field === "week_no") weekTouched.current = true;
     setHeader((h) => ({ ...h, [field]: value }));
+  }
+
+  // Week numbers belong to a project — "week 7" of a job that has run four
+  // weeks is a different thing from week 7 of one that has run twenty. Picking
+  // a project therefore re-defaults the week, but never over a week the user
+  // typed themselves.
+  function chooseProject(id: string) {
+    setProjectId(id);
+    setErrors((e) => ({ ...e, project_id: "" }));
+    if (weekTouched.current) return;
+    setHeader((h) => ({
+      ...h,
+      week_no: id ? String(bundle.next_week_by_project[id] ?? 1) : "",
+    }));
   }
 
   function updateLine(key: string, patch: Partial<LineState>) {
@@ -622,6 +673,10 @@ export default function PurchaseForm({
     e.preventDefault();
     const payload = buildPayload();
     const found = validatePurchase(payload as unknown as Record<string, unknown>);
+    // The project is the form's own field, not part of PurchaseInput — the
+    // route carries it everywhere else — so it is checked here rather than in
+    // validatePurchase. The server refuses a project-less commit too.
+    if (!projectId) found.project_id = "Choose which project this invoice is for";
     setErrors(found);
     if (hasErrors(found)) {
       toast("Check the highlighted fields", "error");
@@ -631,18 +686,23 @@ export default function PurchaseForm({
     setSaving(true);
     try {
       if (invoiceUploadId) {
-        const result = await apiFetch<{ purchase: { id: string } }>(
+        await apiFetch<{ purchase: { id: string } }>(
           `/api/invoices/${invoiceUploadId}/commit`,
           {
             method: "POST",
             body: JSON.stringify({
               purchase: payload,
               supplier: buildSupplierDecision(),
+              project_id: projectId,
             }),
           }
         );
         toast("Invoice logged", "success");
-        router.push(`/projects/${projectId}/purchases/${result.purchase.id}/edit`);
+        // Straight to the project it was filed against — the whole point of
+        // choosing one here is to end up looking at that job's invoices.
+        // (The review screen never sends a returnTo, so safeTarget is always
+        // null here — this always falls through to that default.)
+        router.push(safeTarget ?? `/projects/${projectId}/purchases`);
         router.refresh();
         return;
       }
@@ -657,7 +717,13 @@ export default function PurchaseForm({
         }
       );
       toast(editing ? "Invoice updated" : "Invoice logged", "success");
-      router.push(`/projects/${projectId}/purchases`);
+      // Back where the caller asked, e.g. the Expenses tab this was opened
+      // from — or the project's invoice list, as before, when nobody asked.
+      // router.refresh() forces the target route's server data to be
+      // refetched rather than served from the router cache, so the Expenses
+      // list shows this invoice's new values immediately rather than what it
+      // said before the edit.
+      router.push(safeTarget ?? `/projects/${projectId}/purchases`);
       router.refresh();
     } catch (err) {
       // The form is left alone on failure so the typing can be retried.
@@ -682,7 +748,13 @@ export default function PurchaseForm({
     }
   }
 
-  const cancel = () => router.push(`/projects/${projectId}/purchases`);
+  // Back where you came from: the caller's returnTo target if it gave one,
+  // else the project's invoice list, else the invoice menu when this form was
+  // reached from the nav bar with no project chosen yet.
+  const cancel = () =>
+    router.push(
+      safeTarget ?? (projectId ? `/projects/${projectId}/purchases` : "/invoices")
+    );
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -701,6 +773,42 @@ export default function PurchaseForm({
           <option key={u} value={u} />
         ))}
       </datalist>
+
+      {/* ---------------- where it gets filed ----------------
+          Only when the route didn't already say. First card on the page
+          because it is the first question — everything below is about the
+          document, this is about which job it belongs to. */}
+      {choosingProject && (
+        <fieldset className="card border-brand-100 bg-brand-50/40">
+          <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
+            Which project
+          </legend>
+          <label className="label" htmlFor="project_id">
+            Project *
+          </label>
+          <select
+            id="project_id"
+            className="input sm:max-w-md"
+            value={projectId}
+            onChange={(e) => chooseProject(e.target.value)}
+          >
+            <option value="">— choose a project —</option>
+            {bundle.projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          {errors.project_id ? (
+            <p className="field-error">{errors.project_id}</p>
+          ) : (
+            <p className="mt-1 text-xs text-gray-500">
+              This invoice is saved against the project you pick here, and you
+              are taken straight to it.
+            </p>
+          )}
+        </fieldset>
+      )}
 
       {/* ---------------- the document ---------------- */}
       <fieldset className="card">
@@ -965,19 +1073,13 @@ export default function PurchaseForm({
             <label className="label" htmlFor="trade">
               Trade
             </label>
-            <select
+            <TradeSelect
               id="trade"
-              className="input"
               value={header.trade}
-              onChange={(e) => setField("trade", e.target.value)}
-            >
-              <option value="">— None —</option>
-              {bundle.trades.map((t) => (
-                <option key={t.id} value={t.name}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
+              trades={tradeList}
+              onChange={(v) => setField("trade", v)}
+              onTradeAdded={(t) => setTradeList((list) => [...list, t])}
+            />
           </div>
           <div>
             <label className="label" htmlFor="entry_status">
@@ -1074,7 +1176,7 @@ export default function PurchaseForm({
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-12">
-                  <div className="col-span-2 sm:col-span-4">
+                  <div className="col-span-2 sm:col-span-3">
                     <label className="label" htmlFor={`${line.key}-description`}>
                       Description *
                     </label>
@@ -1097,7 +1199,7 @@ export default function PurchaseForm({
                     )}
                   </div>
 
-                  <div className="sm:col-span-1">
+                  <div className="sm:col-span-2">
                     <label className="label" htmlFor={`${line.key}-qty`}>
                       Qty
                     </label>
@@ -1113,7 +1215,7 @@ export default function PurchaseForm({
                     />
                   </div>
 
-                  <div className="sm:col-span-2">
+                  <div className="sm:col-span-1">
                     <label className="label" htmlFor={`${line.key}-unit`}>
                       Unit
                     </label>
@@ -1169,7 +1271,7 @@ export default function PurchaseForm({
                     )}
                   </div>
 
-                  <div className="sm:col-span-1">
+                  <div className="sm:col-span-2">
                     <label className="label" htmlFor={`${line.key}-vat`}>
                       VAT
                     </label>

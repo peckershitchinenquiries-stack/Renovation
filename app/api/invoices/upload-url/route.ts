@@ -31,34 +31,42 @@ export async function POST(req: Request) {
   const mimeType = body?.mime_type?.trim();
   const fileSize = Number(body?.file_size);
 
-  if (!projectId || !filename || !mimeType)
-    return error("project_id, filename and mime_type are required", 400);
+  if (!filename || !mimeType)
+    return error("filename and mime_type are required", 400);
   if (!ALLOWED.includes(mimeType))
     return error("Unsupported file type. Use JPG, PNG, WebP or PDF.", 415);
   if (!Number.isFinite(fileSize) || fileSize <= 0)
     return error("file_size is required", 400);
   if (fileSize > MAX_BYTES) return error("File exceeds 20MB limit", 413);
 
-  // RLS-backed read: a project that isn't the caller's own comes back empty,
-  // which becomes a 404 rather than a foreign-key failure on the insert below.
-  const { data: project } = await auth.supabase
-    .from("projects")
-    .select("id")
-    .eq("id", projectId)
-    .single();
-  if (!project) return error("Project not found", 404);
+  // project_id is optional as of migration 0012: the nav-bar flow uploads
+  // first and picks the project on the review screen, so an upload in flight
+  // genuinely has no project yet. When one *is* given it must still be real —
+  // this RLS-backed read makes someone else's project a 404 rather than a
+  // foreign-key failure on the insert below.
+  if (projectId) {
+    const { data: project } = await auth.supabase
+      .from("projects")
+      .select("id")
+      .eq("id", projectId)
+      .single();
+    if (!project) return error("Project not found", 404);
+  }
 
   // Storage path MUST begin `${user.id}/` — the 0010 storage policies key off
   // storage.foldername(name)[1] = auth.uid()::text. Anything else makes every
-  // upload 403 with no useful message.
+  // upload 403 with no useful message. The second segment is only ever a
+  // filing convenience; 'unassigned' is where a not-yet-placed invoice sits,
+  // and the file is not moved once a project is chosen — the row is the
+  // record of where it belongs, not the path.
   const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const storagePath = `${auth.user.id}/${projectId}/${Date.now()}-${safeName}`;
+  const storagePath = `${auth.user.id}/${projectId ?? "unassigned"}/${Date.now()}-${safeName}`;
 
   const { data: uploadRow, error: dbError } = await auth.supabase
     .from("invoice_uploads")
     .insert({
       user_id: auth.user.id,
-      project_id: projectId,
+      project_id: projectId ?? null,
       storage_path: storagePath,
       original_name: filename,
       mime_type: mimeType,

@@ -8,7 +8,7 @@ import type {
   ProjectSummary,
   WeekTotal,
   CategoryTotal,
-  PriceHistoryItem,
+  ItemPriceRow,
 } from "@/types";
 
 export default function OverviewTab({
@@ -21,8 +21,10 @@ export default function OverviewTab({
   summary: ProjectSummary;
   byWeek: WeekTotal[];
   byCategory: CategoryTotal[];
-  // Materials that cost more per unit than the previous purchase.
-  priceAlerts: PriceHistoryItem[];
+  // Items whose latest invoice priced them higher per unit than the buy before,
+  // comparing like with like — an item bought in a different unit this time is
+  // not in here, because no honest percentage exists for it.
+  priceAlerts: ItemPriceRow[];
   onViewPrices: () => void;
 }) {
   return (
@@ -46,11 +48,14 @@ export default function OverviewTab({
           </div>
           <ul className="mt-2 space-y-1 text-sm text-amber-900">
             {priceAlerts.slice(0, 5).map((p) => (
-              <li key={p.item} className="flex justify-between gap-3">
+              <li key={p.item_id ?? p.item} className="flex justify-between gap-3">
                 <span className="truncate">{p.item}</span>
                 <span className="whitespace-nowrap font-medium">
-                  {formatCurrency(p.latest_price)}/unit ▲ +
-                  {p.latest_delta_pct.toFixed(1)}%
+                  {formatCurrency(p.latest_price)}
+                  {p.units[p.units.length - 1]
+                    ? `/${p.units[p.units.length - 1]}`
+                    : ""}{" "}
+                  ▲ +{(p.latest_delta_pct ?? 0).toFixed(1)}%
                 </span>
               </li>
             ))}

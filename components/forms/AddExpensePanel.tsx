@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import ExpenseForm from "@/components/forms/ExpenseForm";
-import type { ExpenseEntry, TradeLookup } from "@/types";
+import type { ExpenseEntry, InvoiceLineView, TradeLookup } from "@/types";
 
 // Full-screen Add Expense panel (mobile route /projects/[id]/expenses/new).
 export default function AddExpensePanel({
@@ -10,11 +10,13 @@ export default function AddExpensePanel({
   trades,
   nextWeek,
   priorEntries,
+  invoiceLines,
 }: {
   projectId: string;
   trades: TradeLookup[];
   nextWeek: number;
   priorEntries: ExpenseEntry[];
+  invoiceLines: InvoiceLineView[];
 }) {
   const router = useRouter();
   const back = () => {
@@ -27,6 +29,7 @@ export default function AddExpensePanel({
       trades={trades}
       nextWeek={nextWeek}
       priorEntries={priorEntries}
+      invoiceLines={invoiceLines}
       onSaved={back}
       onCancel={back}
     />

@@ -1,30 +1,14 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { getProject } from "@/lib/data";
 import { InvoiceScopeNote } from "@/components/purchases/SourceNote";
 import UploadInvoicePanel from "@/components/purchases/UploadInvoicePanel";
 
 export const dynamic = "force-dynamic";
 
-export default async function UploadInvoicePage({
-  params,
-}: {
-  params: { id: string };
-}) {
-  const project = await getProject(params.id);
-  if (!project) notFound();
-
+export default function UploadInvoicePage() {
   return (
     <div className="mx-auto max-w-3xl">
       <nav className="mb-4 text-sm text-gray-500">
-        <Link href={`/projects/${project.id}`} className="hover:underline">
-          {project.name}
-        </Link>{" "}
-        /{" "}
-        <Link
-          href={`/projects/${project.id}/purchases`}
-          className="hover:underline"
-        >
+        <Link href="/invoices" className="hover:underline">
           Invoices
         </Link>{" "}
         / Upload
@@ -34,11 +18,11 @@ export default async function UploadInvoicePage({
       </h1>
       <p className="mb-3 text-sm text-gray-500">
         Drop in a photo or PDF, or add more than one at once. Each is read
-        automatically — nothing is saved until you check it on the review
-        screen.
+        automatically — you choose the project, and check everything else, on
+        the review screen. Nothing is saved until then.
       </p>
       <InvoiceScopeNote className="mb-4" />
-      <UploadInvoicePanel projectId={project.id} />
+      <UploadInvoicePanel />
     </div>
   );
 }

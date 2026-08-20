@@ -5,14 +5,18 @@ import { apiFetch, ApiError } from "@/lib/fetcher";
 import { validateExpense, hasErrors } from "@/lib/validation";
 import { calcMaterialsCost, calcTotal, formatCurrency } from "@/lib/calculations";
 import { priceKey } from "@/lib/summary";
+import { buildMaterialPriceIndex, comparePrice } from "@/lib/purchases";
 import { useToast } from "@/components/ui/Toast";
 import { Spinner } from "@/components/ui/States";
+import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
+import TradeSelect from "@/components/forms/TradeSelect";
 import {
   EXPENSE_CATEGORIES,
   EXPENSE_STATUSES,
   PAYMENT_METHODS,
   VAT_RATES,
   type ExpenseEntry,
+  type InvoiceLineView,
   type TradeLookup,
 } from "@/types";
 
@@ -23,9 +27,15 @@ interface Props {
   expense?: ExpenseEntry;
   // Prefills a *new* entry from a previous one ("Repeat"). Ignored when editing.
   template?: ExpenseEntry;
-  // Existing entries for this project — powers the "have I paid more?" warning,
-  // the description/supplier suggestions and the duplicate check.
+  // Existing entries for this project — powers the description/supplier
+  // suggestions and the duplicate check.
   priorEntries?: ExpenseEntry[];
+  // This project's invoice lines — combined with priorEntries to power the
+  // "have I paid more?" warning and the last-price hint (buildMaterialPriceIndex).
+  // Required, not optional: the whole point of the fix this prop exists for was
+  // that a missed render path silently disabled the warning, so a caller that
+  // forgets it fails to compile instead.
+  invoiceLines: InvoiceLineView[];
   onSaved: () => void;
   onCancel: () => void;
 }
@@ -51,6 +61,7 @@ export default function ExpenseForm({
   expense,
   template,
   priorEntries = [],
+  invoiceLines,
   onSaved,
   onCancel,
 }: Props) {
@@ -86,6 +97,9 @@ export default function ExpenseForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  // Local copy so a trade added inline (TradeSelect's "+ Add new trade")
+  // shows up in this form's own dropdown immediately, without a round trip.
+  const [tradeList, setTradeList] = useState<TradeLookup[]>(trades);
   const [receiptUrl, setReceiptUrl] = useState<string | null>(
     expense?.receipt_url ?? null
   );
@@ -121,45 +135,41 @@ export default function ExpenseForm({
     [priorEntries]
   );
 
-  // Last time the same material was bought (by description), excluding this entry.
+  // Every material this project has been charged for before, hand-entered or
+  // invoiced, keyed by normalised description — see buildMaterialPriceIndex.
+  const materialPriceIndex = useMemo(
+    () => buildMaterialPriceIndex(priorEntries, invoiceLines, expense?.id),
+    [priorEntries, invoiceLines, expense?.id]
+  );
+
+  // Last time the same material was bought (by description).
   const lastPurchase = useMemo(() => {
     if (!isMaterials) return null;
     const key = priceKey(form.description);
     if (!key) return null;
-    const matches = priorEntries
-      .filter(
-        (e) =>
-          e.id !== expense?.id &&
-          e.category === "Materials" &&
-          Number(e.unit_cost) > 0 &&
-          priceKey(e.description) === key
-      )
-      .sort(
-        (a, b) =>
-          new Date(b.paid_date || b.created_at).getTime() -
-          new Date(a.paid_date || a.created_at).getTime()
-      );
-    return matches[0] ?? null;
-  }, [isMaterials, form.description, priorEntries, expense?.id]);
+    return materialPriceIndex.get(key) ?? null;
+  }, [isMaterials, form.description, materialPriceIndex]);
 
-  // Live price comparison vs the last purchase of this item.
+  // Live price comparison vs the last purchase of this item. The typed unit
+  // cost carries no unit of its own (expense_entries has no unit column), so
+  // it is compared as unit: null — comparePrice's own rule means that only
+  // matches a prior observation that is *also* unit-less, and correctly
+  // suppresses the percentage against a priced invoice line with a known unit.
   const priceWarning = useMemo(() => {
     const current = Number(form.unit_cost || 0);
     if (!lastPurchase || current <= 0) return null;
-    const prev = Number(lastPurchase.unit_cost);
-    if (prev <= 0) return null;
-    const deltaPct = ((current - prev) / prev) * 100;
-    return { prev, deltaPct, date: lastPurchase.paid_date };
+    const { delta_pct, move } = comparePrice(
+      { unit_price: current, unit: null },
+      { unit_price: lastPurchase.unit_price, unit: lastPurchase.unit }
+    );
+    return { ...lastPurchase, deltaPct: delta_pct, move };
   }, [lastPurchase, form.unit_cost]);
 
   // Shown before a unit cost is typed, so the last price is visible while you
   // are still deciding what to enter.
   const lastPriceHint = useMemo(() => {
     if (!lastPurchase || Number(form.unit_cost || 0) > 0) return null;
-    return {
-      prev: Number(lastPurchase.unit_cost),
-      date: lastPurchase.paid_date,
-    };
+    return lastPurchase;
   }, [lastPurchase, form.unit_cost]);
 
   // Same item, same week, same amount — almost certainly logged twice.
@@ -386,19 +396,13 @@ export default function ExpenseForm({
           <label className="label" htmlFor="trade">
             Trade
           </label>
-          <select
+          <TradeSelect
             id="trade"
-            className="input"
             value={form.trade}
-            onChange={(e) => onTradeChange(e.target.value)}
-          >
-            <option value="">— None —</option>
-            {trades.map((t) => (
-              <option key={t.id} value={t.name}>
-                {t.name}
-              </option>
-            ))}
-          </select>
+            trades={tradeList}
+            onChange={onTradeChange}
+            onTradeAdded={(t) => setTradeList((list) => [...list, t])}
+          />
         </div>
         <div>
           <label className="label" htmlFor="supplier">
@@ -534,30 +538,37 @@ export default function ExpenseForm({
           {lastPriceHint && (
             <div className="mt-2 rounded-md bg-gray-50 px-3 py-2 text-sm text-gray-600">
               Last time &ldquo;{form.description.trim()}&rdquo; was{" "}
-              {formatCurrency(lastPriceHint.prev)}/unit
-              {lastPriceHint.date ? ` on ${lastPriceHint.date}` : ""}.
+              {formatCurrency(lastPriceHint.unit_price)}
+              {lastPriceHint.unit ? ` / ${lastPriceHint.unit}` : "/unit"}
+              {lastPriceHint.supplier ? `, ${lastPriceHint.supplier}` : ""}
+              {lastPriceHint.date ? `, ${lastPriceHint.date}` : ""}.
             </div>
           )}
 
           {priceWarning && (
             <div
               className={`mt-2 rounded-md px-3 py-2 text-sm ${
-                priceWarning.deltaPct > 0.001
+                priceWarning.move === "up"
                   ? "bg-red-50 text-red-700"
-                  : priceWarning.deltaPct < -0.001
+                  : priceWarning.move === "down"
                     ? "bg-emerald-50 text-emerald-700"
-                    : "bg-gray-50 text-gray-600"
+                    : priceWarning.move === "unit_change"
+                      ? "bg-amber-50 text-amber-700"
+                      : "bg-gray-50 text-gray-600"
               }`}
             >
               Last time &ldquo;{form.description.trim()}&rdquo; was{" "}
-              {formatCurrency(priceWarning.prev)}/unit
-              {priceWarning.date ? ` on ${priceWarning.date}` : ""} — now{" "}
+              {formatCurrency(priceWarning.unit_price)}
+              {priceWarning.unit ? ` / ${priceWarning.unit}` : "/unit"}
+              {priceWarning.supplier ? `, ${priceWarning.supplier}` : ""}
+              {priceWarning.date ? `, ${priceWarning.date}` : ""} — now{" "}
               {formatCurrency(Number(form.unit_cost))}/unit{" "}
-              {priceWarning.deltaPct > 0.001
-                ? `▲ +${priceWarning.deltaPct.toFixed(1)}%`
-                : priceWarning.deltaPct < -0.001
-                  ? `▼ ${priceWarning.deltaPct.toFixed(1)}%`
-                  : "(no change)"}
+              <PriceMoveBadge
+                move={priceWarning.move}
+                deltaPct={priceWarning.deltaPct}
+                unit={null}
+                previousUnit={priceWarning.unit}
+              />
             </div>
           )}
 

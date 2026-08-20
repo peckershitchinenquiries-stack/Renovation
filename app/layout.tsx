@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { ToastProvider } from "@/components/ui/Toast";
+import { NumberInputScrollGuard } from "@/components/ui/NumberInputScrollGuard";
 
 export const metadata: Metadata = {
   title: "RenovaTrack — Renovation Project Cost Tracker",
@@ -21,6 +22,7 @@ export default function RootLayout({
   return (
     <html lang="en-GB">
       <body>
+        <NumberInputScrollGuard />
         <ToastProvider>{children}</ToastProvider>
       </body>
     </html>

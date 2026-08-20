@@ -6,25 +6,18 @@ import { InvoiceScopeNote } from "@/components/purchases/SourceNote";
 
 export const dynamic = "force-dynamic";
 
-export default async function NewPurchasePage({
-  params,
-}: {
-  params: { id: string };
-}) {
-  const bundle = await getPurchaseFormBundle(params.id);
+// Manual entry, with no project in the route — the form asks for one. Passing
+// null is what makes getPurchaseFormBundle return every project rather than
+// one; everything else it loads (suppliers, items, trades, price history) was
+// always cross-project anyway.
+export default async function NewInvoicePage() {
+  const bundle = await getPurchaseFormBundle(null);
   if (!bundle) notFound();
 
   return (
     <div className="mx-auto max-w-4xl">
       <nav className="mb-4 text-sm text-gray-500">
-        <Link href={`/projects/${bundle.project.id}`} className="hover:underline">
-          {bundle.project.name}
-        </Link>{" "}
-        /{" "}
-        <Link
-          href={`/projects/${bundle.project.id}/purchases`}
-          className="hover:underline"
-        >
+        <Link href="/invoices" className="hover:underline">
           Invoices
         </Link>{" "}
         / New
