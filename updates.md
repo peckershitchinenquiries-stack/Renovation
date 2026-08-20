@@ -2697,3 +2697,59 @@ None.
 No stored figure changed — display only. `npx tsc --noEmit` passes clean.
 Not yet clicked through in a browser in this session (single-user login;
 entering the account password is not something I will do).
+
+### 2026-08-20 — Fixed dashboard showing "no projects" until a manual refresh
+
+**What changed (in plain English):**
+Right after signing in, or right after setting a new password on the reset
+screen, the app sometimes landed on the dashboard with an empty project list
+even though the projects were there — a manual browser refresh always fixed
+it. The sign-in and reset-password forms now do a full page navigation
+(`window.location.assign("/dashboard")`) instead of a client-side
+`router.replace()` + `router.refresh()`.
+
+**Why:**
+`signInWithPassword` / `updateUser` run in the browser Supabase client and
+write the new session as a cookie. `router.replace()` then does a soft,
+client-side navigation to `/dashboard` that can reach the server before that
+cookie is fully attached to the request. Since no query in this app filters
+by `user_id` explicitly (RLS does it — see CLAUDE.md, "Queries never filter
+by user"), a request that arrives without the session cookie fully attached
+isn't rejected as unauthenticated, it just gets zero rows back from every
+table, which renders as "no projects." A manual refresh is a real HTTP
+request, so by then the cookie is always present — matching exactly what was
+reported. `SignOutButton.tsx` was left as-is: it navigates to the public "/"
+page, which doesn't query any protected data, so the same race there is
+harmless.
+
+**Where the information came from:**
+User report: "when we open the project for the first or some times the
+dashboard is showing no projects, on a refresh it showing the projects."
+Traced by reading the login/session code path, not a spreadsheet.
+
+**Files used (read, not changed):**
+- `middleware.ts`
+- `lib/supabase/server.ts`
+- `lib/supabase/client.ts`
+- `lib/supabase/middleware.ts`
+- `app/(app)/dashboard/page.tsx`
+- `components/ui/SignOutButton.tsx`
+- `components/project/ProjectDetail.tsx`
+
+**Files changed:**
+- `components/forms/LoginForm.tsx` — sign-in now hard-navigates to
+  `/dashboard` via `window.location.assign()` instead of
+  `router.replace()` + `router.refresh()`; removed the now-unused
+  `useRouter` import.
+- `app/reset-password/page.tsx` — same fix, same reason, after
+  `auth.updateUser({ password })`; removed the now-unused `useRouter`
+  import.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No stored figure changed — display/navigation only. `npm run build` passes
+clean (dashboard and reset-password routes still build as expected). Not
+yet clicked through in a live browser in this session (single-user login;
+entering the account password is not something I will do).

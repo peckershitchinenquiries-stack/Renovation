@@ -1,14 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/components/ui/Toast";
 
 type Mode = "login" | "forgot";
 
 export default function LoginForm() {
-  const router = useRouter();
   const toast = useToast();
   const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
@@ -27,8 +25,11 @@ export default function LoginForm() {
       toast(error.message, "error");
       return;
     }
-    router.replace("/dashboard");
-    router.refresh();
+    // Hard navigation, not router.replace/refresh: the browser client just wrote
+    // the new session cookie, and a soft client-side nav can reach the server
+    // before that cookie is fully attached, so middleware/RLS see no user and
+    // the dashboard renders empty until a manual refresh.
+    window.location.assign("/dashboard");
   }
 
   async function handleForgot(e: React.FormEvent) {

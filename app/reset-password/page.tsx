@@ -1,12 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/components/ui/Toast";
 
 export default function ResetPasswordPage() {
-  const router = useRouter();
   const toast = useToast();
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -21,7 +19,10 @@ export default function ResetPasswordPage() {
       return;
     }
     toast("Password updated.", "success");
-    router.replace("/dashboard");
+    // Hard navigation for the same reason as LoginForm: a freshly-written
+    // session cookie needs a real HTTP request to be reliably visible to
+    // middleware/RLS, not a soft client-side transition.
+    window.location.assign("/dashboard");
   }
 
   return (
