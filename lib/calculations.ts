@@ -39,6 +39,40 @@ export function computeEntries(entries: ExpenseEntry[]): ExpenseEntryComputed[] 
   return entries.map(computeEntry);
 }
 
+// ============================================================
+// Payment state — derived, never stored
+// ============================================================
+// `status` is a lifecycle label a human sets; `paid_amount` is money. They used
+// to be able to disagree — a row could say Paid with nothing paid against it,
+// or be fully paid and still offer a "Mark Paid" button. This is the single
+// answer to "how much of this has actually been handed over", and every screen
+// reads it rather than re-deriving its own version.
+//
+//   None    — Cancelled: the question does not apply.
+//   Paid    — settled, within half a penny.
+//   Partial — something has been paid, but not all of it.
+//   Unpaid  — nothing has been paid, whatever the status label says.
+export type PaidState = "None" | "Unpaid" | "Partial" | "Paid";
+
+// Half a penny of slack: money is stored to the penny, so anything closer than
+// this is float noise rather than an outstanding balance.
+export const PAID_TOLERANCE = 0.005;
+
+export function paidState(e: {
+  status: string;
+  paid_amount: number | string;
+  total_incl_vat: number;
+}): PaidState {
+  if (e.status === "Cancelled") return "None";
+  const paid = Number(e.paid_amount);
+  // `paid > 0` guards the zero-total row: an entry quoted but not yet costed
+  // has a total of £0, and without this it would read as Paid the moment it was
+  // created. Same rule purchaseStatus() uses in lib/purchases.ts.
+  if (paid > 0 && paid >= Number(e.total_incl_vat) - PAID_TOLERANCE) return "Paid";
+  if (paid > 0) return "Partial";
+  return "Unpaid";
+}
+
 // £ formatting — 2 decimal places with £ prefix.
 export function formatCurrency(value: number): string {
   return new Intl.NumberFormat("en-GB", {

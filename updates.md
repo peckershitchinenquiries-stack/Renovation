@@ -2753,3 +2753,215 @@ No stored figure changed — display/navigation only. `npm run build` passes
 clean (dashboard and reset-password routes still build as expected). Not
 yet clicked through in a live browser in this session (single-user login;
 entering the account password is not something I will do).
+
+---
+
+### 2026-08-21 — Mark Paid rebuilt, invoice numbers open the PDF, "diary"/"ledger" off the screens
+
+**What changed (in plain English):**
+
+Three things, all on the screens rather than in the database.
+
+1. **Marking something paid now asks before it writes anything.** On the
+   Expenses tab, "Mark Paid" used to record a payment for the whole outstanding
+   amount, dated today, the instant you clicked it — no dialog, no chance to say
+   the money actually went out last Tuesday. It now opens a small box asking for
+   the date, the amount (already filled in with what is still owed) and,
+   optionally, how it was paid. Nothing is saved until you press Save. The
+   button also disappears once a row is fully paid, instead of sitting there
+   offering to pay it again, and reads "Mark Fully Paid" on a part-paid row.
+   The Status dropdown now goes through the same box: choosing "Paid" on a row
+   that has had no money against it asks for the payment rather than quietly
+   labelling it Paid, and moving a paid row back to Planned or In Progress asks
+   whether the payment should be cleared too. Finally, a row that has never been
+   paid no longer displays a paid date — it shows a dash. All of this is on both
+   the mobile card list and the desktop table.
+
+2. **An invoice's number in the Description column is now a link that opens the
+   original photo or PDF** — but only for the invoices that actually have one,
+   i.e. the ones logged by uploading a document. Invoices typed in by hand, and
+   ordinary expenses, stay plain text. The link is not a direct file link: it
+   points at the app, which fetches a fresh short-lived link at the moment you
+   click it. That matters because these links expire, so anything baked into the
+   page when it loaded would be dead by the time you used it.
+
+3. **The words "diary" and "ledger" are gone from every screen.** They were
+   labels from the two-spreadsheet setup this project no longer uses; the
+   "ledger" side has been empty since August 2026, so what people saw was a
+   split with only one side to it, plus a note explaining why the two halves
+   must never be added together. Where a screen showed two labelled totals it
+   now shows one. The Source columns and coloured Source badges are gone from
+   the invoices list, the item detail page and the supplier statement.
+
+**Why:**
+
+1. The button, the status dropdown and the paid-date column were three separate
+   opinions about whether something had been paid, and they disagreed: a fully
+   paid entry still offered "Mark Paid", a Planned entry showed a paid date it
+   had never earned, and one click silently invented a payment date. There is
+   now a single derived answer (`paidState`) that all three read.
+2. The invoices were being uploaded, read and filed, and then the document
+   itself was unreachable from the place people actually look at their spend.
+3. The split is still real in the data and still worth keeping — it is what will
+   stop a double-count if a second dataset is ever imported — but showing it to
+   the user today only raises a question that has no answer.
+
+**Where the information came from:**
+User request (the three tasks as written). No spreadsheet was involved. The
+"is the original file still kept?" question was answered from the code and the
+database: `invoice_uploads.storage_path` in migration
+`supabase/migrations/0010_invoice_upload.sql`, plus
+`app/api/invoices/[id]/commit/route.ts`, which sets the upload's status to
+`committed` and points `invoice_id` at the new purchase. Nothing anywhere
+deletes those files, so **yes, the original documents are retained** and task 2
+went ahead.
+
+**Files used (read, not changed):**
+- `CLAUDE.md`
+- `about.md` (sections 5, 8, 8.1, 13 — via search, not read end to end)
+- `lib/purchases.ts`
+- `lib/api.ts`
+- `lib/fetcher.ts`
+- `types/index.ts`
+- `components/ui/ConfirmDialog.tsx`
+- `components/ui/Drawer.tsx`
+- `components/project/format.ts`
+- `app/api/projects/[id]/expenses/route.ts`
+- `app/api/expenses/[eid]/receipt/route.ts`
+- `app/api/invoices/[id]/commit/route.ts`
+- `app/(app)/invoices/[uploadId]/review/page.tsx`
+- `app/(app)/items/page.tsx`
+- `supabase/migrations/0010_invoice_upload.sql`
+
+**Files changed:**
+- `lib/calculations.ts` — added `paidState()`, the `PaidState` type and
+  `PAID_TOLERANCE`. Derived on read like every other total; nothing stored.
+- `components/project/ExpensesTab.tsx` — the payment dialog and the
+  clear-payment confirmation (both reusing `ConfirmDialog`, no new modal);
+  Mark Paid button now driven by `paidState`; status dropdown routed through
+  `requestStatus`; paid date hidden on unpaid rows in **both** the card list
+  and the table; invoice descriptions rendered as a document link where one
+  exists.
+- `app/api/projects/[id]/purchases/[pid]/document/route.ts` — **new.** Resolves
+  a purchase to its committed upload, signs a 60-second URL and redirects.
+  404 when no file was stored.
+- `lib/data.ts` — `getProjectBundle` now also returns `documentPurchaseIds`:
+  which invoices still have their original file. Ids only, never URLs.
+- `app/(app)/projects/[id]/page.tsx` — passes it through.
+- `components/project/ProjectDetail.tsx` — passes it on to the Expenses tab.
+- `components/purchases/totals.ts` — **new.** `combineTotals()`, which adds the
+  per-source totals up for display only, and explains in one place why that is
+  safe today and what would have to change if it stopped being.
+- `components/project/InvoiceBanner.tsx` — one combined invoice block instead of
+  a "Diary Invoices" / "Ledger Invoices" pair.
+- `app/(app)/projects/[id]/purchases/page.tsx` — one set of stat cards; Source
+  column and badges removed from card list and table; `SourceNote` dropped.
+- `app/(app)/items/[id]/page.tsx` — the two "Diary records" / "Ledger records"
+  cards collapsed into one "Bought in total" card; Source column and badges
+  removed from card list and table; `SourceNote` dropped; the price-comparison
+  footnote no longer mentions "record sets".
+- `app/(app)/suppliers/[id]/page.tsx` — one set of stat cards above one
+  statement, instead of a labelled group per source.
+- `app/(app)/suppliers/page.tsx` — same totals as before, now via
+  `combineTotals`.
+- `components/purchases/SourceNote.tsx` — the `SourceNote` component removed.
+  `InvoiceScopeNote`, which four screens still use, is untouched.
+- `components/ui/Badge.tsx` — `diary` / `ledger` badge colours removed.
+- `components/forms/PurchaseForm.tsx` — the price history hint no longer ends
+  "(diary record)".
+- `about.md` — §5, §8, §8.1 and the API table updated to match.
+
+**Deliberately NOT changed:** `expense_entries.source`,
+`purchases.entry_source`, their CHECK constraints, `PURCHASE_ENTRY_SOURCES` in
+`types/index.ts`, and every `source !== "ledger"` / `totalsBySource` filter in
+`lib/`, `ProjectDetail.tsx`, `ExpensesTab.tsx` and the dashboard. They are the
+only thing standing between this app and a double-count the day a second
+dataset arrives.
+
+**Database:**
+None. No migration was written and none was run. No column was added, and no
+stored value changed shape — `paidState` is computed on read, and
+`documentPurchaseIds` is read out of the existing `invoice_uploads` table.
+
+**Result / numbers after:**
+No stored figure moved; §13's figures are unchanged. What moved is on screen:
+the invoice banner and the project invoice list go from two labelled total
+blocks to one (with the same numbers, because the ledger side has been empty
+since `0009`), and the invoices table loses one column (10 → 9), as does the
+item timeline (10 → 9). `npm run build` passes clean, including the new
+`/api/projects/[id]/purchases/[pid]/document` route. Not clicked through in a
+live browser: the app requires a sign-in and I will not type the account
+password. The payment dialog, the document link and the collapsed totals have
+therefore been verified by build and by reading the code, not by using them.
+
+---
+
+### 2026-08-21 — Removed two obsolete explanatory notices from the project invoice list
+
+**What changed (in plain English):**
+The "Invoices & purchases" screen for a project (`/projects/[id]/purchases`)
+had two paragraphs of explanation on it. Both are gone.
+
+The first sat under the page heading and said that invoices logged here do
+"not yet feed the project's Overview or Expenses tabs, which still read the
+older week-by-week rows — writing to both would count the same spend twice."
+
+The second sat under the table and said that rows marked *imported* "were
+copied from the week-by-week sheet by migration 0008 and are still owned by
+the older Expenses tab — edit them there, so the two records cannot drift
+apart."
+
+Nothing else on the screen changed. The totals, the table, the mobile cards,
+and the small grey **imported** label on rows that came from the old sheet are
+all still there exactly as they were.
+
+**Why:**
+Both paragraphs were written when the spreadsheet-imported expense rows and
+the uploaded invoices existed side by side, and they described the risk of
+counting the same money twice across the two sets. That import has since been
+removed, so the warnings no longer describe the system the user is looking at
+— they point at a set of rows that is not there any more. Misleading copy on
+screen is worse than no copy.
+
+**Where the information came from:**
+User request. No spreadsheet involved.
+
+**Files used (read, not changed):**
+- `components/purchases/SourceNote.tsx` — checked who still calls it
+- `components/project/InvoiceBanner.tsx` — checked it was not the notice
+- `app/(app)/invoices/page.tsx`
+- `about.md` — checked §4.7 / the rules list for anything describing this copy
+- `CLAUDE.md`
+
+**Files changed:**
+- `app/(app)/projects/[id]/purchases/page.tsx` — removed the `<InvoiceScopeNote />`
+  under the page heading, removed the paragraph about *imported* rows below the
+  table, removed the now-unused `InvoiceScopeNote` import, and reworded the code
+  comment above `isManual` which pointed at "the note below the table" that no
+  longer exists.
+
+**Deliberately NOT changed:**
+- `components/purchases/SourceNote.tsx` was **kept**. It is not orphaned — the
+  same `InvoiceScopeNote` is still rendered on three other screens
+  (`/invoices/upload`, `/invoices/new`, `/invoices/[uploadId]/review`). The
+  request covered the project invoice list only, so the component and those
+  three call sites are untouched. If that copy is wrong there too, it needs its
+  own change.
+- The `isManual` helper and the grey **imported** label on rows. Only the
+  explanatory paragraph was asked for; the label stays until asked otherwise.
+- `expense_entries.source`, `purchases.entry_source`, their CHECK constraints
+  and every filter that reads them; `purchases.legacy_entry_id`;
+  `purchasesToSyntheticEntries` and the Expenses-tab merge. This was
+  presentational copy only.
+
+**Database:**
+None. **No migration was written and none was run.** Nothing about this change
+touches the schema or any stored value — two blocks of JSX were deleted.
+
+**Result / numbers after:**
+No figure moved anywhere; §13 is unchanged. The only difference is on screen:
+the project invoice list loses two paragraphs of grey and amber explanatory
+text. `npm run build` passes clean (compiled successfully, types and lint OK).
+Not clicked through in a live browser — the app requires a sign-in and I will
+not type the account password — so this is verified by build and by reading
+the code.

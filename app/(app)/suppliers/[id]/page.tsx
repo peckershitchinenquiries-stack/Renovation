@@ -5,51 +5,29 @@ import { formatCurrency } from "@/lib/calculations";
 import { Badge } from "@/components/ui/Badge";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/States";
-import { SourceNote } from "@/components/purchases/SourceNote";
+import { combineTotals } from "@/components/purchases/totals";
 import {
   PaymentSummary,
   PurchaseExpander,
 } from "@/components/purchases/PurchaseExpander";
-import type { SupplierPurchaseGroup } from "@/types";
+import type { PurchaseDetail } from "@/types";
 
 export const dynamic = "force-dynamic";
 
-const SOURCE_LABEL = {
-  diary: "Diary — the week-by-week plan",
-  ledger: "Ledger — imported reference records",
-} as const;
-
-// One entry_source's worth of a supplier's statement: its own cards, its own
-// purchases and its own running total. Two groups are never added together
-// (about.md §5), which is why the running total is per group and not per page.
-function PurchaseGroup({ group }: { group: SupplierPurchaseGroup }) {
-  const { totals } = group;
+// A supplier's statement: every purchase, newest first, with its lines and
+// payments underneath.
+//
+// getSupplierBundle still groups these by entry_source and accumulates the
+// running total within each group — that split is what stops a double-count if
+// a second dataset is ever imported alongside the invoices. There is only one
+// record set today, so the screen shows one statement rather than a labelled
+// group with nothing to be distinguished from.
+function PurchaseStatement({ purchases }: { purchases: PurchaseDetail[] }) {
   return (
     <section className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="text-base font-semibold text-gray-900">
-          {SOURCE_LABEL[group.entry_source]}
-        </h2>
-        <Badge label={group.entry_source} />
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatCard
-          label="Spend (incl VAT)"
-          value={formatCurrency(totals.gross)}
-        />
-        <StatCard label="Paid" value={formatCurrency(totals.paid)} />
-        <StatCard
-          label="Outstanding"
-          value={formatCurrency(totals.balance)}
-          tone={totals.balance > 0.001 ? "bad" : "good"}
-        />
-        <StatCard label="Purchases" value={String(totals.purchase_count)} />
-      </div>
-
       {/* Mobile: one card per purchase, newest first. */}
       <div className="space-y-2 sm:hidden">
-        {group.purchases.map((p) => (
+        {purchases.map((p) => (
           <div key={p.id} className="card p-0">
             <div className="p-3">
               <div className="flex items-start justify-between gap-2">
@@ -108,7 +86,7 @@ function PurchaseGroup({ group }: { group: SupplierPurchaseGroup }) {
           </thead>
           {/* One <tbody> per purchase — a table may repeat tbody, and it keeps
               each summary row glued to its own expandable detail row. */}
-          {group.purchases.map((p) => (
+          {purchases.map((p) => (
             <tbody key={p.id} className="border-t border-gray-100">
               <tr className="align-top">
                 <td className="whitespace-nowrap py-2 pl-3 pr-2">
@@ -163,6 +141,9 @@ export default async function SupplierPage({
   // only show the ones that add something.
   const otherAliases = aliases.filter((a) => a.alias !== supplier.name);
 
+  const totals = combineTotals(groups.map((g) => g.totals));
+  const purchases = groups.flatMap((g) => g.purchases);
+
   return (
     <div className="space-y-4">
       <div>
@@ -184,17 +165,29 @@ export default async function SupplierPage({
         )}
       </div>
 
-      <SourceNote />
+      {totals && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard
+            label="Spend (incl VAT)"
+            value={formatCurrency(totals.gross)}
+          />
+          <StatCard label="Paid" value={formatCurrency(totals.paid)} />
+          <StatCard
+            label="Outstanding"
+            value={formatCurrency(totals.balance)}
+            tone={totals.balance > 0.001 ? "bad" : "good"}
+          />
+          <StatCard label="Purchases" value={String(totals.purchase_count)} />
+        </div>
+      )}
 
-      {groups.length === 0 ? (
+      {purchases.length === 0 ? (
         <EmptyState
           title="No purchases recorded"
           description="This supplier exists but nothing has been bought from it yet — or every record against it is cancelled."
         />
       ) : (
-        groups.map((group) => (
-          <PurchaseGroup key={group.entry_source} group={group} />
-        ))
+        <PurchaseStatement purchases={purchases} />
       )}
     </div>
   );

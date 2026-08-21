@@ -80,6 +80,7 @@ export default function ProjectDetail({
   invoiceLines,
   purchases,
   supplierNames,
+  documentPurchaseIds,
 }: {
   project: Project;
   initialEntries: ExpenseEntryComputed[];
@@ -89,6 +90,10 @@ export default function ProjectDetail({
   invoiceLines: InvoiceLineView[];
   purchases: PurchaseComputed[];
   supplierNames: Record<string, string>;
+  // Invoices whose original photo or PDF is still stored. Kept out of the
+  // entries array on purpose: it is a fact about the document, not about the
+  // money, and reloadEntries below has no business carrying it.
+  documentPurchaseIds: string[];
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -305,6 +310,7 @@ export default function ProjectDetail({
           entries={entries}
           trades={trades}
           invoiceLines={invoiceLines}
+          documentPurchaseIds={documentPurchaseIds}
           onChanged={reloadEntries}
         />
       )}

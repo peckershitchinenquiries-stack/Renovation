@@ -10,9 +10,6 @@ const STYLES: Record<string, string> = {
   Planned: "bg-blue-100 text-blue-800",
   "In Progress": "bg-amber-100 text-amber-800",
   Cancelled: "bg-red-100 text-red-700",
-  // purchases.entry_source — which half of the app a record belongs to.
-  diary: "bg-indigo-100 text-indigo-800",
-  ledger: "bg-slate-200 text-slate-700",
   // A row in the Expenses list that is really an invoice, so it is clear why
   // its Edit opens a different form.
   Invoice: "bg-violet-100 text-violet-800",

@@ -5,19 +5,14 @@ import { formatCurrency } from "@/lib/calculations";
 import { Badge } from "@/components/ui/Badge";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/States";
-import {
-  InvoiceScopeNote,
-  SourceNote,
-} from "@/components/purchases/SourceNote";
+import { combineTotals } from "@/components/purchases/totals";
 import type { ProjectPurchaseRow } from "@/types";
 
 export const dynamic = "force-dynamic";
 
-const SOURCE_LABEL = { diary: "Diary", ledger: "Ledger" } as const;
-
 // What one row says it is: a hand-typed invoice, or a row copied over from the
-// old week-by-week sheet. Only the former is editable through this form —
-// see the note below the table.
+// old week-by-week sheet. Only the former is editable through this form; the
+// rest show a plain "imported" label instead of an Edit link.
 const isManual = (row: ProjectPurchaseRow) => row.origin !== "legacy_import";
 
 export default async function ProjectPurchasesPage({
@@ -28,6 +23,7 @@ export default async function ProjectPurchasesPage({
   const list = await getProjectPurchases(params.id);
   if (!list) notFound();
   const { project, rows, totals } = list;
+  const total = combineTotals(totals);
 
   return (
     <div className="space-y-4">
@@ -58,37 +54,23 @@ export default async function ProjectPurchasesPage({
         </p>
       </div>
 
-      <InvoiceScopeNote />
-
-      {/* One card group per entry_source. They are never added together
-          (about.md §5), which is why there is no single "project total" here. */}
-      {totals.map((total) => (
-        <section key={total.entry_source} className="space-y-2">
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold text-gray-900">
-              {SOURCE_LABEL[total.entry_source]}
-            </h2>
-            <Badge label={total.entry_source} />
-          </div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <StatCard
-              label="Invoiced (incl VAT)"
-              value={formatCurrency(total.gross)}
-            />
-            <StatCard label="Paid" value={formatCurrency(total.paid)} />
-            <StatCard
-              label="Outstanding"
-              value={formatCurrency(total.balance)}
-              tone={total.balance > 0.001 ? "bad" : "good"}
-            />
-            <StatCard
-              label="Documents"
-              value={String(total.purchase_count)}
-            />
-          </div>
-        </section>
-      ))}
-      {totals.length > 1 && <SourceNote />}
+      {/* One set of totals for the project. Cancelled documents are already
+          excluded upstream. */}
+      {total && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard
+            label="Invoiced (incl VAT)"
+            value={formatCurrency(total.gross)}
+          />
+          <StatCard label="Paid" value={formatCurrency(total.paid)} />
+          <StatCard
+            label="Outstanding"
+            value={formatCurrency(total.balance)}
+            tone={total.balance > 0.001 ? "bad" : "good"}
+          />
+          <StatCard label="Documents" value={String(total.purchase_count)} />
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <EmptyState
@@ -136,7 +118,6 @@ export default async function ProjectPurchasesPage({
                 </dl>
                 <div className="mt-2 flex items-center justify-between border-t border-gray-100 pt-2 text-xs">
                   <span className="flex gap-1">
-                    <Badge label={row.entry_source} />
                     {row.entry_status === "Cancelled" && (
                       <Badge label="Cancelled" />
                     )}
@@ -168,7 +149,6 @@ export default async function ProjectPurchasesPage({
                   <th className="py-2 pr-2 text-right">Paid</th>
                   <th className="py-2 pr-2 text-right">Balance</th>
                   <th className="py-2 pr-2">Status</th>
-                  <th className="py-2 pr-2">Source</th>
                   <th className="py-2 pr-2" />
                 </tr>
               </thead>
@@ -216,9 +196,6 @@ export default async function ProjectPurchasesPage({
                         </span>
                       )}
                     </td>
-                    <td className="py-2 pr-2">
-                      <Badge label={row.entry_source} />
-                    </td>
                     <td className="py-2 pr-2 text-right">
                       {isManual(row) ? (
                         <Link
@@ -236,13 +213,6 @@ export default async function ProjectPurchasesPage({
               </tbody>
             </table>
           </div>
-
-          <p className="text-xs text-gray-500">
-            Rows marked <span className="font-medium">imported</span> were
-            copied from the week-by-week sheet by migration 0008 and are still
-            owned by the older Expenses tab — edit them there, so the two
-            records cannot drift apart.
-          </p>
         </>
       )}
     </div>

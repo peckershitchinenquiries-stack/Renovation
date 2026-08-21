@@ -2,20 +2,17 @@ import Link from "next/link";
 import { getSuppliers } from "@/lib/data";
 import { formatCurrency } from "@/lib/calculations";
 import { EmptyState } from "@/components/ui/States";
+import { combineTotals } from "@/components/purchases/totals";
 import type { SupplierListRow } from "@/types";
 
 export const dynamic = "force-dynamic";
 
-// `row.totals` is split by entry_source (diary/ledger, about.md §5) but this
-// list no longer reads expense_entries at all — every purchase here comes
-// from a committed invoice, which always writes entry_source: 'diary'
-// (lib/purchaseWrite.ts). Ledger belonged to the old dual-Excel-import setup
-// this project no longer has, so summing the array is just "all purchases",
-// not a diary+ledger double-count.
+// `row.totals` still arrives split by entry_source; combineTotals adds it up
+// for display, and explains there why that is safe today.
 const totalSpend = (row: SupplierListRow) =>
-  row.totals.reduce((sum, t) => sum + t.gross, 0);
+  combineTotals(row.totals)?.gross ?? 0;
 const totalOwed = (row: SupplierListRow) =>
-  row.totals.reduce((sum, t) => sum + t.balance, 0);
+  combineTotals(row.totals)?.balance ?? 0;
 
 const money = (value: number) => formatCurrency(value);
 

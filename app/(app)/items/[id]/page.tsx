@@ -2,15 +2,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getItemBundle } from "@/lib/data";
 import { formatCurrency } from "@/lib/calculations";
-import { Badge } from "@/components/ui/Badge";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/States";
 import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
-import { SourceNote } from "@/components/purchases/SourceNote";
 
 export const dynamic = "force-dynamic";
-
-const SOURCE_LABEL = { diary: "Diary", ledger: "Ledger" } as const;
 
 export default async function ItemPage({
   params,
@@ -24,6 +20,20 @@ export default async function ItemPage({
   const otherAliases = aliases.filter((a) => a.alias !== item.canonical_name);
   const priced = points.filter((p) => p.unit_price > 0);
   const latest = priced[priced.length - 1] ?? null;
+
+  // One set of figures for the item. getItemBundle still returns them split by
+  // entry_source — that split is what stops a double-count if a second dataset
+  // is ever imported alongside the invoices — but there is only one record set
+  // to show, so the screen adds them up rather than showing a two-sided split
+  // with one side missing.
+  const spend = totals.reduce(
+    (acc, t) => ({
+      line_count: acc.line_count + t.line_count,
+      qty: acc.qty + t.qty,
+      net: acc.net + t.net,
+    }),
+    { line_count: 0, qty: 0, net: 0 }
+  );
 
   return (
     <div className="space-y-4">
@@ -85,40 +95,31 @@ export default async function ItemPage({
             />
           </div>
 
-          {/* Spend is split by source and never added up — see SourceNote. */}
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {totals.map((t) => (
-              <div key={t.entry_source} className="card">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                    {SOURCE_LABEL[t.entry_source]} records
-                  </p>
-                  <Badge label={t.entry_source} />
-                </div>
-                <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
-                  <div>
-                    <dt className="text-xs text-gray-500">Lines</dt>
-                    <dd className="font-medium">{t.line_count}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-gray-500">Qty</dt>
-                    <dd className="font-medium">{t.qty || "—"}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-gray-500">Net (ex VAT)</dt>
-                    <dd className="font-medium">{formatCurrency(t.net)}</dd>
-                  </div>
-                </dl>
+          <div className="card">
+            <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+              Bought in total
+            </p>
+            <dl className="mt-2 grid grid-cols-3 gap-2 text-sm">
+              <div>
+                <dt className="text-xs text-gray-500">Lines</dt>
+                <dd className="font-medium">{spend.line_count}</dd>
               </div>
-            ))}
+              <div>
+                <dt className="text-xs text-gray-500">Qty</dt>
+                <dd className="font-medium">{spend.qty || "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-gray-500">Net (ex VAT)</dt>
+                <dd className="font-medium">{formatCurrency(spend.net)}</dd>
+              </div>
+            </dl>
           </div>
 
-          <SourceNote />
           <p className="text-xs text-gray-500">
-            Prices are compared only against the previous purchase in the{" "}
-            <em>same</em> record set and in the <em>same</em> unit. Where the
-            unit changed, the change is named instead of a percentage — a
-            percentage across two different units would not mean anything.
+            Prices are compared against the previous purchase of this item in
+            the <em>same</em> unit. Where the unit changed, the change is named
+            instead of a percentage — a percentage across two different units
+            would not mean anything.
           </p>
 
           {/* Mobile: one card per purchase, oldest first. */}
@@ -143,7 +144,6 @@ export default async function ItemPage({
                       )}
                     </p>
                   </div>
-                  <Badge label={p.entry_source} />
                 </div>
                 <p className="mt-1 text-xs text-gray-500">
                   {p.description_raw}
@@ -186,7 +186,6 @@ export default async function ItemPage({
               <thead>
                 <tr className="text-left text-xs uppercase text-gray-500">
                   <th className="py-2 pr-2">Date</th>
-                  <th className="py-2 pr-2">Source</th>
                   <th className="py-2 pr-2">Supplier</th>
                   <th className="py-2 pr-2">Project</th>
                   <th className="py-2 pr-2">Invoice</th>
@@ -202,9 +201,6 @@ export default async function ItemPage({
                   <tr key={p.line_id} className="align-top">
                     <td className="whitespace-nowrap py-2 pr-2">
                       {p.date || <span className="text-gray-400">no date</span>}
-                    </td>
-                    <td className="py-2 pr-2">
-                      <Badge label={p.entry_source} />
                     </td>
                     <td className="py-2 pr-2">
                       {p.supplier_id && p.supplier_name ? (

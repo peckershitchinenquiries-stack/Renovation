@@ -503,9 +503,19 @@ straight from `expense_entries.source` by the `0008` backfill and has the same
 sums both is double-counting. Keep it distinct from `purchases.origin`, which
 records where the data came from and has nothing to do with this. See §4.6.
 
-The supplier and item screens are where that is enforced in the UI: every total
-on them is split by `entry_source` and never combined, down to the sort order.
-See §8.1 and `totalsBySource` in `lib/purchases.ts`.
+**The data keeps the split; the screens no longer show it (2026-08-21).**
+`totalsBySource` in `lib/purchases.ts` still returns one gross / paid / balance
+per `entry_source`, and every loader in `lib/data.ts` still groups by it — that
+is the mechanism, and it stays. What changed is the presentation: the words
+"diary" and "ledger" came off the retired Excel import, and with the ledger
+empty since `0009` every screen was showing the reader a two-sided split with
+one side missing, plus a note explaining why the halves must never be added.
+`components/purchases/totals.ts` (`combineTotals`) now adds the split up at the
+last moment, for display only, on `/suppliers`, `/suppliers/[id]`,
+`/projects/[id]/purchases` and the project's invoice banner; `/items/[id]` does
+the same inline for its quantity/net figures. The day a second dataset arrives,
+the split is still in the data and the screens are one change away from showing
+it again. See §8.1.
 
 > ⚠️ **Known inconsistency, currently dormant.** The API summary routes
 > (`app/api/projects/[id]/summary/`, `…/summary/by-week`, `…/summary/by-category`,
@@ -1048,9 +1058,53 @@ project's invoices, the latter as synthetic entries with an `inv:<uuid>` id
 "Invoice" badge, and their **Edit** opens the invoice form rather than the
 expense drawer — an invoice's supplier, lines and VAT belong to the document,
 and only that form can change them without leaving the header disagreeing with
-the lines it is made of. **Mark Paid** on an invoice writes a `payments` row for
-the difference between what you say is paid and what the payment rows already
-total, so pressing it twice cannot pay it twice.
+the lines it is made of.
+
+**One payment state, derived, shared by the button and the dropdown
+(2026-08-21).** `paidState` in `lib/calculations.ts` is the single answer to
+"how much of this has actually been handed over": `None` for a Cancelled row,
+`Paid` when `paid_amount` reaches `total_incl_vat` within half a penny,
+`Partial` when something is paid, `Unpaid` otherwise. Nothing about it is
+stored. Everything on the Expenses tab reads it:
+
+- The **Mark Paid** button appears only when the state is `Unpaid` or
+  `Partial`, and reads "Mark Fully Paid" on a partial row. A settled row no
+  longer offers to settle itself again.
+- Clicking it opens a dialog asking for the **paid date** (defaulting to today,
+  because that is when the money moved — an invoice's own `paid_date` is the
+  *document's* date), the **amount** (defaulting to what is still owed) and an
+  optional **payment method**. Nothing is written until it is submitted.
+- The **status dropdown is the same path.** Choosing `Paid` on a row that is not
+  actually paid opens that same dialog instead of labelling it Paid with no
+  money against it. Choosing `Planned` or `In Progress` on a row that has
+  payment data asks first, and clears `paid_date` / `paid_amount` if confirmed.
+  On an *invoice* it only changes the status and says so: an invoice's payments
+  are separate rows and are removed on the invoice form (see below).
+- **A row whose state is `Unpaid` shows no paid date at all** — `—` in the
+  table, and no "Paid …" line on the mobile card — however old the column value
+  is. A Planned row displaying a paid date was the visible half of this bug.
+
+The amount is always sent as the **cumulative** figure. An expense row stores it
+directly; for an invoice the PATCH handler turns it into a `payments` row for
+the *difference* between what you say is paid and what the payment rows already
+total, so submitting twice cannot pay it twice. Paying an invoice *less* than it
+already has against it is refused with a 409 — that is a refund or a correction
+to a specific payment, and it belongs on the invoice form where you can see
+which payment you are changing.
+
+**The invoice number opens the original document (2026-08-21).** An invoice row
+whose description links out is one that was created from an upload and still has
+its file in the private `invoices` bucket (`invoice_uploads.storage_path`, with
+`status = 'committed'` and `invoice_id` pointing at the purchase — `0010`).
+Invoices typed in by hand have no file and stay plain text: a link that opens
+nothing is worse than no link. `getProjectBundle` returns
+`documentPurchaseIds` — ids only, never URLs. The link points at
+`GET /api/projects/[id]/purchases/[pid]/document`, which resolves the purchase
+to its stored file, signs a URL valid for 60 seconds and redirects (`no-store`),
+404 when there is no file. **Signing at page load would be wrong**: a signed URL
+expires, so every link on a list left open would be dead by the time it was
+clicked — the same expiry problem the review screen has with its ten-minute
+window (§8.2).
 
 > ⚠️ `/api/projects/[id]/expenses` must return the invoices too, not just
 > `expense_entries` — the tab refetches it after every change. When it returned
@@ -1086,9 +1140,9 @@ is why none of them shows a "project total".
 | Route | Loader in `lib/data.ts` | Shows |
 |---|---|---|
 | `/suppliers` | `getSuppliers()` | every supplier: records, total spend + owed, last purchase. Sorted by record **count** |
-| `/suppliers/[id]` | `getSupplierBundle(id)` | four stat cards and one statement table **per `entry_source`**: date, invoice, project, gross, paid, balance, status, payment dates + methods, running total. Each row expands to its lines and payments |
+| `/suppliers/[id]` | `getSupplierBundle(id)` | four combined stat cards, then one statement table: date, invoice, project, gross, paid, balance, status, payment dates + methods, running total. Each row expands to its lines and payments |
 | `/items` | `getItems()` | every **Materials**-category item (Labour items are filtered out): category, unit, times bought, suppliers, latest unit price, trend, last bought. Sorted by times bought |
-| `/items/[id]` | `getItemBundle(id)` | the price timeline, oldest → newest across every supplier and project: date, source, supplier, project, invoice, qty, unit, unit price, line net, and the change vs the previous purchase |
+| `/items/[id]` | `getItemBundle(id)` | the price timeline, oldest → newest across every supplier and project: date, supplier, project, invoice, qty, unit, unit price, line net, and the change vs the previous purchase |
 
 The loaders follow `getProjectBundle`'s shape: a fixed handful of queries per
 page, never one per row, and never a `.eq("user_id", …)` — RLS scopes it (§9).
@@ -1097,20 +1151,19 @@ page, never one per row, and never a `.eq("user_id", …)` — RLS scopes it (§
 **Three rules these screens are built on. Breaking any one of them makes the
 numbers lie:**
 
-1. **Diary and ledger money is never added up** on the three detail/index
-   pages that carry per-`entry_source` breakdowns: `/suppliers/[id]`,
-   `/items`, `/items/[id]` — separate card groups and tables, and a separate
-   running total per group. This is §5 applied to `purchases`: the two
-   overlap, so a combined figure is the double-count.
-   `components/purchases/SourceNote.tsx` says so on screen. **Exception:** the
-   `/suppliers` list shows one summed "Total spend"/"Total owed" pair
-   (2026-08-20). This is not the same double-count risk as elsewhere: every
-   row this page reads comes from a committed invoice, and invoice commit
-   always writes `entry_source: 'diary'` (`lib/purchaseWrite.ts`) — `ledger`
-   was specific to the old dual-Excel import (§3.0) this project no longer
-   has a code path for, so there is nothing left to double-count. The
-   supplier list is still *sorted* on the record count rather than on money,
-   matching the other three pages.
+1. **The `entry_source` split lives in the data, not on the screen
+   (2026-08-21).** The loaders still group and total by `entry_source`, and
+   the running total on `/suppliers/[id]` is still accumulated within a group
+   — that is §5 applied to `purchases`, and it is what stops a double-count if
+   a second dataset is ever imported alongside the invoices. But every one of
+   these pages now *displays* one combined figure, via `combineTotals` in
+   `components/purchases/totals.ts`, and the "diary" / "ledger" labels, badges
+   and the `SourceNote` explaining them are gone. They described the retired
+   dual-Excel import (§3.0); every purchase in the database today comes from a
+   committed invoice, and invoice commit always writes `entry_source: 'diary'`
+   (`lib/purchaseWrite.ts`), so there is currently nothing on the other side to
+   double-count. The supplier list is still *sorted* on the record count rather
+   than on money.
 2. **Cancelled purchases are excluded everywhere**, matching `ACTIVE` in §6.2.
 3. **A percentage is never computed across two different units.** See below.
 
@@ -1162,6 +1215,7 @@ All handlers call `requireUser()` first.
 | `/api/projects/[id]/weeks` | POST/PUT | save `completion_pct` — **no longer called by any screen** |
 | `/api/projects/[id]/export/excel` | GET | xlsx ⚠️ unfiltered |
 | `/api/projects/[id]/export/pdf` | GET | pdf ⚠️ unfiltered |
+| `/api/projects/[id]/purchases/[pid]/document` | GET | 302 to a 60-second signed URL for the invoice's original file; 404 when none was stored. Signed on click, never at page load (§8) |
 | `/api/expenses/[eid]/receipt` | POST | upload to `receipts` bucket |
 | `/api/invoices/upload-url` | POST | signed upload URL + new `invoice_uploads` row (migration 0010). `project_id` optional since `0012` — a project-less file lands under `{user}/unassigned/…` |
 | `/api/invoices/[id]` | GET | the upload row + a 5-min signed read URL for the file |

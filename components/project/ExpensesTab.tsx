@@ -3,7 +3,13 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { apiFetch } from "@/lib/fetcher";
-import { formatCurrency } from "@/lib/calculations";
+import {
+  formatCurrency,
+  paidState,
+  PAID_TOLERANCE,
+  type PaidState,
+} from "@/lib/calculations";
+import { round2 } from "@/lib/purchases";
 import { Badge } from "@/components/ui/Badge";
 import { Drawer } from "@/components/ui/Drawer";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -36,17 +42,38 @@ const EMPTY_FILTERS = {
 const isInvoice = (e: { id: string }) => e.id.startsWith("inv:");
 const purchaseIdOf = (e: { id: string }) => e.id.slice(4);
 
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+// The two statuses that mean "not paid". Choosing one of these on a row that
+// already has money against it is the moment to ask whether the money should go
+// too, rather than leaving a Planned row displaying a paid date.
+const UNPAID_STATUSES = new Set(["Planned", "In Progress"]);
+
+// What "this row has payment data" means, which differs by kind of row.
+//
+// An expense row owns its `paid_date` column outright, so a date with no money
+// is still payment data — it is exactly the stale value this screen used to
+// show. An invoice's `paid_date` is really the DOCUMENT's date (purchase_date),
+// present on almost every invoice whether or not a penny has been paid, so for
+// those only the money counts.
+function hasPaymentData(e: ExpenseEntryComputed): boolean {
+  if (Number(e.paid_amount) > 0) return true;
+  return isInvoice(e) ? false : Boolean(e.paid_date);
+}
+
 export default function ExpensesTab({
   project,
   entries,
   trades,
   invoiceLines,
+  documentPurchaseIds,
   onChanged,
 }: {
   project: Project;
   entries: ExpenseEntryComputed[];
   trades: TradeLookup[];
   invoiceLines: InvoiceLineView[];
+  documentPurchaseIds: string[];
   onChanged: () => Promise<void>;
 }) {
   const toast = useToast();
@@ -59,6 +86,23 @@ export default function ExpensesTab({
   const [deleteTarget, setDeleteTarget] = useState<ExpenseEntryComputed | null>(
     null
   );
+  // The row being paid, and the payment being described. Nothing is written
+  // until the dialog is submitted — pressing "Mark Paid" used to post a payment
+  // dated today without ever asking.
+  const [payTarget, setPayTarget] = useState<ExpenseEntryComputed | null>(null);
+  const [payForm, setPayForm] = useState({
+    paid_date: todayISO(),
+    amount: "",
+    payment_method: "",
+  });
+  const [payError, setPayError] = useState("");
+  // Moving a paid row back to Planned / In Progress: the status and the money
+  // have to be decided together, or the row keeps displaying a payment it no
+  // longer claims to have had.
+  const [clearTarget, setClearTarget] = useState<{
+    entry: ExpenseEntryComputed;
+    status: string;
+  } | null>(null);
 
   // The Expenses tab is the week-by-week diary: it shows only 'diary' rows
   // (File 1 + anything added in-app). Imported 'ledger' rows (File 2) live in
@@ -92,6 +136,47 @@ export default function ExpensesTab({
     });
   }, [diaryEntries, filters]);
 
+  const withDocument = useMemo(
+    () => new Set(documentPurchaseIds),
+    [documentPurchaseIds]
+  );
+
+  /**
+   * The row's description — a link to the original invoice document when, and
+   * only when, one is actually stored.
+   *
+   * Manual expenses and invoices that were typed in rather than uploaded have
+   * no file, so they stay plain text: a link that opens nothing, or a greyed-out
+   * one, both read as "something is broken here" when nothing is.
+   *
+   * The href is this project's document route, never a signed URL. Signing at
+   * render time would bake in an expiry the moment the page loaded; the route
+   * signs when the link is followed instead.
+   */
+  const description = (e: ExpenseEntryComputed, className: string) => {
+    if (!isInvoice(e) || !withDocument.has(purchaseIdOf(e)))
+      return <span className={className}>{e.description}</span>;
+    return (
+      <a
+        href={`/api/projects/${project.id}/purchases/${purchaseIdOf(e)}/document`}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Open the original invoice"
+        className={`${className} text-brand underline decoration-dotted underline-offset-2 hover:decoration-solid`}
+      >
+        {e.description}
+      </a>
+    );
+  };
+
+  // Every row paired with its derived payment state, computed once. The button
+  // label, the status dropdown's behaviour and whether a paid date is shown at
+  // all are all read off this one value, in the card list and the table alike.
+  const rows = useMemo(
+    () => filtered.map((e) => ({ e, pay: paidState(e) as PaidState })),
+    [filtered]
+  );
+
   const totals = useMemo(() => {
     return filtered.reduce(
       (acc, e) => {
@@ -123,37 +208,96 @@ export default function ExpensesTab({
     setDrawerOpen(true);
   }
 
-  async function markPaid(e: ExpenseEntryComputed) {
+  // Open the payment dialog. The date defaults to today for every row: this is
+  // the date the money moved, which for an invoice is emphatically not the
+  // document's own date — paying a three-month-old invoice today must not
+  // record the payment three months ago.
+  function openPay(e: ExpenseEntryComputed) {
+    const outstanding = round2(e.total_incl_vat - Number(e.paid_amount));
+    setPayForm({
+      paid_date: todayISO(),
+      amount: outstanding > 0 ? outstanding.toFixed(2) : "",
+      payment_method: e.payment_method ?? "",
+    });
+    setPayError("");
+    setPayTarget(e);
+  }
+
+  async function submitPay() {
+    const e = payTarget;
+    if (!e) return;
+
+    const amount = round2(Number(payForm.amount));
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setPayError("Enter an amount greater than zero.");
+      return;
+    }
+    if (!payForm.paid_date) {
+      setPayError("Choose the date the payment was made.");
+      return;
+    }
+
+    // Always sent as the CUMULATIVE figure. An expense row stores that number
+    // directly; for an invoice the handler turns it into a payment for the
+    // difference only, so submitting twice cannot pay twice (see patchInvoice).
+    const newPaid = round2(Number(e.paid_amount) + amount);
+    const settled = newPaid >= e.total_incl_vat - PAID_TOLERANCE;
+
+    const body: Record<string, unknown> = {
+      status: settled ? "Paid" : "In Progress",
+      paid_amount: newPaid,
+      paid_date: payForm.paid_date,
+    };
+    // Only sent when chosen, so leaving it blank does not wipe a method that is
+    // already recorded on the row.
+    if (payForm.payment_method) body.payment_method = payForm.payment_method;
+
     try {
       await apiFetch(`/api/projects/${project.id}/expenses/${e.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          status: "Paid",
-          // What gets handed over is the incl-VAT total, not the ex-VAT cost.
-          // Sent as the cumulative figure, so a part-paid invoice is topped up
-          // to its total rather than paid twice — see patchInvoice.
-          paid_amount: Number(e.total_incl_vat.toFixed(2)),
-          // For an invoice, paid_date is the DOCUMENT's date, not a payment
-          // date — paying a three-month-old invoice today must not record the
-          // payment three months ago. An expense row's paid_date is its own,
-          // so that one is kept.
-          paid_date: isInvoice(e)
-            ? new Date().toISOString().slice(0, 10)
-            : e.paid_date || new Date().toISOString().slice(0, 10),
-        }),
+        body: JSON.stringify(body),
       });
-      toast("Marked as paid", "success");
+      toast(settled ? "Marked as paid" : "Payment recorded", "success");
+      setPayTarget(null);
       await onChanged();
     } catch (err) {
-      toast(err instanceof Error ? err.message : "Update failed", "error");
+      // Left open rather than dismissed, so the amount can be corrected — the
+      // commonest failure here is over-paying an invoice, which the handler
+      // rejects with an explanation.
+      setPayError(err instanceof Error ? err.message : "Update failed");
     }
   }
 
-  async function updateStatus(e: ExpenseEntryComputed, newStatus: string) {
+  // The status dropdown and the Mark Paid button are the same path: choosing
+  // Paid on a row that has not been paid opens the payment dialog rather than
+  // silently labelling it Paid with no money against it.
+  function requestStatus(e: ExpenseEntryComputed, newStatus: string) {
+    if (newStatus === e.status) return;
+    if (newStatus === "Paid" && paidState(e) !== "Paid") {
+      openPay(e);
+      return;
+    }
+    if (UNPAID_STATUSES.has(newStatus) && hasPaymentData(e)) {
+      setClearTarget({ entry: e, status: newStatus });
+      return;
+    }
+    void updateStatus(e, newStatus);
+  }
+
+  async function updateStatus(
+    e: ExpenseEntryComputed,
+    newStatus: string,
+    clearPayment = false
+  ) {
+    const body: Record<string, unknown> = { status: newStatus };
+    if (clearPayment) {
+      body.paid_date = null;
+      body.paid_amount = 0;
+    }
     try {
       await apiFetch(`/api/projects/${project.id}/expenses/${e.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ status: newStatus }),
+        body: JSON.stringify(body),
       });
       toast("Status updated", "success");
       await onChanged();
@@ -191,17 +335,18 @@ export default function ExpensesTab({
     }
   }
 
-  const rowActions = (e: ExpenseEntryComputed) => (
+  const rowActions = (e: ExpenseEntryComputed, pay: PaidState) => (
     <>
       {/* Offered while anything is still owed, so a part-paid invoice can be
-          settled without opening it. */}
-      {e.status !== "Cancelled" && (e.status !== "Paid" || e.remaining > 0.005) ? (
+          settled without opening it — and never on a row that is already
+          settled or cancelled. */}
+      {pay === "Unpaid" || pay === "Partial" ? (
         <button
           type="button"
           className="text-emerald-700 hover:underline"
-          onClick={() => markPaid(e)}
+          onClick={() => openPay(e)}
         >
-          Mark Paid
+          {pay === "Partial" ? "Mark Fully Paid" : "Mark Paid"}
         </button>
       ) : null}
       {isInvoice(e) ? (
@@ -380,7 +525,7 @@ export default function ExpensesTab({
         <>
           {/* Mobile: one card per entry. */}
           <ul className="space-y-2 sm:hidden">
-            {filtered.map((e) => (
+            {rows.map(({ e, pay }) => (
               <li key={e.id} className="card p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -395,7 +540,7 @@ export default function ExpensesTab({
                           📎
                         </button>
                       ) : null}
-                      <span className="font-medium">{e.description}</span>
+                      {description(e, "font-medium")}
                       {isInvoice(e) && <Badge label="Invoice" />}
                     </div>
                     <p className="mt-0.5 text-xs text-gray-500">
@@ -411,7 +556,7 @@ export default function ExpensesTab({
                     <select
                       className="input mt-1 text-xs py-0.5 px-2 h-auto"
                       value={e.status}
-                      onChange={(ev) => updateStatus(e, ev.target.value)}
+                      onChange={(ev) => requestStatus(e, ev.target.value)}
                     >
                       {EXPENSE_STATUSES.map((s) => (
                         <option key={s} value={s}>
@@ -443,7 +588,10 @@ export default function ExpensesTab({
                   </div>
                 </dl>
 
-                {e.paid_date ? (
+                {/* Nothing paid means nothing to date: a row that has never
+                    been paid never shows a paid date, however old the column
+                    value is. Same rule as the table's Date Paid cell. */}
+                {pay !== "Unpaid" && e.paid_date ? (
                   <p className="mt-1 text-xs text-gray-400">
                     Paid {fmtDate(e.paid_date)}
                     {e.payment_method ? ` · ${e.payment_method}` : ""}
@@ -451,7 +599,7 @@ export default function ExpensesTab({
                 ) : null}
 
                 <div className="mt-2 flex flex-wrap gap-3 border-t border-gray-100 pt-2 text-sm">
-                  {rowActions(e)}
+                  {rowActions(e, pay)}
                 </div>
               </li>
             ))}
@@ -505,7 +653,7 @@ export default function ExpensesTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {filtered.map((e) => (
+                {rows.map(({ e, pay }) => (
                   <tr key={e.id} className="align-top">
                     <td className="py-2 pr-2">{e.week_number}</td>
                     <td className="py-2 pr-2">
@@ -520,7 +668,7 @@ export default function ExpensesTab({
                             📎
                           </button>
                         ) : null}
-                        <span>{e.description}</span>
+                        {description(e, "")}
                         {isInvoice(e) && <Badge label="Invoice" />}
                       </div>
                       {e.supplier ? (
@@ -545,8 +693,10 @@ export default function ExpensesTab({
                       {formatCurrency(e.remaining)}
                     </td>
                     <td className="py-2 pr-2 whitespace-nowrap">
-                      {fmtDate(e.paid_date)}
-                      {e.payment_method ? (
+                      {/* A row with nothing paid against it has no paid date,
+                          whatever the column happens to hold. */}
+                      {pay === "Unpaid" ? "—" : fmtDate(e.paid_date)}
+                      {pay !== "Unpaid" && e.payment_method ? (
                         <p className="text-xs text-gray-400">
                           {e.payment_method}
                         </p>
@@ -556,7 +706,7 @@ export default function ExpensesTab({
                       <select
                         className="input text-xs py-1 px-2 h-auto"
                         value={e.status}
-                        onChange={(ev) => updateStatus(e, ev.target.value)}
+                        onChange={(ev) => requestStatus(e, ev.target.value)}
                       >
                         {EXPENSE_STATUSES.map((s) => (
                           <option key={s} value={s}>
@@ -567,7 +717,7 @@ export default function ExpensesTab({
                     </td>
                     <td className="py-2 pr-2">
                       <div className="flex justify-end gap-2 text-xs">
-                        {rowActions(e)}
+                        {rowActions(e, pay)}
                       </div>
                     </td>
                   </tr>
@@ -621,6 +771,138 @@ export default function ExpensesTab({
           onCancel={() => setDrawerOpen(false)}
         />
       </Drawer>
+
+      {/* Record a payment. Reuses ConfirmDialog rather than adding another
+          modal primitive — its message is free-form, so the fields live in it
+          and nothing is written until Save. */}
+      <ConfirmDialog
+        open={Boolean(payTarget)}
+        title={
+          payTarget && paidState(payTarget) === "Partial"
+            ? "Mark fully paid"
+            : "Mark paid"
+        }
+        confirmLabel="Save payment"
+        message={
+          !payTarget ? (
+            ""
+          ) : (
+            <div className="space-y-3">
+              <p>
+                <span className="font-medium text-gray-900">
+                  {payTarget.description}
+                </span>
+                <br />
+                {formatCurrency(
+                  round2(
+                    payTarget.total_incl_vat - Number(payTarget.paid_amount)
+                  )
+                )}{" "}
+                still owed of {formatCurrency(payTarget.total_incl_vat)}.
+              </p>
+              <div>
+                <label className="label" htmlFor="pay-date">
+                  Paid date
+                </label>
+                <input
+                  id="pay-date"
+                  type="date"
+                  className="input"
+                  value={payForm.paid_date}
+                  onChange={(ev) =>
+                    setPayForm((f) => ({ ...f, paid_date: ev.target.value }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="pay-amount">
+                  Amount paid now
+                </label>
+                <input
+                  id="pay-amount"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  className="input"
+                  value={payForm.amount}
+                  onChange={(ev) =>
+                    setPayForm((f) => ({ ...f, amount: ev.target.value }))
+                  }
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="pay-method">
+                  Payment method (optional)
+                </label>
+                <select
+                  id="pay-method"
+                  className="input"
+                  value={payForm.payment_method}
+                  onChange={(ev) =>
+                    setPayForm((f) => ({
+                      ...f,
+                      payment_method: ev.target.value,
+                    }))
+                  }
+                >
+                  <option value="">Not recorded</option>
+                  {PAYMENT_METHODS.map((p) => (
+                    <option key={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+              {payError ? (
+                <p className="text-sm text-red-600">{payError}</p>
+              ) : null}
+            </div>
+          )
+        }
+        onConfirm={() => void submitPay()}
+        onCancel={() => {
+          setPayTarget(null);
+          setPayError("");
+        }}
+      />
+
+      {/* Moving a row back to Planned / In Progress while money is recorded
+          against it. */}
+      <ConfirmDialog
+        open={Boolean(clearTarget)}
+        title={`Move back to ${clearTarget?.status ?? ""}`}
+        confirmLabel={
+          clearTarget && isInvoice(clearTarget.entry)
+            ? "Change status"
+            : "Clear payment"
+        }
+        message={
+          !clearTarget ? (
+            ""
+          ) : isInvoice(clearTarget.entry) ? (
+            <>
+              This invoice has {formatCurrency(Number(clearTarget.entry.paid_amount))}{" "}
+              paid against it. Changing the status leaves those payments in
+              place — an invoice&rsquo;s payments are separate records, and they
+              are removed on the invoice itself.
+            </>
+          ) : (
+            <>
+              &ldquo;{clearTarget.entry.description}&rdquo; has{" "}
+              {formatCurrency(Number(clearTarget.entry.paid_amount))} paid
+              {clearTarget.entry.paid_date
+                ? ` on ${fmtDate(clearTarget.entry.paid_date)}`
+                : ""}
+              . Clear the paid amount and date as well?
+            </>
+          )
+        }
+        onConfirm={() => {
+          const t = clearTarget;
+          setClearTarget(null);
+          if (t) void updateStatus(t.entry, t.status, !isInvoice(t.entry));
+        }}
+        onCancel={() => setClearTarget(null)}
+      />
 
       <ConfirmDialog
         open={Boolean(deleteTarget)}

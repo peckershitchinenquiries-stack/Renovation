@@ -22,6 +22,7 @@ export default async function ProjectPage({
       invoiceLines={bundle.invoiceLines}
       purchases={bundle.purchases}
       supplierNames={bundle.supplierNames}
+      documentPurchaseIds={bundle.documentPurchaseIds}
     />
   );
 }

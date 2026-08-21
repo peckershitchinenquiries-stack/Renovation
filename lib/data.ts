@@ -20,6 +20,7 @@ import type {
   TradeLookup,
   ProjectWeek,
   InvoiceRef,
+  InvoiceUpload,
   Item,
   ItemAlias,
   ItemBundle,
@@ -72,6 +73,13 @@ export interface ProjectBundle {
   // recorded per invoice, never per line.
   purchases: PurchaseComputed[];
   supplierNames: Record<string, string>;
+  // Purchase ids that still have the original photo or PDF behind them, i.e.
+  // the ones committed from an upload (migration 0010). Only these can be
+  // opened, so only these are linked — an invoice typed in by hand has no
+  // document, and offering a link to one would be a promise the app cannot
+  // keep. Ids only: a signed URL expires, so it is minted when clicked
+  // (app/api/projects/[id]/purchases/[pid]/document).
+  documentPurchaseIds: string[];
 }
 
 export async function getProjectBundle(id: string): Promise<ProjectBundle | null> {
@@ -106,9 +114,13 @@ export async function getProjectBundle(id: string): Promise<ProjectBundle | null
   // Second pass: payments and lines scoped to this project's purchase IDs
   // only. selectIn handles the empty-array case without a wasted round trip.
   const purchaseIds = ((rawPurchases ?? []) as Purchase[]).map((p) => p.id);
-  const [projectPayments, purchaseLines] = await Promise.all([
+  const [projectPayments, purchaseLines, committedUploads] = await Promise.all([
     selectIn<Payment>(supabase, "payments", "purchase_id", purchaseIds),
     selectIn<PurchaseLine>(supabase, "purchase_lines", "purchase_id", purchaseIds),
+    // Which of these invoices still have their original file. Scoped by
+    // invoice_id rather than project_id so an upload can only ever mark a
+    // purchase this project actually owns.
+    selectIn<InvoiceUpload>(supabase, "invoice_uploads", "invoice_id", purchaseIds),
   ]);
 
   const computedPurchases = computePurchases(
@@ -174,6 +186,13 @@ export async function getProjectBundle(id: string): Promise<ProjectBundle | null
     ),
     purchases: computedPurchases,
     supplierNames: Object.fromEntries(supplierNames),
+    // Only a committed upload with a file behind it counts. Anything else —
+    // pending, failed, abandoned — is not the document for this invoice.
+    documentPurchaseIds: distinct(
+      committedUploads
+        .filter((u) => u.status === "committed" && Boolean(u.storage_path))
+        .map((u) => u.invoice_id)
+    ),
   };
 }
 

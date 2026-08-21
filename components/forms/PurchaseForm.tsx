@@ -1326,8 +1326,8 @@ export default function PurchaseForm({
                     {info.last.date ? ` on ${info.last.date}` : ""}
                     {info.last.supplier_name
                       ? ` from ${info.last.supplier_name}`
-                      : ""}{" "}
-                    ({info.last.entry_source} record).
+                      : ""}
+                    .
                   </p>
                 )}
                 {info.last && info.move && (
