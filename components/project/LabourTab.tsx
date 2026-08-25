@@ -13,9 +13,10 @@ import type { InvoiceLineView } from "@/types";
 // actually charged for" — one row per line of a Labour invoice, with whatever
 // the document said about days, hours or rate.
 //
-// Labour is only recorded through invoices today. When labour starts being
-// logged some other way, it lands here too as long as it is filed under the
-// Labour category.
+// Labour arrives here two ways, and the tab cannot tell them apart on purpose:
+// off an invoice filed under the Labour category, or typed straight in through
+// "Log labour", which writes an ordinary purchase with one Labour line. Both are
+// purchases, so both come through labourLines() with no special case.
 
 export default function LabourTab({
   projectId,
@@ -24,14 +25,20 @@ export default function LabourTab({
   projectId: string;
   lines: InvoiceLineView[];
 }) {
+  // Sends the form back to this tab rather than to the invoice list, which is
+  // where a bare purchase save would otherwise land.
+  const logHref = `/projects/${projectId}/labour/new?returnTo=${encodeURIComponent(
+    `/projects/${projectId}?tab=labour`
+  )}`;
+
   if (lines.length === 0)
     return (
       <EmptyState
         title="No labour recorded yet"
-        description="Labour appears here as soon as an invoice is filed with its category set to Labour. Nothing has been logged against this project yet."
+        description="Log a worker's hours here, or file an invoice with its category set to Labour. Nothing has been recorded against this project yet."
         action={
-          <Link href="/invoices" className="btn-primary">
-            Log an invoice
+          <Link href={logHref} className="btn-primary">
+            Log labour
           </Link>
         }
       />
@@ -49,19 +56,24 @@ export default function LabourTab({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-gray-500">
-        Every labour line charged to this project.{" "}
-        <span className="text-gray-400">
-          Paid and outstanding are recorded per invoice, not per line — see{" "}
-        </span>
-        <Link
-          href={`/projects/${projectId}/purchases`}
-          className="text-brand hover:underline"
-        >
-          Invoices
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="max-w-prose text-sm text-gray-500">
+          Every labour line charged to this project.{" "}
+          <span className="text-gray-400">
+            Paid and outstanding are recorded per invoice, not per line — see{" "}
+          </span>
+          <Link
+            href={`/projects/${projectId}/purchases`}
+            className="text-brand hover:underline"
+          >
+            Invoices
+          </Link>
+          <span className="text-gray-400"> for what has been settled.</span>
+        </p>
+        <Link href={logHref} className="btn-primary shrink-0">
+          Log labour
         </Link>
-        <span className="text-gray-400"> for what has been settled.</span>
-      </p>
+      </div>
 
       {/* Mobile: one card per line. */}
       <div className="space-y-2 sm:hidden">

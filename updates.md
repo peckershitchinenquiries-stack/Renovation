@@ -2965,3 +2965,157 @@ text. `npm run build` passes clean (compiled successfully, types and lint OK).
 Not clicked through in a live browser — the app requires a sign-in and I will
 not type the account password — so this is verified by build and by reading
 the code.
+
+---
+
+### 2026-08-25 — Labour can be logged directly, without an invoice
+
+**What changed (in plain English):**
+The Labour tab now has a **Log labour** button — in the header when there is
+already labour on the project, and as the button on the empty state when there
+isn't. It opens a new, short form that asks the five things you actually know
+standing on site: who did the work, what trade, their hourly rate, how many
+hours, and what you are paying them. Choose the status **Paid** and a payment
+block appears inside the same form (date, method, amount) so the whole thing is
+one save rather than two steps; choose anything else and no payment is recorded
+at all.
+
+Underneath, this does **not** create a new kind of record. It writes one
+perfectly ordinary invoice row (`purchases`) with a single line
+(`purchase_lines`) filed under the Labour category. That means the entry turns
+up on the Labour, Trades, Suppliers, Overview, Expenses and Price Tracker
+screens straight away, with no change to any of the code that builds them.
+
+Three deliberate behaviours worth knowing:
+
+- **Total pay is prefilled with rate × hours but yours wins.** If you change it
+  so the two no longer agree, the form says so under the field and offers a
+  one-click "use rate × hours" — but it never quietly overwrites your figure and
+  never stops you saving. A day that ran over, or a rounded-down cash figure, is
+  real.
+- **VAT has to be answered.** It defaults to 0, labelled *"0% — not VAT
+  registered"* so a deliberate nil doesn't look like a field nobody filled in.
+  Leaving it blank is an error, not a silent zero.
+- **Paying less than the full amount is allowed.** The payment amount is
+  auto-filled with the total including VAT and follows it as you change the pay
+  or the VAT rate, but you can edit it. Put in less and the form tells you, in
+  plain words, that this is a part payment and that Trades and Suppliers will
+  show a balance still owing even though the status reads Paid — then lets you
+  save. A deposit against a labour bill is a normal thing to record.
+
+**Why:**
+Labour could only reach the app through an invoice. In practice a lot of the
+labour on this job is paid direct to a person for a number of hours at a rate,
+and there is no document to upload — so it either went in as a made-up invoice
+or didn't go in at all. The Labour tab's empty state even sent you to "Log an
+invoice", which was the wrong instruction for exactly the case the tab is for.
+
+**Where the information came from:**
+User request. No spreadsheet involved. The database column names and rules were
+read out of `supabase/migrations/0008_transaction_core.sql` and
+`0010_invoice_upload.sql` rather than assumed.
+
+**Files used (read, not changed):**
+- `supabase/migrations/0008_transaction_core.sql` — the real column names and
+  every NOT NULL / CHECK on `purchases`, `purchase_lines` and `payments`
+- `supabase/migrations/0010_invoice_upload.sql` — checked the duplicate
+  invoice-number index
+- `supabase/migrations/0011_vat_reduced_rate.sql` — confirmed VAT 0 / 5 / 20
+- `supabase/migrations/0012_upload_before_project.sql`
+- `lib/purchases.ts` — `round2`, `purchaseTotalsFromLines`, `SETTLED_TOLERANCE`
+- `lib/invoiceViews.ts` — confirmed the builders need no change, and confirmed
+  what the Price Tracker does with a unit price (see below)
+- `lib/data.ts`, `lib/fetcher.ts`, `lib/safeReturnTo.ts`, `types/index.ts`
+- `components/forms/PurchaseForm.tsx` — read for its patterns; **not modified**
+- `components/forms/ExpenseForm.tsx` — the `unitMismatch` advisory this copies
+- `components/forms/TradeSelect.tsx` — reused as-is
+- `components/project/ProjectDetail.tsx` — how the `?tab=` link works
+- `app/api/projects/[id]/purchases/route.ts` — the route-handler pattern
+- `app/api/projects/[id]/expenses/[eid]/route.ts` — the Mark Paid
+  difference-based payment rule this copies
+- `app/(app)/projects/[id]/purchases/[pid]/edit/page.tsx`,
+  `app/(app)/projects/[id]/expenses/new/page.tsx` — page patterns
+
+**Files changed:**
+- `lib/validation.ts` — added `validateLabourEntry`, used by both the form and
+  the route handler so they can't drift apart, and a small shared `todayISO`
+  helper so both agree on where "the future" starts.
+- `components/forms/LabourForm.tsx` — **new.** The form itself. Standalone; it
+  does not import or touch `PurchaseForm`.
+- `app/(app)/projects/[id]/labour/new/page.tsx` — **new.** The page that renders
+  it. Reads only the project name and the trade list, rather than the whole
+  project bundle, since that is all a blank form needs.
+- `app/api/projects/[id]/labour/route.ts` — **new.** POST handler. Checks the
+  user, validates the same way the form did, then builds the purchase and hands
+  it to the existing `createPurchase` — one save path, not two loose inserts.
+- `components/project/LabourTab.tsx` — the empty-state button is now **Log
+  labour** and points at the new form; the same button was added to the header
+  of the populated view. Both carry a `returnTo` so saving lands you back on the
+  Labour tab instead of the invoice list. Also reworded the comment at the top,
+  which said labour was only ever recorded through invoices.
+- `about.md` — new §6.6.1 describing the form and everything it fixes on save; a
+  note added under §6.6 Labour; and the line in the invoice-upload section that
+  said "there is exactly one purchase form component in the codebase" corrected
+  — it now says one *invoice* form, and points at `LabourForm` as the second,
+  much smaller writer of `purchases`.
+- `updates.md` — this entry.
+
+**Deliberately NOT changed:**
+- `lib/purchaseWrite.ts` — `createPurchase` was reused exactly as it is. Its
+  signature already fitted, so it needed no new parameter and its three existing
+  callers are untouched.
+- `lib/invoiceViews.ts` — no builder changed, including the Labour-vs-Materials
+  asymmetry (Labour must be explicit; Materials is everything not Labour).
+- `components/forms/PurchaseForm.tsx` and the three screens that render it.
+- The diary/ledger split, `norm_key` / `priceKey` / `normaliseName`, and the
+  `inv:` synthetic-row pattern in the Expenses tab. A labour entry is a
+  purchase, so it shows in Expenses as an invoice row — that is expected and is
+  not special-cased.
+- **No edit route was added.** A labour entry is an ordinary purchase, so it is
+  edited on the existing invoice edit screen, which is already where the Labour
+  tab's rows link to.
+
+**A consequence, reported rather than hidden:**
+The Price Tracker (`buildItemPriceRows`) puts **every** line with a unit price
+on its timeline and has no category filter — so an hourly rate now appears there
+next to material prices, e.g. "Dave Gardener — £25.00 / hr", tracked over time
+like any other price. For the same reason, saving a labour entry creates an
+`items` row for the person's name, which is what makes that tracking work. This
+was left exactly as it is, on purpose and as instructed: a rate that has gone up
+is worth seeing, and filtering it out here would be the first place the
+Labour/Materials asymmetry leaked into a third screen. Say the word if it should
+be filtered and it can be a change of its own.
+
+**Database:**
+**None. No migration was written and none needs to be run.** Every field this
+form stores already had a column that accepts it, and this was checked against
+the migration files rather than assumed:
+
+- `purchases.supplier_id` is nullable, so a worker's name does not need a
+  supplier row invented for them.
+- `purchases.invoice_no` is nullable, and the duplicate-invoice-number unique
+  index from migration 0010 is a *partial* index — it only applies where
+  `invoice_no is not null and btrim(invoice_no) <> ''` — so leaving it null is
+  fine and any number of labour entries can coexist.
+- `purchases.purchase_date` is nullable too, so no extra date field was added to
+  the form; it is filled with the payment date when Paid and today otherwise.
+- The date column on `payments` is called `paid_on`, with `amount` (NOT NULL,
+  `>= 0`, including VAT) and `method` (nullable, restricted to Cash / Debit Card
+  / Credit Card / Bank Transfer).
+- `purchase_lines.description_raw` is NOT NULL and must not be blank, which is
+  why the Name field is required; `vat_rate` is restricted to 0, 5 or 20 by
+  migration 0011.
+
+**Result / numbers after:**
+No stored figure moved — nothing existing was touched, and no rows were written
+by this change. The Labour tab's own totals are unchanged until the first entry
+is logged. `about.md` §13 is unchanged.
+
+`npm run build` passes clean: compiled successfully, types and lint OK, and the
+two new routes appear in the build output (`/projects/[id]/labour/new` and
+`ƒ /api/projects/[id]/labour`).
+
+**Not clicked through in a live browser.** The dev server starts and serves, but
+the app requires a sign-in and I will not type the account password, so
+everything past the login screen is verified by the build and by reading the
+code. A manual checklist to run through was handed over with this change.
