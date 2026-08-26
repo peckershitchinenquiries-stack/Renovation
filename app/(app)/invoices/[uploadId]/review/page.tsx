@@ -85,6 +85,28 @@ export default async function ReviewInvoicePage({
     );
   }
 
+  // Arrived by email from a sender nobody has vouched for yet. It is
+  // deliberately unread, not slow — calling that "Still processing" told the
+  // owner to wait for something that was never going to happen on its own.
+  if (upload.status === "needs_triage") {
+    return (
+      <div className="mx-auto max-w-2xl">
+        {crumbs}
+        <EmptyState
+          title="Waiting to be checked"
+          description={`This arrived by email from ${
+            upload.from_address ?? "an unknown sender"
+          }, which is not a known supplier yet, so it has not been read. Check it on the invoices screen and choose whether to trust the sender.`}
+          action={
+            <Link href="/invoices" className="btn-primary">
+              Go to the triage list
+            </Link>
+          }
+        />
+      </div>
+    );
+  }
+
   // Not read yet, still reading, or reading failed — nothing to review.
   if (upload.status !== "extracted") {
     return (

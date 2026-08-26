@@ -350,8 +350,20 @@ displays them.
 
 Private bucket `receipts`. Objects are namespaced by user:
 `{auth.uid()}/…`, enforced by three `storage.objects` policies (read / write /
-delete). `createServiceClient()` (service-role key) exists **only** for MIME
-validation and signed URLs — never expose it to the client.
+delete). `createServiceClient()` (service-role key) is used for MIME validation
+and signed URLs, and — the one other exception — by the three Gmail ingestion
+routes (`/api/gmail/drain`, `/api/gmail/push`, `/api/gmail/watch/renew`), which
+run on a cron with no session and therefore no `auth.uid()` for RLS to compare
+against. Those routes scope every statement with an explicit
+`.eq("user_id", …)` taken from the owning `gmail_accounts` row; see §8.4 for
+the full rule and §13. **Never expose the service client to the browser**, and
+nothing running under a user session may use it.
+
+Note that `/api/gmail/watch/renew` accepts two kinds of caller: the daily cron
+(`CRON_SECRET`, renews every active mailbox) and a signed-in request from the
+"Register / refresh watch" button on `/settings`. A signed-in call is pinned to
+that user's own accounts, because the service client would otherwise renew
+everybody's.
 
 ### 4.6 The transaction core — eight more tables
 
@@ -1399,6 +1411,20 @@ a human rather than extracted automatically or quietly discarded. The five
 existing values are unchanged, and the committed-must-have-a-project constraint
 from 0012 was not touched.
 
+The full status lifecycle, with where each state is visible:
+
+| Status | Means | Where you see it |
+|---|---|---|
+| `needs_triage` | arrived by email from an undeclared sender; deliberately **not** read | the triage queue on `/invoices`, badged *"Waiting to be checked"*. The review screen says the same and links back to it. |
+| `pending` | uploaded or triaged, waiting to be read | the upload queue; a rate-limited row also sits here |
+| `processing` | extraction in flight | the upload queue |
+| `extracted` | there is a proposal, waiting for a human | the review screen |
+| `failed` | extraction gave up; `error` says why | the review screen; retryable |
+| `committed` | accepted and written into `purchases` | the review screen says "Already saved" |
+
+`needs_triage` is a Gmail-only state — a manually uploaded file never enters
+it, because a human chose that file.
+
 #### Known operational constraint — the 7-day expiry
 
 While the Google Cloud consent screen is in **Testing** mode, Google expires a
@@ -1428,9 +1454,28 @@ routes and two libraries, on two cron schedules (`vercel.json`).
 
 | Route | Runs | Guard | Does |
 |---|---|---|---|
-| `POST /api/gmail/watch/renew` | daily, 03:17 | `CRON_SECRET` bearer | re-registers `users.watch` on every `active` mailbox |
+| `GET`/`POST /api/gmail/watch/renew` | daily, 03:17 | `CRON_SECRET` bearer, **or** a signed-in session | re-registers `users.watch` on every `active` mailbox |
 | `POST /api/gmail/push` | on every notification | Google OIDC token + `?token=` secret | writes one `gmail_events` row and returns 200 |
-| `POST /api/gmail/drain` | every 5 minutes | `CRON_SECRET` bearer | history walk → attachments → Storage → `invoice_uploads` |
+| `GET`/`POST /api/gmail/drain` | every 5 minutes | `CRON_SECRET` bearer | history walk → attachments → Storage → `invoice_uploads` |
+
+**Both cron routes export `GET` as well as `POST`, and this matters.** Vercel
+Cron invokes a scheduled path with **GET**; while they exported `POST` only,
+every scheduled invocation answered 405 — nothing drained and no watch was ever
+registered or renewed. Both verbs run the same handler and so go through the
+same `isCronRequest()` check: the guard is on the work, not on the verb. `POST`
+is kept so a drain can be triggered by hand and so the settings button can
+re-register a watch.
+
+**The first watch is registered by the OAuth callback**, not by the daily cron.
+`/api/gmail/callback` calls `watch()` immediately after the credential upsert
+succeeds. Before that it stopped at the upsert, so a freshly connected mailbox
+had no Pub/Sub subscription — and therefore no notifications, and nothing to
+drain — until 03:17 the next morning. The call is deliberately best-effort and
+wrapped in try/catch: the credential is the valuable part and losing it means
+going round the whole consent flow again, whereas a missing watch is one button
+away. On failure the redirect still succeeds, carrying `?watch=failed`, and the
+Gmail section of `/settings` says so in amber next to a **Register / refresh
+watch** button that POSTs to the renew route.
 
 #### Why push and drain are two different things
 
@@ -1520,16 +1565,26 @@ processes what it finds, and rebuilds the baseline from the newest message's
 `historyId`. A null cursor (watch renewal has never run) takes the same path.
 Without this the app does not degrade — it silently stops working.
 
+If that scan finds **zero** messages — a quiet week — there is no message
+`historyId` to rebuild from, so the cursor would stay null and the *next* tick
+would 404 again and repeat the whole seven-day scan, for ever, on every tick.
+The drain therefore asks Gmail where the mailbox is now (`users.getProfile`,
+one call, read-only) and re-baselines from that. Failing to do so is not fatal;
+the only cost is one repeated scan.
+
 #### Which attachments are even considered
 
 Walking the MIME tree, a part is a candidate only if it has a `filename` and an
 `attachmentId`, its type is one of `application/pdf`, `image/jpeg`, `image/png`,
 `image/heic`, it carries **no `Content-ID` header**, and its size is between
-20KB and `GMAIL_MAX_ATTACHMENT_BYTES` (default 15MB).
+**5KB** and `GMAIL_MAX_ATTACHMENT_BYTES` (default 15MB).
 
 The `Content-ID` test is what keeps a supplier's signature logo out of the
-review queue — an inline image has one, a real attachment does not. The 20KB
-floor catches the logos that slip through anyway. The ceiling is real rather
+review queue — an inline image has one, a real attachment does not. The 5KB
+floor catches the logos that slip through anyway; it exists to skip junk, not
+to judge an invoice by its size. It was 20KB, which silently dropped genuine
+single-page text-layer invoices from small suppliers — those are routinely
+6–15KB — so it was lowered. The ceiling is real rather
 than nominal: Gmail returns attachments base64-encoded inside JSON, so a 20MB
 file is ~27MB on the wire and both the encoded and decoded copies are in memory
 at once.
@@ -1562,6 +1617,47 @@ boundary, so `notselco.co.uk` never matches `selco.co.uk`).
 An unknown sender sitting in a triage list costs nothing. Auto-reading it costs
 a Gemini call and, worse, puts a stranger's attachment into the review queue
 looking exactly like an invoice.
+
+#### How `supplier_domains` gets filled — the triage queue
+
+Migration 0013 created `supplier_domains` and seeded it with **no rows**, and
+for a while nothing anywhere wrote to it. The gate above was therefore
+permanently shut: `known` was false for every sender, every attachment landed
+as `needs_triage`, and **no invoice was ever extracted**. There was also no
+screen that listed triaged uploads, so mail arrived, stored correctly, and was
+invisible.
+
+The write path is the triage queue on **`/invoices`**
+(`components/invoices/TriageSection.tsx`). It lists every upload at
+`needs_triage`, newest first — filename, subject, sender, received date, size —
+and renders nothing at all when the queue is empty, so an ordinary visit to
+that screen is unchanged. Each row offers two answers, both of which POST to
+`/api/invoices/[id]/triage`:
+
+| Button | Body | Effect |
+|---|---|---|
+| **Trust this sender & extract** | `{ trustSender: true }` | inserts the sender's **domain** (never the full address) into `supplier_domains`, then extracts. Every future invoice from that domain skips triage. |
+| **Extract once** | `{ trustSender: false }` | extracts this one and records nothing. The next invoice from that sender queues again. |
+
+The table therefore seeds itself from decisions the owner actually makes, one
+sender at a time, rather than from a list of domains guessed up front — and the
+domain recorded is the one invoices genuinely arrive from, sending sub-domains
+and mail relays included.
+
+The route runs under a real session, so RLS scopes it and no read filters by
+`user_id` (R3). It reuses `extractQueued()` from `lib/gmail/ingestExtract.ts`
+rather than repeating the extract flow, so a triaged invoice lands in exactly
+the state an auto-extracted one does and always ends on a terminal status.
+`ux_supplier_domains_user_domain` is an *expression* index on
+`(user_id, public.norm_key(domain))`, which PostgREST's `on_conflict` cannot
+name, so the insert is made idempotent by hand: look first, insert if absent,
+and treat a `23505` from a concurrent insert as success.
+
+The normalisation rules the gate reads with and the triage route writes with
+live in one file, `lib/gmail/domains.ts`, precisely so they cannot drift: if
+triage stored `"Selco.co.uk "` and the gate normalised to `"selco.co.uk"`,
+trusting a sender would appear to work and the very next invoice from them
+would land in triage again.
 
 Extraction runs **three at a time** — Gemini's per-minute quota is the real
 ceiling on ingestion, not Gmail's. A 429 is retried twice, 4s then 12s apart,

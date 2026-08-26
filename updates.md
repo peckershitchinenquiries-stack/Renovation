@@ -3374,3 +3374,134 @@ three new routes appear in the build output (`ƒ /api/gmail/drain`,
 **Not exercised against a live mailbox.** A manual checklist was handed over
 with this change covering how to fake a notification, how to run the drain by
 hand, and what rows to expect afterwards.
+
+---
+
+### 2026-08-26 — Made Gmail invoice ingestion actually testable: cron routes answer GET, the watch registers on connect, and unknown senders can be trusted from a triage list
+
+**What changed (in plain English):**
+The email-invoice feature was complete on paper and could not be used at all.
+Three things stopped it, and all three are fixed.
+
+1. The two scheduled jobs (drain every 5 minutes, watch renewal daily) only
+   answered POST requests. Vercel's scheduler sends GET. So every scheduled run
+   was rejected with "method not allowed": no email was ever collected, and no
+   watch was ever registered. Both now answer GET **and** POST, running exactly
+   the same code and the same password check either way.
+2. Connecting a mailbox saved the Google credential and then stopped. Registering
+   the "watch" — the thing that makes Google tell us when mail arrives — was left
+   to the 03:17 job the following morning, so for up to a day after connecting,
+   nothing happened and nothing said why. The connect flow now registers the
+   watch itself, and if that fails it says so on the settings screen instead of
+   looking fine. There is also a **Register / refresh watch** button there now.
+3. The rule "only read invoices from senders I've said are suppliers" was
+   enforced against a list that was **empty and had nothing that could write to
+   it**. Every sender was therefore unknown, every invoice was filed as "waiting
+   to be checked", and — because no screen listed those — invoices arrived,
+   saved correctly and were completely invisible. There is now a **Waiting to be
+   checked** list at the top of the Add-an-invoice screen, with two buttons per
+   row: *Trust this sender & extract* (records the sender's domain, so every
+   future invoice from them is read automatically) and *Extract once* (reads
+   this one, remembers nothing). That is how the supplier-domain list fills up:
+   from decisions actually made, one sender at a time, not from guesses typed in
+   up front.
+
+Four smaller things came with it:
+
+- The minimum attachment size was 20KB, which silently threw away genuine
+  one-page invoices from small suppliers — those are often 6-15KB. Lowered to
+  5KB. The floor exists to skip logos and signature images, not to judge an
+  invoice by its size, and the comment now says so.
+- When the recovery scan (used after a long gap) found no email at all, it left
+  its place-marker blank, so the *next* run did the same full seven-day scan
+  again, and so on for ever. It now asks Google where the mailbox currently is
+  and marks that instead.
+- The example settings file suggested a web address for `GMAIL_PUSH_AUDIENCE`,
+  but the code compares that value letter-for-letter against a plain word set in
+  Google Cloud. Corrected, with a note that the two must match exactly.
+- The review screen used to tell you an untriaged invoice was "Still processing",
+  which was untrue — it was deliberately not being read. It now says so and
+  links to the triage list.
+
+**Why:**
+An external audit of the Gmail ingestion commit found the structure sound
+(duplicate detection, the safety lock, the cursor ordering, the sender gate, the
+migration) but found three faults that between them meant the feature could not
+be tested, let alone used.
+
+**Where the information came from:**
+User request, quoting an external audit of the Gmail ingestion commit. No
+spreadsheet involved.
+
+**Files used (read, not changed):**
+- `supabase/migrations/0013_gmail_ingest.sql` — to confirm the exact columns and
+  indexes on `supplier_domains` and `invoice_uploads` (nothing was missing)
+- `lib/gmail/cron.ts` — to keep the GET path on the identical password check
+- `lib/gmail/ingestExtract.ts` — reused as-is; the triage button runs the same
+  extraction the automatic path does, rather than a second copy of it
+- `app/api/invoices/[id]/extract/route.ts` — to match its error handling exactly
+- `app/(app)/suppliers/page.tsx` — copied its phone-card / desktop-table pattern
+- `lib/api.ts`, `lib/fetcher.ts`, `components/ui/Toast.tsx`, `.gitignore`
+
+**Files changed:**
+- `app/api/gmail/drain/route.ts` — body moved into one private function,
+  exported as both GET and POST; minimum attachment size 20KB to 5KB with an
+  explanatory comment; re-baselines its place-marker when the recovery scan
+  finds nothing; the sender-domain helpers moved out to a shared file
+- `app/api/gmail/watch/renew/route.ts` — same GET/POST change; also accepts a
+  signed-in caller (the new button), pinned to that person's own mailboxes
+- `app/api/gmail/callback/route.ts` — registers the Gmail watch after saving the
+  credential; failure cannot break the connection, and redirects with
+  `?watch=failed`
+- `app/api/invoices/[id]/triage/route.ts` — **new.** The triage action
+- `lib/gmail/domains.ts` — **new.** The sender-domain rules, now shared by the
+  gate that reads them and the triage route that writes them, so they cannot
+  drift apart
+- `lib/gmail/client.ts` — added a read-only "where is this mailbox now?" call
+- `components/invoices/TriageSection.tsx` — **new.** The triage list
+- `components/invoices/TriageActions.tsx` — **new.** The two buttons
+- `components/settings/RenewWatchButton.tsx` — **new.** The watch button
+- `components/settings/GmailSection.tsx` — shows when a watch expires or is
+  missing, the amber "watch failed" notice, and the new button
+- `app/(app)/settings/page.tsx` — passes the `watch=failed` flag through
+- `app/(app)/invoices/page.tsx` — shows the triage list above the two choices
+- `app/(app)/invoices/[uploadId]/review/page.tsx` — its own message for a
+  triaged invoice instead of "Still processing"
+- `components/ui/Badge.tsx` — a "Waiting to be checked" badge style
+- `.env.local.example` — corrected `GMAIL_PUSH_AUDIENCE`
+- `about.md` — §4.5 rewritten (it still claimed the service-role key was used
+  *only* for file-type checks and signed links, contradicting §8.4 and §13);
+  §8.4 gained the GET/POST rule, the connect-time watch, the triage queue, the
+  re-baselining, the 5KB floor, and a full table of what each upload status
+  means and where it is visible
+
+**Database:**
+**No migration was written and none is needed.** `supplier_domains` already has
+every column this uses (`user_id`, `domain`, and an unused-here `supplier_id`),
+and `invoice_uploads` already stores the sender, the message id, the date and
+the size. Nothing was run in the Supabase SQL editor. Note that
+`0013_gmail_ingest.sql` itself must still have been run by hand for any of this
+to work — until it is, the triage list stays silent and the Gmail section of
+settings says the migration is missing.
+
+**Result / numbers after:**
+No money figure moved; `about.md` §13 is unchanged. The behavioural change is
+the point:
+
+- **Before:** scheduled runs were rejected outright, no watch existed until the
+  morning after connecting, the trusted-sender list was empty with no way to add
+  to it, and so **no invoice could ever be extracted** — and any that arrived
+  were invisible on every screen.
+- **After:** scheduled runs are accepted, a watch is registered the moment a
+  mailbox is connected (with a button to retry), invoices from unknown senders
+  queue visibly for triage, and one click both reads the invoice and trusts the
+  sender so the next one skips triage entirely.
+
+`npm run build` passes: compiled successfully, types and lint clean, exit 0, and
+the new route appears in the output as `/api/invoices/[id]/triage`.
+
+**Not exercised against a live mailbox.** A click-through checklist was handed
+over with this change: connect Gmail and confirm the watch registers, press the
+manual watch button, trigger a drain with GET, watch an invoice from an unknown
+sender appear in the triage list, use *Trust & extract* and land on the review
+screen, then confirm the next invoice from that same sender skips triage.

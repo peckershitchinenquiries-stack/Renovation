@@ -1,9 +1,12 @@
-// The Gmail section of /settings — read-only status plus a Connect link.
+// The Gmail section of /settings — status, a Connect link, and a way to
+// register the watch by hand.
 //
-// A Server Component, like the page that renders it: there is nothing to
-// mutate here from the browser. Connecting is a plain link to a Route Handler
-// that redirects to Google, so it needs no client JavaScript at all.
+// Still a Server Component: connecting is a plain link to a Route Handler that
+// redirects to Google, so it needs no client JavaScript. The one exception is
+// RenewWatchButton, a small client island, because re-registering the watch is
+// a POST and wants a Toast.
 import { createClient } from "@/lib/supabase/server";
+import RenewWatchButton from "./RenewWatchButton";
 import type { GmailAccount } from "@/types";
 
 // Rendered as an age rather than a timestamp because the only question this
@@ -37,9 +40,16 @@ const STATUS_CLASS: Record<GmailAccount["status"], string> = {
 export default async function GmailSection({
   connected,
   errorMessage,
+  watchFailed,
+  watchError,
 }: {
   connected?: string;
   errorMessage?: string;
+  // The callback connected the mailbox but could not register the watch. Said
+  // out loud rather than swallowed: the connection looks fine in every other
+  // respect, and the only symptom is that no email ever arrives.
+  watchFailed?: boolean;
+  watchError?: string;
 }) {
   const supabase = createClient();
 
@@ -71,6 +81,20 @@ export default async function GmailSection({
       {errorMessage && (
         <p className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
           {errorMessage}
+        </p>
+      )}
+      {/* Connected, but no Pub/Sub subscription — so no email would ever
+          arrive. Surfaced next to the button that fixes it. */}
+      {watchFailed && (
+        <p className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+          The mailbox is connected, but the Gmail watch could not be
+          registered, so no email will arrive yet. Press{" "}
+          <strong>Register / refresh watch</strong> below to try again.
+          {watchError && (
+            <span className="mt-1 block text-xs text-amber-700">
+              {watchError}
+            </span>
+          )}
         </p>
       )}
 
@@ -106,6 +130,13 @@ export default async function GmailSection({
                     {" · last email "}
                     {age(a.last_notification_at)}
                   </p>
+                  <p className="text-xs text-gray-500">
+                    {a.watch_expiration
+                      ? `Watch expires ${new Date(
+                          a.watch_expiration
+                        ).toLocaleString("en-GB")}`
+                      : "No watch registered — nothing will arrive until there is one."}
+                  </p>
                   {a.error && (
                     <p className="mt-1 text-xs text-red-600">{a.error}</p>
                   )}
@@ -119,6 +150,18 @@ export default async function GmailSection({
               </li>
             ))}
           </ul>
+        )}
+
+        {/* One button for the section, not one per row: it renews every
+            mailbox this user has connected. */}
+        {!tableMissing && accounts.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
+            <RenewWatchButton />
+            <span className="text-xs text-gray-500">
+              Registers the Gmail watch now. Needed if it failed while
+              connecting, and harmless at any other time.
+            </span>
+          </div>
         )}
       </div>
 

@@ -13,6 +13,11 @@ const STYLES: Record<string, string> = {
   // A row in the Expenses list that is really an invoice, so it is clear why
   // its Edit opens a different form.
   Invoice: "bg-violet-100 text-violet-800",
+  // invoice_uploads.status = 'needs_triage' (migration 0013): arrived by
+  // email from a sender who is not a declared supplier, so it was held rather
+  // than read. Amber, like "In Progress" — it needs a person, but nothing has
+  // gone wrong.
+  "Waiting to be checked": "bg-amber-100 text-amber-800",
 };
 
 export function Badge({ label }: { label: string }) {

@@ -63,6 +63,7 @@ import { json, error } from "@/lib/api";
 import { getAccessToken, GmailAuthError } from "@/lib/gmail/auth";
 import {
   attachmentsGet,
+  getProfile,
   headerValue,
   historyList,
   messagesGet,
@@ -73,6 +74,14 @@ import {
   type GmailMessagePart,
 } from "@/lib/gmail/client";
 import { isCronRequest } from "@/lib/gmail/cron";
+// Shared with the triage route so the gate and the write path normalise
+// domains identically — see lib/gmail/domains.ts.
+import {
+  domainIsDeclared,
+  domainOf,
+  normKey,
+  parseFromAddress,
+} from "@/lib/gmail/domains";
 import { extractQueued } from "@/lib/gmail/ingestExtract";
 import type { GmailAccount, GmailEvent, SupplierDomain } from "@/types";
 
@@ -92,11 +101,14 @@ const MAX_HISTORY_PAGES = 20;
 const MAX_FALLBACK_PAGES = 5;
 const MAX_MESSAGES_PER_RUN = 30;
 
-// Below 20KB it is a logo, a signature image or a tracking pixel, not an
-// invoice. Above the ceiling it will not fit in memory politely: Gmail returns
-// attachments as base64 inside JSON, so a 20MB file is ~27MB before it is
-// decoded, and the decoded copy exists at the same time.
-const MIN_ATTACHMENT_BYTES = 20 * 1024;
+// The floor exists to skip junk — logos, signature images, tracking pixels
+// that arrive as attachments — NOT to judge an invoice by its size. It was
+// 20KB, which silently dropped genuine single-page text-layer invoices from
+// small suppliers; those are routinely 6–15KB. Above the ceiling it will not
+// fit in memory politely: Gmail returns attachments as base64 inside JSON, so
+// a 20MB file is ~27MB before it is decoded, and the decoded copy exists at
+// the same time.
+const MIN_ATTACHMENT_BYTES = 5 * 1024;
 const DEFAULT_MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
 const ATTACHMENT_MIME_TYPES = [
@@ -109,46 +121,6 @@ const ATTACHMENT_MIME_TYPES = [
 // ------------------------------------------------------------------
 // Small helpers
 // ------------------------------------------------------------------
-
-/**
- * The JavaScript twin of public.norm_key(): trim, lower-case, collapse
- * internal whitespace. Same rule as priceKey() and normaliseName() — all four
- * must stay in step or the database and the app disagree about what one
- * domain is (about.md §4).
- */
-function normKey(text: string): string {
-  return text.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-/** `"Selco <sales@selco.co.uk>"` → `"sales@selco.co.uk"`. */
-function parseFromAddress(header: string | null): string | null {
-  if (!header) return null;
-  const angled = header.match(/<([^>]+)>/);
-  const candidate = (angled ? angled[1] : header).trim();
-  return candidate.includes("@") ? candidate : null;
-}
-
-function domainOf(address: string | null): string | null {
-  if (!address) return null;
-  const at = address.lastIndexOf("@");
-  if (at < 0) return null;
-  const domain = normKey(address.slice(at + 1).replace(/[>\s]+$/, ""));
-  return domain || null;
-}
-
-/**
- * Is this sender a declared supplier?
- *
- * Sub-domains count: a supplier whose invoices come from
- * `billing.mail.selco.co.uk` is still Selco, and making the owner declare every
- * sending sub-domain would mean invoices silently landing in triage until they
- * noticed. The match requires a `.` boundary, so `notselco.co.uk` does not
- * match `selco.co.uk` — and a declared `selco.co.uk` can never be satisfied by
- * something merely *containing* it.
- */
-function domainIsDeclared(domain: string, declared: string[]): boolean {
-  return declared.some((d) => domain === d || domain.endsWith(`.${d}`));
-}
 
 /** Same sanitiser the manual upload route uses, so paths look alike. */
 function safeFilename(name: string): string {
@@ -400,6 +372,28 @@ async function drainAccount(
       report.errors.push(detail);
       return report;
     }
+
+    // Re-baseline when the scan found nothing.
+    //
+    // On this path nextCursor can only come from a message's own historyId
+    // (step 4). A quiet week means zero messages, so it would stay null, the
+    // cursor would never be written, and the *next* tick would 404 again and
+    // do another full seven-day scan — for ever, on every tick. Asking Gmail
+    // where the mailbox is now costs one call and ends that.
+    if (messageIds.size === 0) {
+      try {
+        const profile = await getProfile(accessToken);
+        nextCursor = maxHistoryId(nextCursor, profile.historyId ?? null);
+      } catch (profileError) {
+        // Not fatal: the only cost of failing here is that the next tick
+        // repeats this scan, which is exactly today's behaviour.
+        report.errors.push(
+          `Could not re-baseline the cursor: ${
+            profileError instanceof Error ? profileError.message : "unknown"
+          }`
+        );
+      }
+    }
   }
 
   // ---- 3. the declared supplier domains, read once ---------------------
@@ -622,7 +616,16 @@ async function drainAccount(
 // Handler
 // ------------------------------------------------------------------
 
-export async function POST(req: Request) {
+/**
+ * The drain itself. Exported below as **both** GET and POST.
+ *
+ * Vercel Cron invokes a scheduled path with GET, not POST — a POST-only export
+ * answers 405 and nothing ever drains. POST is kept because triggering a drain
+ * by hand (curl, or the settings screen) is genuinely useful. Both verbs run
+ * this same function, and both therefore go through the identical
+ * isCronRequest() check: the guard is on the work, not on the verb.
+ */
+async function handleDrain(req: Request) {
   if (!isCronRequest(req)) return error("Not authorised", 401);
 
   const invoicesLabelId = process.env.GMAIL_INVOICES_LABEL_ID;
@@ -682,3 +685,6 @@ export async function POST(req: Request) {
 
   return json({ accounts: accounts.length, reports });
 }
+
+export const GET = handleDrain;
+export const POST = handleDrain;

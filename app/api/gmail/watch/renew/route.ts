@@ -14,7 +14,7 @@
 // See about.md §8.4.
 
 import { createServiceClient } from "@/lib/supabase/server";
-import { json, error } from "@/lib/api";
+import { json, error, requireUser } from "@/lib/api";
 import { getAccessToken, GmailAuthError } from "@/lib/gmail/auth";
 import { watch } from "@/lib/gmail/client";
 import { isCronRequest } from "@/lib/gmail/cron";
@@ -29,8 +29,32 @@ interface RenewResult {
   detail: string;
 }
 
-export async function POST(req: Request) {
-  if (!isCronRequest(req)) return error("Not authorised", 401);
+/**
+ * Renew every active mailbox's watch. Exported below as **both** GET and POST.
+ *
+ * Vercel Cron invokes a scheduled path with GET; a POST-only export answers
+ * 405, so no watch was ever registered or renewed. POST stays because the
+ * Gmail section of /settings has a "Register / refresh watch" button that
+ * posts here. Both verbs run this function and so share the same
+ * isCronRequest() guard.
+ */
+async function handleRenew(req: Request) {
+  // Two callers, two ways of being authorised, and cron.ts is untouched.
+  //
+  //   * the daily cron, which carries CRON_SECRET and no session, and renews
+  //     every active mailbox;
+  //   * the "Register / refresh watch" button on /settings, which carries a
+  //     session and no secret, and may only renew its own mailboxes.
+  //
+  // A signed-in request is therefore pinned to that user's accounts below —
+  // this route runs service-role, so without that pin the button would renew
+  // other people's watches.
+  let onlyUserId: string | null = null;
+  if (!isCronRequest(req)) {
+    const auth = await requireUser();
+    if ("response" in auth) return auth.response;
+    onlyUserId = auth.user.id;
+  }
 
   const topicName = process.env.GMAIL_PUBSUB_TOPIC;
   if (!topicName)
@@ -46,10 +70,12 @@ export async function POST(req: Request) {
   // auth.uid() to scope by (R3 exception — see the header comment).
   const supabase = createServiceClient();
 
-  const { data: rows, error: readError } = await supabase
-    .from("gmail_accounts")
-    .select("*")
-    .eq("status", "active");
+  let query = supabase.from("gmail_accounts").select("*").eq("status", "active");
+  // Not an R3 violation: the service client has no auth.uid() for RLS to use,
+  // so a session-initiated call has to say whose rows it means.
+  if (onlyUserId) query = query.eq("user_id", onlyUserId);
+
+  const { data: rows, error: readError } = await query;
   if (readError) return error(readError.message, 500);
 
   const accounts = (rows ?? []) as GmailAccount[];
@@ -140,3 +166,6 @@ export async function POST(req: Request) {
 
   return json({ accounts: accounts.length, results });
 }
+
+export const GET = handleRenew;
+export const POST = handleRenew;

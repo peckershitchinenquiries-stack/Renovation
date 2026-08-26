@@ -225,6 +225,23 @@ export async function watch(
   });
 }
 
+/**
+ * The mailbox's current historyId, without changing anything.
+ *
+ * Used to re-baseline a cursor. `watch` returns a historyId too, but calling
+ * it for that side effect would re-register the watch, and history.list
+ * cannot be asked "where are you now?" without a startHistoryId that may
+ * already be pruned. users.getProfile is the only read-only answer.
+ */
+export async function getProfile(
+  accessToken: string
+): Promise<{ emailAddress: string; historyId: string }> {
+  return call<{ emailAddress: string; historyId: string }>(
+    accessToken,
+    "/profile"
+  );
+}
+
 /** Stop a watch. Not used by the cron, but the counterpart belongs here. */
 export async function stopWatch(accessToken: string): Promise<void> {
   await call<unknown>(accessToken, "/stop", { method: "POST" });

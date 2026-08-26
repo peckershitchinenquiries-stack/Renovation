@@ -8,7 +8,14 @@ export const dynamic = "force-dynamic";
 export default function SettingsPage({
   searchParams,
 }: {
-  searchParams?: { gmail_connected?: string; gmail_error?: string };
+  searchParams?: {
+    gmail_connected?: string;
+    gmail_error?: string;
+    // Set by the callback when the credential saved but the watch did not
+    // register — connected, but nothing will arrive until it is retried.
+    watch?: string;
+    watch_error?: string;
+  };
 }) {
   return (
     <div className="mx-auto max-w-3xl">
@@ -20,6 +27,8 @@ export default function SettingsPage({
       <GmailSection
         connected={searchParams?.gmail_connected}
         errorMessage={searchParams?.gmail_error}
+        watchFailed={searchParams?.watch === "failed"}
+        watchError={searchParams?.watch_error}
       />
     </div>
   );

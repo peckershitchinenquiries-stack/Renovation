@@ -1,4 +1,5 @@
 import Link from "next/link";
+import TriageSection from "@/components/invoices/TriageSection";
 
 export const dynamic = "force-dynamic";
 
@@ -10,9 +11,13 @@ export const dynamic = "force-dynamic";
 // know which job an invoice belonged to before you could even photograph it.
 // The project is now asked for on the form itself, at the moment the invoice
 // is saved, so this sits in the nav bar instead.
+// Now also the home of the email triage queue. It renders nothing when there
+// is nothing waiting, so on an ordinary visit this screen is unchanged.
 export default function AddInvoicePage() {
   return (
     <div className="mx-auto max-w-2xl">
+      <TriageSection />
+
       <h1 className="mb-1 text-2xl font-bold text-gray-900">Add an invoice</h1>
       <p className="mb-4 text-sm text-gray-500">
         Upload a photo or PDF and let it read the details, or type everything
