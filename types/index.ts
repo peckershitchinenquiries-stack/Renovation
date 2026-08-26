@@ -559,12 +559,16 @@ export interface ProjectPurchaseList {
 //   extracted  — we have a proposal; waiting for a human
 //   failed     — extraction gave up; `error` says why
 //   committed  — accepted and written into purchases
+//   needs_triage — arrived from Gmail from a sender whose domain is not in
+//                  supplier_domains, so it was held for a human rather than
+//                  extracted automatically (migration 0013)
 export type InvoiceUploadStatus =
   | "pending"
   | "processing"
   | "extracted"
   | "failed"
-  | "committed";
+  | "committed"
+  | "needs_triage";
 
 // 'text'   — the PDF carried a real text layer and we read it
 // 'vision' — there was no text layer, so the page images were read instead
@@ -591,6 +595,95 @@ export interface InvoiceUpload {
   page_count: number | null;
   // The purchase this upload became, once committed.
   invoice_id: string | null;
+  // ---- Gmail provenance (migration 0013) -------------------------------
+  // All null on a manually uploaded file, which is every row that existed
+  // before 0013. `source_channel` says which of the two this is.
+  gmail_message_id: string | null;
+  gmail_attachment_id: string | null;
+  gmail_thread_id: string | null;
+  from_address: string | null;
+  subject: string | null;
+  received_at: string | null;
+  // sha256 of the raw bytes, lower-case hex. This is the dedupe key: the same
+  // invoice forwarded or re-sent arrives with a different message id but the
+  // same bytes.
+  file_hash: string | null;
+  source_channel: InvoiceSourceChannel;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
+// Gmail ingestion (migration 0013)
+// ============================================================
+// Each of these mirrors a CHECK constraint in 0013. Per R4 the database list
+// and the constant here change together, always.
+
+// 'manual' — a human chose the file and uploaded it through the nav bar
+// 'gmail'  — it was pulled off an email attachment
+export const INVOICE_SOURCE_CHANNELS = ["manual", "gmail"] as const;
+export type InvoiceSourceChannel = (typeof INVOICE_SOURCE_CHANNELS)[number];
+
+//   active       — credential works, ingestion may run
+//   needs_reauth — Google returned invalid_grant; the user must reconnect
+//   paused       — the user turned ingestion off deliberately
+export const GMAIL_ACCOUNT_STATUSES = [
+  "active",
+  "needs_reauth",
+  "paused",
+] as const;
+export type GmailAccountStatus = (typeof GMAIL_ACCOUNT_STATUSES)[number];
+
+export const GMAIL_EVENT_STATUSES = [
+  "pending",
+  "processing",
+  "done",
+  "failed",
+] as const;
+export type GmailEventStatus = (typeof GMAIL_EVENT_STATUSES)[number];
+
+// One connected mailbox. Only the refresh token is stored — access tokens are
+// minted per call in lib/gmail/auth.ts and never persisted.
+export interface GmailAccount {
+  id: string;
+  user_id: string;
+  email_address: string;
+  refresh_token: string;
+  // Written by phase 2; null after the connect flow alone.
+  watch_label_id: string | null;
+  // Gmail historyIds exceed int4, so they are text everywhere.
+  last_history_id: string | null;
+  watch_expiration: string | null;
+  last_notification_at: string | null;
+  last_drain_at: string | null;
+  status: GmailAccountStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// The durable inbox for Pub/Sub push notifications. Delivery is at-least-once,
+// so `pubsub_message_id` is unique per user and a redelivery is dropped.
+export interface GmailEvent {
+  id: string;
+  user_id: string;
+  account_id: string | null;
+  pubsub_message_id: string;
+  history_id: string;
+  status: GmailEventStatus;
+  attempts: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// A sender domain the user has declared as a supplier. Anything arriving from
+// a domain that is not listed is held as 'needs_triage' rather than extracted.
+export interface SupplierDomain {
+  id: string;
+  user_id: string;
+  supplier_id: string | null;
+  domain: string;
   created_at: string;
   updated_at: string;
 }

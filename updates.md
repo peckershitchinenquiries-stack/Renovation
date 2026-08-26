@@ -3119,3 +3119,258 @@ two new routes appear in the build output (`/projects/[id]/labour/new` and
 the app requires a sign-in and I will not type the account password, so
 everything past the login screen is verified by the build and by reading the
 code. A manual checklist to run through was handed over with this change.
+
+---
+
+### 2026-08-25 — Gmail ingestion of supplier invoices, phase 1: schema and connecting a mailbox
+
+**What changed (in plain English):**
+The Settings screen now has a **Gmail** section with a "Connect Gmail" button.
+Clicking it takes you to Google's normal sign-in-and-permission screen and, when
+you agree, RenovaTrack remembers that mailbox so that a later phase can read
+supplier invoices out of it. Alongside that, the database gained three new
+tables and the invoice table gained some columns recording where an emailed
+invoice came from.
+
+**Nothing reads any email yet.** This phase stores the permission and the
+plumbing only. There is no automatic checking of the mailbox, no downloading of
+attachments, and no invoice appears anywhere as a result of connecting. That is
+phase 2.
+
+**Why:**
+Invoices arrive by email far more often than they arrive as a photograph. Every
+one of them currently has to be saved out of Gmail and re-uploaded by hand
+through the nav-bar upload panel. This is the first of three steps towards
+having them arrive on their own.
+
+**Where the information came from:**
+User request (phase 1 of 3, scoped by the user). No spreadsheet involved.
+
+**Files used (read, not changed):**
+- `supabase/migrations/0008_transaction_core.sql` — for the exact `norm_key()`
+  function and the `suppliers` table, both reused rather than reinvented
+- `supabase/migrations/0010_invoice_upload.sql` — for the exact existing column
+  list and status CHECK on `invoice_uploads`, copied rather than remembered
+- `supabase/migrations/0012_upload_before_project.sql` — to confirm the
+  committed-must-have-a-project rule, which was deliberately left alone
+- `lib/api.ts`, `lib/supabase/server.ts`, `middleware.ts`
+- `components/settings/TradeLookups.tsx` — to match the existing look of the
+  Settings page
+
+**Files changed:**
+- `supabase/migrations/0013_gmail_ingest.sql` — **new.** Three tables plus the
+  new invoice columns (see Database below)
+- `types/index.ts` — new `GmailAccount`, `GmailEvent`, `SupplierDomain` types;
+  `InvoiceUpload` extended with the eight new columns; `needs_triage` added to
+  `InvoiceUploadStatus`
+- `lib/gmail/auth.ts` — **new.** All the Google sign-in plumbing: building the
+  permission URL, swapping the one-time code for a lasting credential, and
+  minting short-lived access tokens on demand
+- `app/api/gmail/connect/route.ts` — **new.** Sends you to Google
+- `app/api/gmail/callback/route.ts` — **new.** Receives you back and saves the
+  credential
+- `components/settings/GmailSection.tsx` — **new.** The Gmail block on Settings
+- `app/(app)/settings/page.tsx` — renders that block below the trades table and
+  reads the success / failure message from the address bar
+- `.env.local.example` — the three new `GOOGLE_OAUTH_*` settings, with a note
+  that none of them may ever be prefixed `NEXT_PUBLIC_`
+
+**Database:**
+Migration `supabase/migrations/0013_gmail_ingest.sql` — **WRITTEN BUT NOT RUN.**
+It has not been pasted into the Supabase SQL editor. Until it is, the Gmail
+section on Settings says so in as many words rather than breaking the page, and
+connecting will fail at the point of saving.
+
+> **Superseded 2026-08-25: `0013` has since been run.** The paragraph above is
+> left as it was written, because this file is the history. The migration was
+> pasted into the Supabase SQL editor and run by hand on 2026-08-25, and its
+> report confirmed the three new tables exist and that all 49 existing uploads
+> came back as `source_channel = 'manual'` — that is, nothing already in the
+> table changed meaning. See the phase 2 entry at the bottom of this file.
+
+What it did when it was run:
+
+- **`gmail_accounts`** — one row per connected mailbox. Holds the address, the
+  long-lived credential, and a status of `active` / `needs_reauth` / `paused`.
+  Only the *refresh* credential is stored; the short-lived access tokens that do
+  the actual work are made fresh each time and never written down.
+- **`gmail_events`** — a durable in-tray for Google's "you have new mail"
+  notifications, used by phase 2. Google can send the same notification twice,
+  so each one is recorded once per user and a repeat is dropped.
+- **`supplier_domains`** — the declared list of sender domains that count as
+  suppliers. Anything arriving from a domain that is not on the list will be
+  held for a human rather than read automatically.
+- **`invoice_uploads`** gains `gmail_message_id`, `gmail_attachment_id`,
+  `gmail_thread_id`, `from_address`, `subject`, `received_at`, `file_hash` and
+  `source_channel`. Every one is optional, and `source_channel` defaults to
+  `manual`, so **all existing uploads keep exactly the meaning they have
+  today**. The de-duplication key is the *file's* fingerprint, not the email's
+  id, because the same invoice routinely arrives twice — forwarded on, or
+  re-sent after a query — and those copies carry different email ids.
+- **`invoice_uploads.status`** gains one value, `needs_triage`. The five
+  existing values are unchanged. The committed-must-have-a-project rule from
+  0012 was not touched.
+
+**A known operational constraint, stated rather than buried:**
+While the Google permission screen is in **Testing** mode, Google expires the
+stored credential after **seven days, every time**. The connection will
+therefore need clicking through again roughly weekly until the app is published
+in the Google Cloud console. This is Google's rule, not something the code can
+work around. When it happens the mailbox shows as "Needs reconnecting" on
+Settings and a Reconnect link is right there.
+
+**Result / numbers after:**
+No figure moved. No row was written, read or changed by this work — the
+migration has not been run, and nothing in it touches existing data. `about.md`
+§13 is unchanged.
+
+`npm run build` passes clean: compiled successfully, types and lint OK, and the
+two new routes appear in the build output (`ƒ /api/gmail/connect` and
+`ƒ /api/gmail/callback`).
+
+**Not clicked through in a live browser.** The migration has not been run, so
+there is nothing to click through yet; the app also requires a sign-in and I do
+not type the account password. A manual checklist was handed over with this
+change.
+
+---
+
+### 2026-08-25 — Gmail ingestion phase 2: the mailbox is now actually read
+
+**What changed (in plain English):**
+Phase 1 stored the permission to read the mailbox. This phase does the reading.
+Google now tells the app the moment something lands in the invoices label; the
+app writes that notification down and acknowledges it within a second, and a
+separate job every five minutes goes and fetches the emails, pulls the invoice
+attachments out of them, files them in Storage and creates an upload row for
+each one — exactly the kind of row that appears today when a file is uploaded
+by hand from the nav bar.
+
+Attachments from a sender whose domain is on the declared supplier list are
+read automatically and land ready for review. Everything else is held as
+"needs triage" and is not read at all. Nothing is committed to a purchase
+without a human looking at it first, exactly as before.
+
+**Why:**
+Invoices arrive by email far more often than they arrive as a photograph, and
+every one of them had to be saved out of Gmail and re-uploaded by hand.
+
+Three decisions in here are worth understanding, because they are the reason
+the code is shaped the way it is:
+
+1. **Receiving and processing are two separate jobs.** Google's notification
+   contains only "this mailbox changed, at this point in its history" — the
+   emails themselves still have to be fetched. Google gives the receiving end
+   ten seconds to say "got it", and fetching several emails and downloading
+   their attachments does not fit in ten seconds. An unacknowledged
+   notification is re-sent, over and over, for up to seven days. So the
+   receiving end writes the notification into a table and says "got it"
+   immediately; the fetching happens on a timer afterwards. The written-down
+   notification doubles as a record of what arrived and what happened to it.
+2. **Duplicates are spotted by the file, not by the email.** The same invoice
+   PDF routinely arrives twice — forwarded on by somebody, or re-sent by the
+   supplier after a query. Those are two different emails carrying identical
+   files. The app fingerprints the file itself, so the second copy is
+   recognised and skipped.
+3. **Unknown senders are held, not read.** Reading an attachment costs money
+   (it goes to Gemini) and, worse, puts a stranger's file into the review queue
+   looking exactly like an invoice. An unknown sender sitting in a triage list
+   costs nothing.
+
+**Where the information came from:**
+User request (phase 2 specification). No spreadsheet was involved.
+
+**Files used (read, not changed):**
+- `app/api/invoices/upload-url/route.ts` — to copy the storage bucket
+  (`invoices`), the exact file path convention, and the exact set of columns a
+  new upload row is created with, so an emailed invoice is filed identically to
+  a hand-uploaded one
+- `app/api/invoices/[id]/extract/route.ts` — the reading step, left untouched
+- `app/(app)/invoices/[uploadId]/review/page.tsx` — confirmed it re-works out
+  the supplier and item matches itself, so the new code does not need to
+- `lib/invoice/extract.ts`, `lib/invoice/resolve.ts`, `lib/api.ts`,
+  `lib/supabase/server.ts`, `supabase/migrations/0013_gmail_ingest.sql`,
+  `supabase/migrations/0008_transaction_core.sql`, `types/index.ts`
+
+**Files changed:**
+- `lib/gmail/client.ts` — **new.** Plain wrappers around the six Gmail
+  operations this needs (register a watch, list what changed, fetch a message,
+  search messages, download an attachment, add a label). No decisions are made
+  here. It does sort failures into three kinds, which matters a great deal
+  further up: "the credential is dead", "the history is too old to resume
+  from", and "try again later"
+- `lib/gmail/oidc.ts` — **new.** Proves that a notification really came from
+  Google, by checking the signature on it against Google's published keys and
+  then checking it was issued for this app and by this sender. Written with
+  Node's own cryptography rather than adding a Google library, matching how the
+  sign-in plumbing in phase 1 was written
+- `lib/gmail/cron.ts` — **new.** The shared password check on the two timed
+  jobs. If the password is not configured, both jobs refuse everything rather
+  than accepting everything
+- `lib/gmail/ingestExtract.ts` — **new.** Runs the invoice reading for an
+  emailed attachment, three at a time, backing off when Gemini says "too many
+  requests". See the note below about why this could not simply call the
+  existing reading step over HTTP
+- `app/api/gmail/watch/renew/route.ts` — **new.** Daily. Re-registers the
+  watch on the mailbox, which Google expires after seven days no matter what
+- `app/api/gmail/push/route.ts` — **new.** The address Google sends
+  notifications to. Verifies the sender, writes one row, answers 200
+- `app/api/gmail/drain/route.ts` — **new.** Every five minutes. The actual
+  work: what changed → which emails → which attachments → Storage → upload rows
+- `middleware.ts` — the notification address is now skipped, because refreshing
+  a login session for a caller that has no login is wasted effort on the one
+  path with a ten-second deadline
+- `vercel.json` — **new.** The two timers (drain every 5 minutes, watch renewal
+  daily at 03:17). Nothing existed in this file to preserve
+- `.env.local.example` — eight new settings, each with a comment saying what it
+  is and where to get it. All server-only
+- `about.md` — new §8.4 covering all of the above, and §9 updated to record the
+  one place where the usual security rule does not apply (below)
+- `updates.md` — this entry
+
+**Database:**
+**No migration.** Migration `0013` covered the whole schema for this feature and
+has already been run. Nothing in this change alters a table, a column or a
+constraint, and no existing row was read or written by the work itself.
+
+**One rule is deliberately broken, in exactly four files.**
+Rule 3 of `about.md` §2 says no query may filter by `user_id`, because the
+database does that filtering itself based on who is logged in. The two timed
+jobs and the notification endpoint have **nobody logged in** — they are called
+by Google and by Vercel's scheduler, not by a person — so that automatic
+filtering has nothing to work with and would return nothing at all. Those three
+routes and `lib/gmail/ingestExtract.ts` therefore use the master key that
+bypasses it, and set the owner explicitly on every row they write, taken from
+the connected-mailbox record. There is a comment at every such line saying so.
+Nothing that runs while somebody is logged in was changed.
+
+**Two things in the specification that could not be done as written, and what
+was done instead:**
+
+1. *"Have the drain call the existing extract route over HTTP."* It cannot: that
+   route starts by asking "who is logged in?", reading the answer from browser
+   cookies, and a scheduled job has no cookies. Every such call would be
+   refused. Instead the drain runs the same reading work in-process, using the
+   same code and writing the same four columns, so the resulting row is
+   indistinguishable from a hand-uploaded one and the review and commit screens
+   are unchanged and unaware.
+2. *"Take a Postgres advisory lock so two drains cannot overlap."* That kind of
+   lock is not reachable through the connection library this app uses, and
+   would misbehave over pooled connections even if it were. Instead each
+   notification is claimed with a single atomic update that only succeeds for
+   one worker. If two drains ever did overlap, the duplicate-detection above
+   makes the overlap harmless rather than producing a second copy of an invoice.
+
+**Result / numbers after:**
+No figure moved. Nothing has run against the live mailbox yet — the Google
+Cloud Pub/Sub topic and subscription, the two Gmail labels and the eight
+settings above all have to be created and filled in first, and none of that is
+something code can do. `about.md` §13 is unchanged.
+
+`npm run build` passes clean: compiled successfully, types and lint OK, and the
+three new routes appear in the build output (`ƒ /api/gmail/drain`,
+`ƒ /api/gmail/push`, `ƒ /api/gmail/watch/renew`).
+
+**Not exercised against a live mailbox.** A manual checklist was handed over
+with this change covering how to fake a notification, how to run the drain by
+hand, and what rows to expect afterwards.

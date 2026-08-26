@@ -1310,6 +1310,307 @@ All handlers call `requireUser()` first.
 | `/api/invoices/[id]/commit` | POST | writes the reviewed invoice via `createPurchase`, into the project the review screen's `project_id` names (falling back to the upload's own); writes that project back onto the upload row |
 | `/api/lookups/trades`, `/[id]` | GET/POST/PATCH/DELETE | trade lookups |
 | `/api/auth/signout` | POST | sign out |
+| `/api/gmail/connect` | GET | starts Google consent; sets the state nonce cookie and redirects (§8.3) |
+| `/api/gmail/callback` | GET | verifies the nonce, swaps the code for a refresh token, upserts `gmail_accounts`, redirects to `/settings` (§8.3) |
+
+---
+
+### 8.3 The Gmail ingestion channel (phase 1 of 3, migration 0013)
+
+Invoices arrive by email far more often than they arrive as a photograph, and
+every one of them currently has to be saved out of Gmail and re-uploaded by
+hand through the nav-bar panel (§8.2). This is the first of three steps towards
+having them arrive on their own.
+
+**What exists today is storage and consent only.** Nothing reads a mailbox.
+There is no Pub/Sub subscription, no `watch` registration and no message
+fetching — those are phase 2. Connecting an account changes no figure and
+creates no upload.
+
+#### The two routes
+
+`/api/gmail/connect` mints a random `state`, puts it in an httpOnly `lax`
+cookie, and redirects to Google's consent screen. `/api/gmail/callback` checks
+the returned `state` against that cookie — a callback whose nonce does not match
+is refused without the code ever being exchanged, which is what stops a crafted
+link attaching somebody else's mailbox to this account — then exchanges the code
+and upserts `gmail_accounts` on `(user_id, email_address)`. Both use
+`requireUser()` and the ordinary server client. **There is no service-role usage
+in this channel.**
+
+`last_history_id` and `watch_expiration` are deliberately left null by the
+callback; phase 2 owns them.
+
+#### `lib/gmail/auth.ts`
+
+Dependency-free — two POSTs and a GET against Google's documented endpoints, no
+`googleapis` package. Env vars are `GOOGLE_OAUTH_CLIENT_ID`,
+`GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, all server-only and
+**never** `NEXT_PUBLIC_` — the secret would ship to the browser.
+
+The rule that shapes the file: **access tokens are never stored.** Only the
+refresh token is persisted. Access tokens are minted per call by
+`getAccessToken()` and cached in-process for their lifetime minus 60s, so a
+restart simply mints another and there is no stale-token path to reason about.
+
+The consent URL uses `access_type=offline` **and** `prompt=consent`. Without
+forced consent Google returns a refresh token on the *first* authorisation only,
+and a reconnect then silently yields a credential that cannot be refreshed.
+Scopes are `gmail.readonly` (read the message and its attachments) and
+`gmail.modify` (phase 2 labels a message as processed so a re-drain does not
+re-read it), in the exported `GMAIL_SCOPES` const.
+
+`GmailAuthError` is thrown *only* on Google's `invalid_grant`. That distinction
+matters: `invalid_grant` means the credential is dead and the account should go
+to `needs_reauth`; anything else — a 5xx, a rate limit, a network blip — is
+transient and must be retried, not reauthed.
+
+#### The three new tables
+
+| Table | What it holds |
+|---|---|
+| `gmail_accounts` | one row per connected mailbox: address, refresh token, `status` (`active` / `needs_reauth` / `paused`), plus the phase-2 watch fields |
+| `gmail_events` | the durable in-tray for push notifications. The push endpoint writes a row and acks within seconds; a separate drain works them off. Unique on `(user_id, pubsub_message_id)` because Pub/Sub delivery is at-least-once and the same notification *will* arrive twice |
+| `supplier_domains` | the declared list of sender domains that count as suppliers, normalised with the existing `public.norm_key` so `"Selco.co.uk"` and `" selco.co.uk "` are one domain. Anything from an undeclared domain is held rather than read automatically |
+
+`last_history_id` and `gmail_events.history_id` are **text, not int**: Gmail
+historyIds are 64-bit and already exceed `int4` on a busy mailbox.
+
+#### New columns on `invoice_uploads`
+
+`gmail_message_id`, `gmail_attachment_id`, `gmail_thread_id`, `from_address`,
+`subject`, `received_at`, `file_hash`, and `source_channel` (`manual` | `gmail`,
+defaulting to `manual`). Every one is nullable or defaulted, so **all rows that
+existed before 0013 keep exactly the meaning they had** — a file a human chose
+and uploaded.
+
+**The dedupe key is `(user_id, file_hash)`, a partial unique index where
+`file_hash is not null`.** It is the sha256 of the *bytes*, not the message id,
+deliberately: the same invoice PDF routinely arrives twice — forwarded from a
+colleague, or re-sent by the supplier after a query — and both copies carry
+different message ids. Hashing the file is the only key that survives that. A
+second partial unique index on `(user_id, gmail_message_id, gmail_attachment_id)`
+is the cheaper, earlier guard: if we have already pulled this exact attachment
+off this exact message, do not download it again to find out.
+
+`invoice_uploads.status` gained one value, **`needs_triage`** — arrived from
+Gmail from a sender whose domain is not in `supplier_domains`, so it is held for
+a human rather than extracted automatically or quietly discarded. The five
+existing values are unchanged, and the committed-must-have-a-project constraint
+from 0012 was not touched.
+
+#### Known operational constraint — the 7-day expiry
+
+While the Google Cloud consent screen is in **Testing** mode, Google expires a
+test user's refresh token after **seven days, every time**. The connection will
+therefore need re-establishing roughly weekly until the app is published in the
+Google Cloud console. This is Google's rule and no amount of code works around
+it. When it happens the credential fails with `invalid_grant`, the account is
+set to `needs_reauth`, and the Gmail section of `/settings` shows "Needs
+reconnecting" with a Reconnect link.
+
+#### The Settings UI
+
+`components/settings/GmailSection.tsx` is a Server Component under the trades
+table on `/settings`. No connected account → a "Connect Gmail" button. One or
+more → the address, the status, and how long ago the last notification arrived,
+rendered as an age because the only question it answers is "is this still
+alive?". Because 0013 is run by hand, the component treats a query error as
+"the table does not exist yet" and says so plainly rather than crashing the
+page.
+
+---
+
+### 8.4 Gmail ingestion, phase 2 — watch, push and drain
+
+Phase 1 stored a credential. Phase 2 is what actually reads the mailbox. Three
+routes and two libraries, on two cron schedules (`vercel.json`).
+
+| Route | Runs | Guard | Does |
+|---|---|---|---|
+| `POST /api/gmail/watch/renew` | daily, 03:17 | `CRON_SECRET` bearer | re-registers `users.watch` on every `active` mailbox |
+| `POST /api/gmail/push` | on every notification | Google OIDC token + `?token=` secret | writes one `gmail_events` row and returns 200 |
+| `POST /api/gmail/drain` | every 5 minutes | `CRON_SECRET` bearer | history walk → attachments → Storage → `invoice_uploads` |
+
+#### Why push and drain are two different things
+
+A Gmail notification carries **only** `{ emailAddress, historyId }`. Every
+actual message, and every attachment, has to be fetched afterwards. Pub/Sub
+gives a push endpoint **ten seconds** to acknowledge, and a history walk plus
+two attachment downloads will not fit in ten seconds.
+
+An un-acknowledged notification is redelivered. Under any load that becomes a
+redelivery storm aimed at an endpoint that is already too slow — and Pub/Sub
+keeps retrying for up to seven days before dead-lettering. So the push endpoint
+does exactly two things: prove the caller is Google, and write the notification
+down. `/api/gmail/drain` does the work later, at its own pace. The
+`gmail_events` row is also the audit trail: what arrived, when, how many times
+it has been attempted, and what went wrong if anything did.
+
+The status code the push endpoint returns is part of the contract:
+
+- **200** — durably recorded, *or* impossible to ever process (a mailbox nobody
+  has connected, a malformed body). Both are acked; re-sending would not change
+  the outcome.
+- **401** — the caller is not Google. Nothing is recorded, and the response says
+  nothing about which check failed.
+- **5xx** — only for a genuinely transient failure (the database is down) that
+  we actually want retried.
+
+`/api/gmail/push` is **excluded from the middleware matcher**. It is a
+machine-to-machine call with no cookies, so refreshing a Supabase session for it
+is pure work on the one hot path that has a deadline.
+
+#### Verifying the caller
+
+`/api/gmail/push` is the only URL in this app reachable without a session, so it
+is verified twice. `lib/gmail/oidc.ts` checks the `Authorization: Bearer` OIDC
+token's **RS256 signature** against Google's published certificates, then its
+`iss`, `exp`/`iat`, `aud` (must equal `GMAIL_PUSH_AUDIENCE`) and `email` (must
+equal `GMAIL_PUSH_SERVICE_ACCOUNT`). The audience check is what stops a valid
+Google-signed token minted for somebody else's service being replayed here.
+Separately, the URL must carry `?token=` matching `GMAIL_PUSH_SECRET`.
+
+Written against `node:crypto` rather than `google-auth-library`, for the same
+reason `lib/gmail/auth.ts` is dependency-free: this is one JWKS fetch and one
+RSA verification, and it is the security boundary — worth being able to read.
+
+#### The R3 exception — the only place RLS is not doing the scoping
+
+Rule R3 (§2) is that **no query filters by `user_id`**, because `auth.uid()`
+does it. A cron request has no session at all, so `auth.uid()` is null and every
+policy matches nothing. The three routes above therefore use
+`createServiceClient()`, which bypasses RLS entirely, and:
+
+- every read is keyed on the account (`.eq("account_id", …)`) or on an explicit
+  `.eq("user_id", …)` taken from the `gmail_accounts` row;
+- every write sets `user_id` explicitly from that same row;
+- there is a comment at each such call site saying so.
+
+Service-role usage stays confined to `app/api/gmail/{push,drain,watch/renew}`
+and `lib/gmail/ingestExtract.ts`. **Nothing that runs under a user session gains
+a `.eq("user_id", …)`** — R3 is unchanged everywhere else in the app.
+
+#### The claim is a compare-and-swap, not an advisory lock
+
+Two drains reading one `last_history_id` would do the same work twice. The
+usual fix is `pg_try_advisory_lock`, which is not available here: it lives in
+`pg_catalog`, which PostgREST does not expose, and a *session*-level lock taken
+over a pooled connection would be released on whichever connection happened to
+serve the next request. So the mutex is the event claim itself —
+
+```sql
+update gmail_events set status='processing' where id = ? and status='pending'
+```
+
+— which returns a row to exactly one worker. The residual risk (two workers
+walking history from the same cursor) is absorbed by 0013's two unique indexes:
+a duplicate insert fails harmlessly rather than producing a second invoice.
+
+#### The historyId 404 — build it, because it will fire
+
+Gmail prunes history after roughly a week, sooner on a busy mailbox. Any gap
+longer than that — a holiday, a broken watch, an account left paused — leaves
+`last_history_id` unusable, and `history.list` answers **404**.
+
+That is not an error to log; it is a state to recover from. `historyList()`
+raises it as its own class, `GmailHistoryGone`, and the drain falls back to
+`messages.list` with the invoices label and `has:attachment newer_than:7d`,
+processes what it finds, and rebuilds the baseline from the newest message's
+`historyId`. A null cursor (watch renewal has never run) takes the same path.
+Without this the app does not degrade — it silently stops working.
+
+#### Which attachments are even considered
+
+Walking the MIME tree, a part is a candidate only if it has a `filename` and an
+`attachmentId`, its type is one of `application/pdf`, `image/jpeg`, `image/png`,
+`image/heic`, it carries **no `Content-ID` header**, and its size is between
+20KB and `GMAIL_MAX_ATTACHMENT_BYTES` (default 15MB).
+
+The `Content-ID` test is what keeps a supplier's signature logo out of the
+review queue — an inline image has one, a real attachment does not. The 20KB
+floor catches the logos that slip through anyway. The ceiling is real rather
+than nominal: Gmail returns attachments base64-encoded inside JSON, so a 20MB
+file is ~27MB on the wire and both the encoded and decoded copies are in memory
+at once.
+
+#### De-duplication is on the file's bytes
+
+Two checks, cheap one first:
+
+1. `(user_id, gmail_message_id, gmail_attachment_id)` — have we already pulled
+   this attachment off this message? Skips the download entirely.
+2. `(user_id, file_hash)` — the sha256 of the bytes.
+
+The second is the one that matters. **The same invoice PDF routinely arrives
+twice**: forwarded on by somebody, or re-sent by the supplier after a query.
+Each copy is a different email with a different message id, and only the bytes
+are the same. Keying on the message would file the same invoice twice, and
+nothing on screen would say so.
+
+#### Extraction is gated on the sender's domain
+
+The sender's domain, normalised with the same rule as `public.norm_key`, is
+compared against `supplier_domains` (sub-domains count; the match requires a `.`
+boundary, so `notselco.co.uk` never matches `selco.co.uk`).
+
+| Sender | `invoice_uploads.status` | Extraction |
+|---|---|---|
+| declared supplier domain | `pending` | runs, then `extracted` or `failed` |
+| anything else | `needs_triage` | **does not run** |
+
+An unknown sender sitting in a triage list costs nothing. Auto-reading it costs
+a Gemini call and, worse, puts a stranger's attachment into the review queue
+looking exactly like an invoice.
+
+Extraction runs **three at a time** — Gemini's per-minute quota is the real
+ceiling on ingestion, not Gmail's. A 429 is retried twice, 4s then 12s apart,
+and if it still will not go through the row is left at **`pending`** (never
+`failed`) with an error beginning *"Rate limited by the extractor"*. That
+distinction is the whole point: "we ran out of quota, this will be picked up
+again" and "this document cannot be read" look identical on screen otherwise,
+and only one of them wants a human.
+
+#### `lib/gmail/ingestExtract.ts` — why the drain does not POST to the extract route
+
+It cannot. `/api/invoices/[id]/extract` begins with `requireUser()`, which reads
+the Supabase session out of **cookies**; a cron request has none and no way to
+mint one, so every such POST would be a 401.
+
+So the drain runs the same work in-process: the same `extractInvoice()`, the
+same re-check against `InvoiceExtractionSchema`, the same four columns written
+(`status` / `extraction_raw` / `extraction_method` / `page_count`), and the same
+rule that a row is never left sitting at `processing`. The row lands in exactly
+the state a hand-uploaded file's row lands in, so **the review screen and the
+commit route cannot tell the two apart** — which is the point. A Gmail-sourced
+invoice goes through the identical extract → review → commit path, and a human
+still checks every one against the original before anything is committed.
+
+`resolveSupplier()`/`resolveItems()` are deliberately not called: they are
+read-only, and the review page re-resolves both itself rather than trusting what
+the extract route saw.
+
+#### The cursor moves last
+
+`last_history_id` and `last_drain_at` advance only after **every** row in the
+batch is durably written. If any message in the batch failed, the events are put
+back to `pending` with the error recorded and the cursor is left exactly where
+it was — the next tick re-walks the same window, which the de-duplication makes
+harmless. A cursor moved early loses those messages permanently. Events that
+have been attempted five times are marked `failed` and stop being claimed.
+
+Handled messages are stamped with `GMAIL_PROCESSED_LABEL_ID` so a human looking
+at the mailbox can see what has been read. Adding that label does not touch the
+invoices label, so it cannot trigger a fresh notification.
+
+#### Environment
+
+`GMAIL_PUBSUB_TOPIC`, `GMAIL_PUSH_AUDIENCE`, `GMAIL_PUSH_SERVICE_ACCOUNT`,
+`GMAIL_PUSH_SECRET`, `CRON_SECRET`, `GMAIL_INVOICES_LABEL_ID`,
+`GMAIL_PROCESSED_LABEL_ID`, `GMAIL_MAX_ATTACHMENT_BYTES` — all server-only, all
+documented in `.env.local.example`. `CRON_SECRET` **fails closed**: unset means
+the drain and renew routes refuse every request, rather than accepting all of
+them.
 
 ---
 
@@ -1319,11 +1620,15 @@ All handlers call `requireUser()` first.
   Supabase session cookie.
 - Route Handlers use the **server** client (`lib/supabase/server.ts`), never the
   browser client.
-- `createServiceClient()` (service-role key) is for storage MIME validation and
-  signed URLs **only**.
+- `createServiceClient()` (service-role key) is for storage MIME validation,
+  signed URLs, **and the three cron/push Gmail routes** — see §8.4. Nowhere
+  else.
 - Every table has one policy: `for all using (auth.uid() = user_id) with check
   (auth.uid() = user_id)`.
-- **No query anywhere filters by `user_id`.** Scoping is entirely implicit.
+- **No query under a user session filters by `user_id`.** Scoping is entirely
+  implicit. The one documented exception is the Gmail push and drain path,
+  which has no session for `auth.uid()` to return and therefore sets `user_id`
+  explicitly on every write — §8.4.
 
 **An empty result is ambiguous** — it means either "no rows" or "rows owned by
 a different user". This exact ambiguity caused a real incident. See §11.
@@ -1489,6 +1794,7 @@ place. The same deletion would cause the same loss again.
 | `0010_invoice_upload.sql` | `invoice_uploads`, supplier VAT number / address, pg_trgm + the two `match_*` RPCs. Additive and re-runnable | ⚠️ run status not recorded here — the upload and review screens only work once it has been run; see `updates.md` |
 | `0011_vat_reduced_rate.sql` | widens the `vat_rate` CHECK on **both** `expense_entries` and `purchase_lines` from `(0,20)` to `(0,5,20)`, so a reduced-rate invoice can be stored as the rate it prints (§8.2). Drops whatever CHECK on those tables mentions `vat_rate`, whatever it is named, and re-adds a named one — re-runnable. Cannot invalidate a row: every existing row holds 0 or 20, so no §13 figure moves | ⬜ **not yet run** |
 | `0012_upload_before_project.sql` | makes `invoice_uploads.project_id` **nullable**, so an invoice can be uploaded before anyone has said which job it belongs to (§8.2), plus a CHECK that a `committed` upload must still have one. Re-runnable, only widens what is allowed, and raises rather than commits if the column is still NOT NULL afterwards. No §13 figure moves | ⬜ **not yet run** |
+| `0013_gmail_ingest.sql` | Gmail ingestion phase 1 (§8.3): `gmail_accounts`, `gmail_events`, `supplier_domains`, eight new nullable/defaulted columns on `invoice_uploads` with the `file_hash` dedupe index, and one widened CHECK adding `needs_triage` to `invoice_uploads.status`. Reuses `norm_key()` from 0008. Additive and re-runnable; every existing row stays valid and no §13 figure moves. Raises rather than commits if the widened CHECK did not take or if 0012 was never run | ⬜ **not yet run** |
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.
