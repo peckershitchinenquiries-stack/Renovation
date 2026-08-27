@@ -1416,11 +1416,16 @@ The full status lifecycle, with where each state is visible:
 | Status | Means | Where you see it |
 |---|---|---|
 | `needs_triage` | arrived by email from an undeclared sender; deliberately **not** read | the triage queue on `/invoices`, badged *"Waiting to be checked"*. The review screen says the same and links back to it. |
-| `pending` | uploaded or triaged, waiting to be read | the upload queue; a rate-limited row also sits here |
-| `processing` | extraction in flight | the upload queue |
-| `extracted` | there is a proposal, waiting for a human | the review screen |
-| `failed` | extraction gave up; `error` says why | the review screen; retryable |
-| `committed` | accepted and written into `purchases` | the review screen says "Already saved" |
+| `pending` | uploaded or triaged, waiting to be read | the upload queue; a rate-limited row also sits here. A Gmail-sourced one is on the "Invoices from email" list as *"Still reading"* |
+| `processing` | extraction in flight | the upload queue; a Gmail-sourced one as *"Still reading"* |
+| `extracted` | there is a proposal, waiting for a human | the review screen. A Gmail-sourced one is linked from the "Invoices from email" list, badged *"Ready to review"* |
+| `failed` | extraction gave up; `error` says why | the review screen; retryable. A Gmail-sourced one is on the "Invoices from email" list, badged *"Couldn't be read"*, with the error shown inline |
+| `committed` | accepted and written into `purchases` | the review screen says "Already saved"; the "Invoices from email" list links straight to the saved invoice |
+
+**Every Gmail-sourced state above has a screen.** That was not true until
+2026-08-27: a `gmail` upload that extracted *successfully* appeared nowhere at
+all, because the only list on `/invoices` filtered on `needs_triage`. See
+"Seeing what arrived by email" below.
 
 `needs_triage` is a Gmail-only state — a manually uploaded file never enters
 it, because a human chose that file.
@@ -1462,7 +1467,7 @@ routes and two libraries, on two schedules run by **two different schedulers**
 |---|---|---|---|---|
 | `GET`/`POST /api/gmail/watch/renew` | daily, 03:17 | Vercel Cron (`vercel.json`) | `CRON_SECRET` bearer, **or** a signed-in session | re-registers `users.watch` on every `active` mailbox |
 | `POST /api/gmail/push` | on every notification | nothing — Google calls it | Google OIDC token + `?token=` secret | writes one `gmail_events` row and returns 200 |
-| `GET`/`POST /api/gmail/drain` | every 5 minutes | **cron-job.org**, over plain HTTPS | `CRON_SECRET` bearer | history walk → attachments → Storage → `invoice_uploads` |
+| `GET`/`POST /api/gmail/drain` | every 5 minutes | **cron-job.org**, over plain HTTPS | `CRON_SECRET` bearer, **or** a signed-in session pinned to its own mailboxes | history walk → attachments → Storage → `invoice_uploads`. `?backfill=1&days=N` rescans the label instead, ignoring the cursor and the event queue — see "Backfill: the way back" |
 
 **Both scheduled routes export `GET` as well as `POST`, and this matters.** A
 scheduler invokes a path with **GET** — this was true of Vercel Cron and is true
@@ -1565,6 +1570,154 @@ policy from 0013 already scopes it, so R3 holds (§2). One query returns both th
 count and the oldest row, and `idx_gmail_events_status_created` covers exactly
 that shape.
 
+#### Seeing what arrived by email
+
+`components/invoices/EmailInvoices.tsx` on `/invoices` lists every
+`invoice_uploads` row with `source_channel = 'gmail'` except `needs_triage`,
+newest first — filename, subject, sender, received date, status, and a link that
+depends on the status (review it, open the saved invoice, or nothing while it is
+still being read). A `failed` row shows its `error` inline.
+
+It exists because the pipeline used to end in a dead end. `TriageSection`
+filtered on `needs_triage` and nothing else anywhere queried `invoice_uploads`
+for a list, so an email invoice that was read **successfully** was invisible:
+the review screen worked, and the only way to reach it was to fetch the
+upload's UUID out of the SQL editor. Mail arrived, extracted correctly, and then
+waited for a human who was never shown it.
+
+Unlike `DrainHealth` and `TriageSection` beside it, **this section always
+renders something.** Those two answer "is anything wrong?", where silence is the
+correct answer. This one answers "did my email get here?", where silence is
+indistinguishable from the bug it was written to fix — so an empty mailbox gets
+one line saying so, pointing at `/settings`.
+
+#### The `labelAdded` gap — why the first seven invoices vanished
+
+On 2026-08-27 seven invoices were emailed in. All seven produced Pub/Sub
+notifications, all seven `gmail_events` rows drained to `done` on the first
+attempt with no errors, and **not one `invoice_uploads` row was created.**
+
+The watch is registered on the invoices label (`labelIds: [labelId]`,
+`labelFilterBehavior: "include"`), so it fires on *any* change to that label —
+including the label being put on a message that was delivered earlier. But the
+history walk asked Gmail for `historyTypes: ["messageAdded"]` only. A
+`messageAdded` record exists only where the label was present **at delivery**,
+i.e. where a Gmail filter applied it. Label a message by hand and the sole
+record of it is `labelAdded`. So the walk saw an empty history, correctly filed
+nothing, and — because the cursor advances on a clean run — moved
+`last_history_id` straight past the invoice. Silently, seven times.
+
+The walk now requests **both** types and folds `labelsAdded` message ids into
+the same set. Those entries are filtered on the *added* label containing the
+invoices label: Gmail's request-level `labelId` filter matches on the message's
+labels, which would also admit the `processed` label this route adds itself at
+step 5, and re-reading our own bookkeeping would mean re-downloading every
+attachment already read on every run. (Harmless — the `file_hash` dedupe absorbs
+it — but pointless.)
+
+Two things made this invisible for as long as it was, and both are fixed:
+
+- **The drain logged nothing on a successful run.** `console.error` fired only
+  when `errorCount > 0`, and these runs were textbook successes. It now logs the
+  per-account report on **every** run.
+- **The response body had no `messages_seen`.** So a by-hand call could not
+  distinguish "the history walk matched nothing" from "messages were found and
+  every attachment was rejected by the MIME/size filter". The body now carries
+  `messagesSeen`, `queuedForExtraction`, `triaged`, `skippedDuplicates` and
+  `historyReset` alongside `uploadsCreated` — counts only, so the 64KB ceiling
+  is in no danger.
+
+Reading the result: `messagesSeen: 0` with `eventsProcessed > 0` means the walk
+matched nothing. `messagesSeen > 0` with `uploadsCreated: 0` means the
+attachments were rejected — PDF/JPEG/PNG/HEIC only, 5KB–15MB, and nothing that
+`isEmbeddedImage()` judges to be a logo pasted into a signature.
+
+That second reading is exactly what the *next* bug turned out to be.
+
+#### The `Content-ID` trap — why the next five vanished too
+
+Later the same day, with the `labelAdded` fix in hand, five more invoices went
+the same way: 14 `gmail_events` rows all `done` on the first attempt, no errors
+anywhere, and **zero** `invoice_uploads` rows with `source_channel = 'gmail'`.
+This time the history walk was fine — `messagesSeen` would have been non-zero.
+Every attachment was being thrown away one step later.
+
+`collectAttachments` decided whether a part was a real attachment or an image
+embedded in the body by asking whether it carried a `Content-ID` header, on the
+reasoning that an inline logo has one and a genuine attachment does not. **The
+second half of that is false.** Gmail's own compose window stamps a `Content-ID`
+(and an `X-Attachment-Id`) on every file it sends, alongside an explicit
+`Content-Disposition` saying the opposite. Read off one of the lost messages:
+
+```
+Content-Type: application/pdf; name="K8 document invoice-17047508.pdf"
+Content-Disposition: attachment; filename="K8 document invoice-17047508.pdf"
+Content-ID: <f_mtbbao5k0>
+```
+
+So every invoice sent from a Gmail account — which is every invoice this app had
+ever been tested with — was classified as a signature logo and discarded. With
+no candidates, the message was recorded as handled, the cursor advanced, and the
+event was marked `done`. Another textbook-successful run that did nothing.
+
+`isEmbeddedImage()` now reads **`Content-Disposition`**, which is the header
+RFC 2183 defines for precisely this question: `inline` is an embedded image,
+`attachment` is not. When the header is absent — some mailers omit it — it falls
+back to the old `Content-ID` heuristic, but **only for `image/*`**, which is the
+case it was really written for. A document with no disposition is now kept: a
+stray file in the triage queue costs a click, a dropped invoice costs the whole
+feature.
+
+Measured against the five real messages before anything was written: the old
+test kept **0 of 5**, the new one keeps **5 of 5**.
+
+#### Backfill: the way back
+
+Both bugs above were unrecoverable once they had happened, and for the same
+structural reason. **Everything in the drain is driven by `gmail_events`**: no
+pending row, no work, whatever is sitting in the mailbox. So a bug that files
+nothing while reporting success strands that mail permanently — the cursor is
+past it, the event says `done`, and nothing in the five-minute cycle will ever
+look again.
+
+The advice that used to live here — `update gmail_accounts set last_history_id
+= null` — **does not work on its own**, and is withdrawn. It makes the next
+drain take the 404 fallback, but only if a drain runs at all, and a drain with
+no pending event returns immediately.
+
+`GET|POST /api/gmail/drain?backfill=1&days=N` is the replacement:
+
+- ignores the cursor **and** the event queue, and rescans the invoices label
+  directly (`has:attachment newer_than:Nd`, default 7, capped at 90);
+- **claims no notifications**, deliberately. It walks the label, not the
+  history, so it never covers the window a pending event describes — an event
+  it marked `done` would take that window down with it;
+- **never writes the cursor.** The messages it finds are older than the cursor
+  by definition, so the only thing it could do is move it backwards;
+- does *not* exclude the `processed` label from the scan. A message this app
+  labelled but failed to file is exactly what a backfill is for, and that is
+  not hypothetical — the `Content-ID` bug stamped all five invoices as
+  processed while filing none of them.
+
+The `file_hash` dedupe is what makes it safe to run at any time: anything
+already read is skipped.
+
+The route now accepts **a signed-in user as well as the cron secret**, pinned to
+that user's own mailboxes — the same split `/api/gmail/watch/renew` already
+used, and for the same reason. That is what lets
+`components/settings/RescanMailboxButton.tsx` put it on `/settings` as
+**"Re-scan the mailbox"**, so recovery no longer requires someone who holds
+`CRON_SECRET`. Its toast reports what was actually found ("no emails with
+attachments", "everything had already been read", or a count now being read)
+rather than saying "done" — a reassuring message that cannot tell success from
+silence is what let both of these bugs run in the first place.
+
+**The cursor is now forwards-only.** It is written through `maxHistoryId`
+against its current value. This was a latent bug on the 404 fallback path too,
+where the new cursor is whatever the scan happened to find and could easily be
+behind where it already was — which would re-walk the same window on every tick
+from then on.
+
 **The first watch is registered by the OAuth callback**, not by the daily cron.
 `/api/gmail/callback` calls `watch()` immediately after the credential upsert
 succeeds. Before that it stopped at the upsert, so a freshly connected mailbox
@@ -1634,6 +1787,32 @@ policy matches nothing. The three routes above therefore use
 Service-role usage stays confined to `app/api/gmail/{push,drain,watch/renew}`
 and `lib/gmail/ingestExtract.ts`. **Nothing that runs under a user session gains
 a `.eq("user_id", …)`** — R3 is unchanged everywhere else in the app.
+
+#### Bypassing RLS is not the same as being allowed in
+
+`service_role` skips every policy, but it still needs an ordinary Postgres
+**GRANT** on each table — and until `0014_service_role_grants.sql` it had none,
+on any table in `public`. Every migration from 0001 onwards granted to
+`authenticated` only, and Supabase's automatic default privileges never covered
+the fourth role here.
+
+Nothing noticed for months, because nothing else uses the role: every screen
+runs as `authenticated`, which has always had its grants. The three routes above
+are the only code that assumes `service_role`, so they were the only things
+broken — and they were broken from the day they shipped. The drain answered
+`500 permission denied for table gmail_accounts` on every five-minute tick and
+push answered 503 on every Pub/Sub delivery, while `/items` and `/dashboard`
+returned 200 in the same log.
+
+**Two failure modes that look nothing alike.** RLS with no matching policy
+returns an empty result — silent, and indistinguishable from "no rows" (§11). A
+missing grant returns Postgres **42501**, a hard refusal raised before any
+policy is consulted. If a service-role route says *permission denied for table
+X*, the answer is a grant, never a policy and never the key.
+
+0014 also sets `alter default privileges … to service_role`, so a table added
+by a later migration is covered without anyone having to remember. `anon` and
+`authenticated` were not touched.
 
 #### The claim is a compare-and-swap, not an advisory lock
 
@@ -1818,6 +1997,10 @@ them.
 - `createServiceClient()` (service-role key) is for storage MIME validation,
   signed URLs, **and the three cron/push Gmail routes** — see §8.4. Nowhere
   else.
+- `service_role` bypasses RLS but still needs table **grants**;
+  `0014_service_role_grants.sql` gives it them, and sets default privileges so
+  new tables inherit them. A missing grant is a hard `42501 permission denied`,
+  not the silent empty result a missing policy gives — see §8.4.
 - Every table has one policy: `for all using (auth.uid() = user_id) with check
   (auth.uid() = user_id)`.
 - **No query under a user session filters by `user_id`.** Scoping is entirely
@@ -1988,8 +2171,9 @@ place. The same deletion would cause the same loss again.
 | `0009_reimport_file1_only.sql` | rebuild from `..._Updated.xlsx` **alone**: 111 diary rows, 0 ledger rows, `target_budget = 0`, and **33 real merchants in `supplier`** (§3.2). Also clears `suppliers` and `items`, which `0008` seeds but never prunes. **Generated** by `scripts/build_import_sql.py`. Idempotent, and **aborts the transaction unless every week total equals the spreadsheet's** | ⬜ **not yet run** |
 | `0010_invoice_upload.sql` | `invoice_uploads`, supplier VAT number / address, pg_trgm + the two `match_*` RPCs. Additive and re-runnable | ⚠️ run status not recorded here — the upload and review screens only work once it has been run; see `updates.md` |
 | `0011_vat_reduced_rate.sql` | widens the `vat_rate` CHECK on **both** `expense_entries` and `purchase_lines` from `(0,20)` to `(0,5,20)`, so a reduced-rate invoice can be stored as the rate it prints (§8.2). Drops whatever CHECK on those tables mentions `vat_rate`, whatever it is named, and re-adds a named one — re-runnable. Cannot invalidate a row: every existing row holds 0 or 20, so no §13 figure moves | ⬜ **not yet run** |
-| `0012_upload_before_project.sql` | makes `invoice_uploads.project_id` **nullable**, so an invoice can be uploaded before anyone has said which job it belongs to (§8.2), plus a CHECK that a `committed` upload must still have one. Re-runnable, only widens what is allowed, and raises rather than commits if the column is still NOT NULL afterwards. No §13 figure moves | ⬜ **not yet run** |
-| `0013_gmail_ingest.sql` | Gmail ingestion phase 1 (§8.3): `gmail_accounts`, `gmail_events`, `supplier_domains`, eight new nullable/defaulted columns on `invoice_uploads` with the `file_hash` dedupe index, and one widened CHECK adding `needs_triage` to `invoice_uploads.status`. Reuses `norm_key()` from 0008. Additive and re-runnable; every existing row stays valid and no §13 figure moves. Raises rather than commits if the widened CHECK did not take or if 0012 was never run | ⬜ **not yet run** |
+| `0012_upload_before_project.sql` | makes `invoice_uploads.project_id` **nullable**, so an invoice can be uploaded before anyone has said which job it belongs to (§8.2), plus a CHECK that a `committed` upload must still have one. Re-runnable, only widens what is allowed, and raises rather than commits if the column is still NOT NULL afterwards. No §13 figure moves | ✅ **run** — 0013 asserts this file's constraint exists and committed, so it was already in place by 2026-08-25 |
+| `0013_gmail_ingest.sql` | Gmail ingestion phase 1 (§8.3): `gmail_accounts`, `gmail_events`, `supplier_domains`, eight new nullable/defaulted columns on `invoice_uploads` with the `file_hash` dedupe index, and one widened CHECK adding `needs_triage` to `invoice_uploads.status`. Reuses `norm_key()` from 0008. Additive and re-runnable; every existing row stays valid and no §13 figure moves. Raises rather than commits if the widened CHECK did not take or if 0012 was never run | ✅ **run** — 2026-08-25, per the banner in the file; confirmed live on 2026-08-27 by `gmail_events` rows draining normally |
+| `0014_service_role_grants.sql` | gives `service_role` full privileges on the tables, views, sequences and functions in schema `public`, plus a default-privileges rule so tables created later are covered. Fixes a hard `42501 permission denied` — **not** an RLS failure — that had broken every Gmail route since the feature shipped: the drain 500'd every five minutes and push 503'd on every delivery, because `service_role` had never been granted anything and only the three machine-to-machine Gmail routes use it (§8.4, R3). `anon` and `authenticated` are deliberately untouched. No data, policy or schema change; no §13 figure moves. Raises rather than commits if any of the four Gmail tables is still refused | ✅ **run** — 2026-08-27. Confirmed by seven `gmail_events` rows being claimed and marked `done` through `createServiceClient()`, which was a hard refusal beforehand |
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.

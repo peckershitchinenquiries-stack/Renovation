@@ -66,7 +66,11 @@ No query anywhere includes `.eq("user_id", ...)`. Every table has an
 worth internalising:
 
 - Adding a table means adding its RLS policy, or it returns nothing (or leaks
-  everything, if RLS is left disabled).
+  everything, if RLS is left disabled). It also means granting `authenticated`
+  — and, if anything server-side will read it with `createServiceClient()`,
+  `service_role`. A missing grant is a hard `42501 permission denied`, not an
+  empty result; migration `0014` covers the tables that exist today and sets
+  default privileges for future ones.
 - An empty result is ambiguous: no rows, or rows owned by a different user.
   See "Data recovery" below — this exact ambiguity caused a real incident.
 
@@ -114,6 +118,25 @@ When writing SQL or seed data, match these exactly (mirrored in `types/index.ts`
 - `vat_rate`: `0` or `20`
 - `paid_date` is a real `date` — the source spreadsheets contain free text like
   `Friday 27/2` that cannot be stored in it
+
+### Gmail ingestion fails silently, twice so far
+
+The whole drain is driven by `gmail_events`: **no pending row, no work**, no
+matter what is sitting in the mailbox. So any bug that files nothing while
+reporting success strands that mail for ever — the cursor has moved past it and
+the event says `done`. It has happened twice (`labelAdded`, then `Content-ID`);
+about.md §8.4 has both.
+
+The signature is unmistakable and worth recognising: `gmail_events` all `done`,
+`attempts = 1`, `error` null, and **zero** `invoice_uploads` rows with
+`source_channel = 'gmail'`.
+
+Recovery is **"Re-scan the mailbox"** on `/settings`, or
+`POST /api/gmail/drain?backfill=1&days=30`. It ignores the cursor and the event
+queue and re-reads the label; the `file_hash` dedupe makes it safe to run any
+time. Do **not** reach for `update gmail_accounts set last_history_id = null` —
+it is the old advice, it is wrong, and it does nothing on its own because the
+drain never runs without a pending event.
 
 ## Data recovery
 

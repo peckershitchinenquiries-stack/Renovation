@@ -7,6 +7,7 @@
 // a POST and wants a Toast.
 import { createClient } from "@/lib/supabase/server";
 import RenewWatchButton from "./RenewWatchButton";
+import RescanMailboxButton from "./RescanMailboxButton";
 import type { GmailAccount } from "@/types";
 
 // Rendered as an age rather than a timestamp because the only question this
@@ -152,15 +153,25 @@ export default async function GmailSection({
           </ul>
         )}
 
-        {/* One button for the section, not one per row: it renews every
+        {/* One button each for the section, not one per row: both act on every
             mailbox this user has connected. */}
         {!tableMissing && accounts.length > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3">
-            <RenewWatchButton />
-            <span className="text-xs text-gray-500">
-              Registers the Gmail watch now. Needed if it failed while
-              connecting, and harmless at any other time.
-            </span>
+          <div className="mt-3 space-y-3 border-t border-gray-100 pt-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <RenewWatchButton />
+              <span className="text-xs text-gray-500">
+                Registers the Gmail watch now. Needed if it failed while
+                connecting, and harmless at any other time.
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <RescanMailboxButton />
+              <span className="text-xs text-gray-500">
+                Reads the invoices label again from the last 30 days. Use it when
+                an email arrived in Gmail but never appeared on the invoices
+                screen. Anything already read is skipped.
+              </span>
+            </div>
           </div>
         )}
       </div>

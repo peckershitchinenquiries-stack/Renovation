@@ -3644,3 +3644,406 @@ deployment now succeeds; call the drain by hand with the secret and confirm a
 send a test invoice and confirm it appears within about six minutes; pause the
 scheduler and confirm the amber warning appears on `/invoices`, then un-pause it
 and confirm the warning goes; check the warning on a narrow and a wide screen.
+
+---
+
+### 2026-08-27 — Gmail ingestion never worked: `service_role` had no table grants
+
+**What changed (in plain English):**
+The email-invoice feature had been failing every five minutes since the day it
+shipped. The cause was found: the database had never given the app's
+"background worker" identity permission to read or write any table. A new
+migration, `0014_service_role_grants.sql`, grants it. **No code was changed and
+no data was touched.**
+
+**Why:**
+Two things were failing at once, and both were the same fault:
+
+- cron-job.org showed `Failed (HTTP error) 500 Internal Server Error` on every
+  five-minute run of the drain;
+- Vercel showed repeated `503` on `POST /api/gmail/push` — the endpoint Google
+  calls when a new invoice arrives in the mailbox.
+
+The Vercel log gave the whole answer in one line:
+`[api 500] permission denied for table gmail_accounts`. That is a *permission*
+refusal from Postgres (error 42501), which happens **before** any row-level
+security rule is even looked at.
+
+Checking directly against the live database with the service key confirmed it,
+and confirmed it was not limited to the Gmail tables — `gmail_accounts`,
+`gmail_events`, `supplier_domains`, `invoice_uploads`, `suppliers` and
+`expense_entries` all refused the same way. Supabase databases normally hand
+out these permissions automatically when a table is created; in this project
+that never happened for the `service_role` identity, and every migration from
+`0001` onwards granted only to `authenticated` (logged-in users).
+
+Nobody noticed for months because **nothing else uses that identity**. Every
+screen in the app runs as a logged-in user, and that identity has always had its
+permissions — which is why `/items`, `/invoices` and `/dashboard` were returning
+`200` in the very same log as the `500`s. The only code that runs without a
+login is the three Gmail routes, called by Google and by the external scheduler.
+They have never once succeeded.
+
+Two things ruled out along the way, both worth recording so nobody re-checks
+them: the **service key is correct** (it decodes to `role: service_role`, right
+project, not expired — no Vercel environment variable needs changing), and
+**Storage was never affected** (the `invoices` bucket answers the same key
+normally, so the attachment upload/download half was always fine).
+
+Practical consequence for the invoice that was sent and starred this morning:
+it was never recorded, because the push that would have recorded it got a 503.
+Google retries these for up to seven days, so it should arrive on its own once
+the migration is run; failing that, the drain's built-in seven-day catch-up scan
+picks it up regardless.
+
+**Where the information came from:**
+User request, plus the two screenshots supplied (cron-job.org run history and
+the Vercel log detail pane), plus direct read-only queries against the live
+Supabase project using the local service key.
+
+**Files used (read, not changed):**
+- `app/api/gmail/drain/route.ts` — where the 500 is returned
+- `app/api/gmail/push/route.ts` — where the 503 is returned
+- `app/api/gmail/watch/renew/route.ts` — third user of the same identity
+- `lib/gmail/ingestExtract.ts` — confirmed `invoices` there is the Storage
+  bucket, not a table
+- `lib/supabase/server.ts` — `createServiceClient()`
+- `supabase/migrations/0008`, `0010`, `0013` — the `grant … to authenticated`
+  lines that show the omission was consistent
+- `.env` — to decode the service key and confirm it is genuine
+
+**Files changed:**
+- `supabase/migrations/0014_service_role_grants.sql` — **new.** Grants
+  `service_role` full privileges on the tables, views and sequences in schema
+  `public`, plus a default-privileges rule so tables added later are covered.
+  Ends with an assertion that fails loudly if the four Gmail tables are still
+  refused, and a report showing the permissions table by table.
+- `about.md` — new §8.4 subsection "Bypassing RLS is not the same as being
+  allowed in", and a bullet in §9
+- `CLAUDE.md` — the "adding a table" note now says to grant as well as to add a
+  policy
+
+**Database:**
+Migration `0014_service_role_grants.sql` — **written, NOT yet run.** It must be
+pasted into the Supabase SQL editor and run by hand, like every other migration
+here. It changes permissions only: no table, column, policy or row is altered,
+so no figure in `about.md` §13 moves. It is re-runnable.
+
+**Result / numbers after:**
+No money figure moved. What moved is whether the feature runs at all.
+
+| | Before | After (once `0014` is run) |
+|---|---|---|
+| `service_role` grants in `public` | none, on any table | full, on all tables/views/sequences |
+| Tables added in future | would repeat this bug | covered by default privileges |
+| `GET /api/gmail/drain` | 500 every 5 minutes | expected 200 |
+| `POST /api/gmail/push` | 503 on every delivery | expected 200 |
+| Invoices ingested from email, ever | 0 | to be confirmed |
+| Code files changed | — | none |
+
+**Still to do — this is not finished until these are done:**
+
+1. Run `0014_service_role_grants.sql` in the Supabase SQL editor. Expect the
+   notice `service_role now has select/insert/update on all four Gmail tables.`
+   and a report where every row reads `t t t t`.
+2. Check the cron-job.org job is still **enabled** — it disables a job after 15
+   consecutive failures, and this one has failed far more than 15 times.
+3. Watch one drain run and confirm a 200.
+4. Confirm the starred invoice appears on `/invoices`; if it has not within a
+   few hours, re-send it to the mailbox.
+5. **Rotate `CRON_SECRET`.** The screenshot shared while diagnosing this shows
+   the full bearer token. Rotating means changing it in **both** Vercel and the
+   cron-job.org job header — change one and every run answers 401.
+
+---
+
+### 2026-08-27 — The first seven emailed invoices vanished, and nothing said so
+
+**What changed (in plain English):**
+Seven invoices were emailed to the connected mailbox. Every one of them was
+noticed by the app, and not one of them was ever saved or shown anywhere. Three
+things were fixed: the reason they were dropped, the reason nobody could tell
+they had been dropped, and the fact that even a *successfully* read email
+invoice had no screen to appear on.
+
+**Why:**
+
+1. **They were dropped** because of how the mailbox is watched. The app watches
+   one Gmail label. Google tells it "something changed on that label", and the
+   app then asks Google *what* changed — but it only ever asked about
+   **messages that arrived already carrying the label**. If the label is put on
+   an email *after* it arrives (which is what happens when you label it by hand,
+   rather than having a Gmail filter do it on delivery), Google reports that as
+   a different kind of change, and the app was not asking about that kind. So it
+   asked, was told "nothing", correctly saved nothing, and then moved its
+   bookmark past the email — permanently. Seven times, with no error.
+2. **Nobody could tell**, because the five-minute job only wrote to the Vercel
+   log when something went *wrong*. These runs went perfectly right: one attempt
+   each, no errors, all seven notifications marked done. They printed nothing.
+   And the job's reply did not include how many emails it had looked at, so
+   calling it by hand could not tell "found no emails" apart from "found the
+   emails but rejected every attachment".
+3. **There was no screen.** The `/invoices` page listed only email invoices
+   *waiting to be checked* (unknown sender). An invoice that was read
+   successfully went to a status no list anywhere queried. The screen that
+   reviews it works fine — but the only way to reach it was to look the
+   invoice's internal id up in the database by hand.
+
+**Where the information came from:**
+User request, then live diagnosis against the Supabase SQL editor —
+`gmail_events` (7 rows, all `done`, `attempts: 1`, no errors),
+`invoice_uploads` (zero rows with `source_channel = 'gmail'`), and
+`gmail_accounts` (bookmark sitting at `19267`, exactly the newest
+notification's position).
+
+**Files used (read, not changed):**
+- `app/api/gmail/push/route.ts`
+- `app/api/gmail/watch/renew/route.ts`
+- `lib/gmail/ingestExtract.ts`
+- `components/invoices/TriageSection.tsx`
+- `components/invoices/TriageActions.tsx`
+- `components/invoices/DrainHealth.tsx`
+- `app/(app)/invoices/[uploadId]/review/page.tsx`
+- `components/settings/GmailSection.tsx`
+- `supabase/migrations/0013_gmail_ingest.sql`
+- `types/index.ts`
+
+**Files changed:**
+- `lib/gmail/client.ts` — the change-list request now asks for labels-added as
+  well as messages-added, and the response type has a `labelsAdded` field to
+  hold them
+- `app/api/gmail/drain/route.ts` — reads those label-added entries and treats
+  those emails as arrivals (only when the label added was the invoices label, so
+  the app's own "processed" label does not cause every attachment to be
+  re-downloaded every run); writes its per-mailbox report to the log on *every*
+  run, not only failing ones; and its reply now includes `messagesSeen`,
+  `queuedForExtraction`, `triaged`, `skippedDuplicates` and `historyReset`
+- `components/invoices/EmailInvoices.tsx` — **new.** The "Invoices from email"
+  list on `/invoices`: everything pulled out of the mailbox, newest first, with
+  a link to review it, or to the saved invoice if it is already saved. Shows the
+  error inline when a read failed. Always renders — one line saying so when
+  nothing has arrived
+- `components/ui/Badge.tsx` — three new labels: *Ready to review*, *Still
+  reading*, *Couldn't be read*
+- `app/(app)/invoices/page.tsx` — renders the new list, and its header comment
+  no longer claims every email section is silent when empty
+- `about.md` — §8 gained "Seeing what arrived by email" and "The `labelAdded`
+  gap"; the upload-status table now names a screen for every email state; and
+  the migration table's rows for `0012` and `0013` were corrected from "not yet
+  run" to **run** (they plainly had been — `0013` refuses to commit unless
+  `0012`'s constraint is already there, and its own banner records it as run on
+  2026-08-25). That correction was pre-existing drift, not caused by this change
+
+**Database:**
+No migration. Nothing about the schema was wrong — every row the app failed to
+create would have been legal. `npm run build` passes.
+
+One **manual** database action is needed to recover the seven lost invoices, and
+it has **not** been done: `update gmail_accounts set last_history_id = null;`.
+That makes the next run fall back to scanning the label for anything with an
+attachment from the last 7 days, which finds them however the label got there.
+It only takes effect once there is a fresh notification to wake the job up.
+
+**Result / numbers after:**
+Invoices visible from the seven emails: **0 → 0 so far** — the code path is
+fixed but the seven are behind the bookmark and need the recovery step above.
+Screens that list a successfully-read email invoice: **0 → 1**.
+Drain runs that leave a trace in the log: **only failing ones → all of them**.
+
+---
+
+### 2026-08-27 — Recorded that migration 0014 has been run
+
+**What changed (in plain English):**
+Documentation only. `0014_service_role_grants.sql` — the file that gave the
+background Gmail jobs permission to read and write the database tables — still
+carried a "NOT YET RUN" banner, and was missing from the migration table in
+`about.md` altogether. Both now record it as run on 2026-08-27.
+
+**Why:**
+The banner and the migration table are how anyone (including a future Claude
+session) decides what still needs pasting into the Supabase SQL editor. Leaving
+a migration that *has* run marked as pending invites someone to go looking for a
+problem that is already fixed — or worse, to distrust the table and re-run
+things blindly. Migrations here are applied by hand, so this table is the only
+record that exists.
+
+**Where the information came from:**
+User confirmed it had been run. Independently corroborated from the live
+database: seven `gmail_events` rows were claimed and marked `done` by
+`/api/gmail/drain`, which touches that table only through
+`createServiceClient()`. Before 0014 that was a hard `42501 permission denied`
+and the route returned 500, so those seven rows could not exist otherwise.
+
+**Files used (read, not changed):**
+- `supabase/migrations/0014_service_role_grants.sql` (the header, for the
+  wording of what it fixes)
+
+**Files changed:**
+- `supabase/migrations/0014_service_role_grants.sql` — banner changed from
+  "NOT YET RUN" to run on 2026-08-27, with a note on how it was confirmed live
+- `about.md` — new row for `0014` in the migration table (§22), marked run
+
+**Database:**
+No migration written and nothing run as part of this change. `0014` itself has
+been run — that is what is being recorded. No figures moved.
+
+**Result / numbers after:**
+Migrations in `about.md`'s table marked run but actually pending, or pending but
+actually run: **3 → 0** (`0012` and `0013` were corrected in the entry above,
+`0014` here). Migrations missing from the table entirely: **1 → 0**.
+
+---
+
+### 2026-08-27 — Email invoices vanished silently: every Gmail attachment was being thrown away as a signature logo
+
+**What changed (in plain English):**
+Emails were arriving, the app was noticing them, and then nothing appeared on
+the invoices screen — the "1 email waiting to be read" banner would show for a
+few minutes and then quietly go back to "Nothing has arrived by email yet". The
+cause was a single wrong test deep in the email reader: it was deciding whether
+a file was a *real* attachment or just a logo pasted into someone's signature,
+and it got that decision wrong for **every** file sent from a Gmail account. All
+five invoices emailed to the app so far were downloaded, judged to be logos, and
+discarded — with no error recorded anywhere.
+
+Three things are different now:
+
+1. The test is fixed, so attachments are actually kept.
+2. There is a **"Re-scan the mailbox" button** on the settings screen, because
+   mail lost this way was previously unrecoverable without a developer.
+3. The email bookmark can no longer be moved backwards by accident.
+
+**Why:**
+The reader was asking "does this file have a `Content-ID` header?" and treating
+anything that did as an embedded image. The reasoning was that a logo inside an
+email body carries one and a genuine attachment does not. The second half of
+that is simply untrue: Gmail's own compose window stamps a `Content-ID` on
+**every** file it sends, right alongside an explicit
+`Content-Disposition: attachment` saying the opposite. Confirmed by reading the
+real headers off one of the lost emails:
+
+```
+Content-Type: application/pdf; name="K8 document invoice-17047508.pdf"
+Content-Disposition: attachment; filename="K8 document invoice-17047508.pdf"
+Content-ID: <f_mtbbao5k0>
+```
+
+So the pipeline was working perfectly right up to the last step and then binning
+the invoice. Every downstream symptom followed from that: no attachments to file
+meant nothing to read, nothing to read meant no error, no error meant the
+message was recorded as handled, the bookmark moved past it, and the
+notification was marked done. A textbook-successful run that did nothing.
+
+This is the **second** bug of exactly this shape in as many days (the
+`labelAdded` gap, recorded above). Both were invisible for the same structural
+reason: the whole pipeline is driven by notifications, so once a notification is
+marked done the mail behind it is unreachable for ever. That is why this change
+adds a recovery route as well as a fix — a third bug of this shape is not
+worth betting against, and next time the mail should be recoverable by the
+person who owns it rather than by someone with the cron password.
+
+**Where the information came from:**
+User report ("gmail is working fine, vercel is working fine, cron-job.org is
+working fine but the extraction part is missing"), then read directly from the
+live system:
+
+- `gmail_events`: 14 rows, **all** `status = done`, **all** `attempts = 1`, all
+  `error = null` — so nothing was failing or retrying.
+- `invoice_uploads`: **zero** rows with `source_channel = 'gmail'`.
+- The Gmail API, replayed read-only from the recorded cursor: the invoices
+  label holds 5 messages, each with exactly one PDF between 92KB and 97KB, each
+  carrying `Content-Disposition: attachment` **and** a `Content-ID`.
+- A dry run of the old filter versus the new one over those 5 real messages:
+  old kept **0 of 5**, new keeps **5 of 5**.
+
+**Files used (read, not changed):**
+- `app/api/gmail/push/route.ts` — to confirm notifications were being recorded
+- `app/api/gmail/watch/renew/route.ts` — to rule out the bookmark being
+  overwritten by the daily renew, and as the pattern for a route that accepts
+  both the cron and a signed-in user
+- `lib/gmail/ingestExtract.ts` — to rule out the Gemini read as the failure
+- `components/invoices/DrainHealth.tsx`, `components/invoices/EmailInvoices.tsx`
+  — to confirm the two screens were reporting honestly (they were)
+- `components/settings/RenewWatchButton.tsx` — pattern for the new button
+- `.env` — label ids, to replay the mailbox
+
+**Files changed:**
+- `app/api/gmail/drain/route.ts` —
+  - new `isEmbeddedImage()` replaces the inline `Content-ID` test. It reads
+    `Content-Disposition` instead, which is the header that actually carries
+    the sender's intent. When that header is missing it falls back to the old
+    rule but **only for images**, which is the case it was written for; a
+    document with no disposition is now kept, because a stray file in the
+    triage queue is far cheaper than a dropped invoice
+  - new **backfill mode** (`?backfill=1&days=N`): ignores both the bookmark and
+    the notification queue and re-reads the label directly. Claims no
+    notifications on purpose, so it cannot consume a window it did not walk,
+    and never writes the bookmark
+  - the route now accepts a signed-in user as well as the cron secret, pinned
+    to that user's own mailboxes — the same split `watch/renew` already used
+  - the bookmark can no longer move **backwards**. It is now written through
+    `maxHistoryId` against its current value. This was a latent bug on the
+    existing recovery path too, where the new bookmark is whatever the scan
+    happened to find and could easily be behind where it already was
+  - the run report gained a `backfilled` flag
+- `lib/gmail/client.ts` — no change in this entry; its `labelAdded` support was
+  the previous entry's work
+- `components/settings/RescanMailboxButton.tsx` — **new.** The button. Posts to
+  `/api/gmail/drain?backfill=1&days=30`. Its toast deliberately reports what was
+  actually found rather than saying "done": "no emails with attachments",
+  "everything had already been read", or a count of what is now being read.
+  A reassuring message that cannot distinguish success from silence is precisely
+  what let both of these bugs run
+- `components/settings/GmailSection.tsx` — renders the new button under the
+  existing watch button, with a line explaining when to press it
+- `about.md` — §8 gained "The Content-ID trap" and "Backfill: the way back",
+  and the drain's row in the cron table now records the second way of
+  authorising it and the backfill parameters. §13 is untouched: it records
+  spreadsheet expense figures, and none of them moved
+- `CLAUDE.md` — the Gmail ingestion note now points at backfill as the recovery
+  step, replacing the manual `set last_history_id = null` advice, which did not
+  work on its own
+
+**Database:**
+No migration. Nothing about the schema was wrong — every row that failed to be
+created would have been perfectly legal. No SQL was run.
+
+The manual recovery step recommended in the previous entry
+(`update gmail_accounts set last_history_id = null;`) is **withdrawn**: it does
+not work by itself, because the drain does nothing at all unless a *pending
+notification* wakes it, and all 14 were already marked done. Pressing "Re-scan
+the mailbox" is the replacement and needs no SQL.
+
+`npm run build` passes.
+
+**Result / numbers after:**
+Attachments kept by the filter, across the 5 real emails: **0 of 5 → 5 of 5**
+(measured by dry run against the live mailbox, before any data was written).
+Ways for the mailbox owner to recover mail the drain skipped: **0 → 1**.
+Directions the email bookmark can move: **both → forwards only**.
+
+**The backfill was then actually run**, on 2026-08-27 at 10:33 UTC, against the
+live database from a local dev server —
+`POST /api/gmail/drain?backfill=1&days=30` with the cron secret. It has **not**
+been run on Vercel, and the code changes above were left **uncommitted** at the
+owner's request for them to push themselves.
+
+Result: `{ messagesSeen: 5, uploadsCreated: 4, triaged: 4, skippedDuplicates: 1,
+queuedForExtraction: 0, errors: 0, ms: 12492 }`.
+
+Gmail-sourced rows in `invoice_uploads`: **0 → 4**. All four are
+`status = needs_triage`, which is correct and not a further bug — see the two
+notes below.
+
+- **4 rows from 5 messages.** Two of the five emails carried the *same* PDF
+  (`K8 document invoice-20144997.pdf`, sent 06:57 and again 09:38). The sha256
+  dedupe recognised the second copy and skipped it, which is exactly what it is
+  there for.
+- **All four went to triage rather than being read automatically.** They were
+  sent from `landagopal98@gmail.com`, and `supplier_domains` is **empty** — no
+  supplier domain has ever been declared. The gate is working as designed: an
+  undeclared sender is held for a human rather than spending a Gemini call.
+  They appear on `/invoices` under *"Waiting to be checked"*, and confirming one
+  there is what starts the read. `queuedForExtraction: 0` follows from this, and
+  means the backfill spent no Gemini quota at all.

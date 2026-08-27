@@ -18,6 +18,14 @@ const STYLES: Record<string, string> = {
   // than read. Amber, like "In Progress" — it needs a person, but nothing has
   // gone wrong.
   "Waiting to be checked": "bg-amber-100 text-amber-800",
+  // The three labels on the "Invoices from email" list
+  // (components/invoices/EmailInvoices.tsx). Read and waiting for a person is
+  // the good outcome, so it is green like "Paid"; a read that failed is red
+  // like "Cancelled"; still reading is neutral, because nothing has gone wrong
+  // and nothing needs doing.
+  "Ready to review": "bg-emerald-100 text-emerald-800",
+  "Still reading": "bg-gray-200 text-gray-700",
+  "Couldn't be read": "bg-red-100 text-red-700",
 };
 
 export function Badge({ label }: { label: string }) {

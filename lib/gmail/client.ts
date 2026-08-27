@@ -103,6 +103,23 @@ export interface GmailMessageRef {
 export interface GmailHistoryRecord {
   id: string;
   messagesAdded?: { message: GmailMessageRef & { labelIds?: string[] } }[];
+  /**
+   * A label put on a message that had already been delivered.
+   *
+   * This is not a nicety. A watch registered on a label fires on *any* change
+   * to that label, but a `messageAdded` record only exists where the label was
+   * present at delivery — i.e. where a Gmail filter applied it. Label a message
+   * by hand, or with anything that runs after delivery, and the only record of
+   * it is here. A drain that reads `messagesAdded` alone sees an empty history,
+   * finds nothing, and advances its cursor straight over the invoice.
+   *
+   * `labelIds` on the entry is the label(s) that were *added*, which is not the
+   * same as the message's current labels.
+   */
+  labelsAdded?: {
+    message: GmailMessageRef & { labelIds?: string[] };
+    labelIds?: string[];
+  }[];
 }
 
 export interface GmailHistoryListResponse {
@@ -265,12 +282,16 @@ export async function historyList(
     startHistoryId: string;
     labelId?: string;
     pageToken?: string;
-    /** Defaults to messageAdded — arrivals are all this project cares about. */
+    /**
+     * Defaults to messageAdded *and* labelAdded. It used to be messageAdded
+     * alone, which missed every invoice whose label was applied after delivery
+     * — see GmailHistoryRecord.labelsAdded above.
+     */
     historyTypes?: string[];
   }
 ): Promise<GmailHistoryListResponse> {
   const params = new URLSearchParams({ startHistoryId: opts.startHistoryId });
-  for (const t of opts.historyTypes ?? ["messageAdded"])
+  for (const t of opts.historyTypes ?? ["messageAdded", "labelAdded"])
     params.append("historyTypes", t);
   if (opts.labelId) params.set("labelId", opts.labelId);
   if (opts.pageToken) params.set("pageToken", opts.pageToken);

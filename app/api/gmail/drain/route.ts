@@ -63,11 +63,33 @@
 //      then does last_history_id move. A crash halfway through re-reads some
 //      messages, which the dedupe absorbs; a cursor moved early loses them for
 //      good.
+//
+//   6. The history walk asks for labelAdded as well as messageAdded. The watch
+//      is registered on the invoices label, so it fires whenever that label
+//      changes — including when it is put on a message that arrived earlier.
+//      A `messageAdded` record only exists where the label was there at
+//      delivery, i.e. where a Gmail filter applied it. Labelling by hand
+//      produces a `labelAdded` record and nothing else, so a walk that read
+//      only messageAdded found an empty history, filed nothing, and advanced
+//      the cursor over the invoice — with no error anywhere. That happened for
+//      real to the first seven invoices ever emailed to this app
+//      (updates.md, 2026-08-27).
+//
+//   7. There is a backfill mode, and it is not a convenience. Everything above
+//      is driven by gmail_events: no pending event, no work, whatever is
+//      sitting in the mailbox. So any bug that files nothing while *reporting*
+//      success — note 6, and the Content-ID bug in isEmbeddedImage below —
+//      strands that mail permanently. The cursor has moved past it, the event
+//      says done, and there is no path in the ordinary flow that will ever look
+//      at it again. `?backfill=1` ignores the cursor and the event queue and
+//      rescans the label directly; the sha256 dedupe is what makes running it
+//      at any time harmless. It is also the only reason the five invoices lost
+//      to the Content-ID bug were recoverable at all.
 
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createServiceClient } from "@/lib/supabase/server";
-import { json, error } from "@/lib/api";
+import { json, error, requireUser } from "@/lib/api";
 import { getAccessToken, GmailAuthError } from "@/lib/gmail/auth";
 import {
   attachmentsGet,
@@ -112,6 +134,12 @@ const MAX_HISTORY_PAGES = 20;
 const MAX_FALLBACK_PAGES = 5;
 // Halved (30 → 15) for the same reason.
 const MAX_MESSAGES_PER_RUN = 15;
+
+/** How far back a backfill looks when the caller does not say. */
+const DEFAULT_SCAN_DAYS = 7;
+/** Gmail's `newer_than:` takes a number of days; keep it sane at both ends. */
+const MIN_SCAN_DAYS = 1;
+const MAX_SCAN_DAYS = 90;
 
 /**
  * Soft wall-clock budget for one invocation.
@@ -183,10 +211,37 @@ interface CandidateAttachment {
 }
 
 /**
- * Walk a message's MIME tree and collect the parts worth downloading.
+ * Is this MIME part an embedded image rather than a real attachment?
  *
- * The Content-ID test is what keeps a supplier's signature logo out of the
- * review queue: an inline image carries one, a real attachment does not.
+ * **Content-ID is not that test, and using it emptied the whole pipeline.**
+ * The original version here read `headerValue(part, "content-id") !== null` on
+ * the reasoning that an inline image carries a Content-ID and a real attachment
+ * does not. The second half is simply false: Gmail's own composer stamps
+ * *every* attachment it sends with `Content-ID: <f_…>` and a matching
+ * `X-Attachment-Id`, alongside an explicit `Content-Disposition: attachment`.
+ * So every PDF sent from a Gmail account — which is every invoice this app was
+ * tested with — was classified as an inline logo and silently discarded. The
+ * message was then recorded as handled, the cursor advanced and the event
+ * marked done, with no error on any screen or in any log. Fourteen
+ * notifications, five invoices, nothing filed (updates.md, 2026-08-27).
+ *
+ * `Content-Disposition` is the header that actually carries the sender's
+ * intent, and it is what RFC 2183 defines for exactly this purpose. When it is
+ * absent — some mailers omit it — fall back to the old heuristic, but only for
+ * images, since that is the case it was really written for: a signature logo
+ * referenced by `cid:` from the HTML body. A document with no disposition is
+ * kept, because the cost of a stray file in the triage queue is far lower than
+ * the cost of dropping an invoice.
+ */
+function isEmbeddedImage(part: GmailMessagePart, mimeType: string): boolean {
+  const disposition = baseMime(headerValue(part, "content-disposition") ?? "");
+  if (disposition === "inline") return true;
+  if (disposition === "attachment") return false;
+  return mimeType.startsWith("image/") && headerValue(part, "content-id") !== null;
+}
+
+/**
+ * Walk a message's MIME tree and collect the parts worth downloading.
  */
 function collectAttachments(
   part: GmailMessagePart | undefined,
@@ -200,7 +255,7 @@ function collectAttachments(
   if (attachmentId && filename) {
     const mimeType = baseMime(part.mimeType);
     const size = part.body?.size ?? 0;
-    const inline = headerValue(part, "content-id") !== null;
+    const inline = isEmbeddedImage(part, mimeType);
 
     if (
       ATTACHMENT_MIME_TYPES.includes(mimeType) &&
@@ -241,6 +296,8 @@ interface AccountReport {
   triaged: number;
   skipped_duplicates: number;
   history_reset: boolean;
+  /** True when this account was rescanned on purpose rather than by a 404. */
+  backfilled: boolean;
   /** True when the message loop stopped on DRAIN_TIME_BUDGET_MS, not on data. */
   timed_out: boolean;
   errors: string[];
@@ -256,6 +313,10 @@ async function drainAccount(
     maxBytes: number;
     /** Date.now() past which no *new* message may be started. */
     deadline: number;
+    /** Ignore the cursor and the event queue; rescan the label (see note 7). */
+    backfill: boolean;
+    /** How many days back a backfill or a 404 fallback looks. */
+    scanDays: number;
   }
 ): Promise<AccountReport> {
   const report: AccountReport = {
@@ -267,20 +328,30 @@ async function drainAccount(
     triaged: 0,
     skipped_duplicates: 0,
     history_reset: false,
+    backfilled: config.backfill,
     timed_out: false,
     errors: [],
     cursor: account.last_history_id,
   };
 
   // ---- 1. claim pending events (this is the mutex — see note 1) ---------
+  //
+  // A backfill claims nothing, on purpose. It walks the label instead of the
+  // history, so it never covers the window a pending event describes — and an
+  // event it claimed and marked done would take that window with it. Leaving
+  // the queue alone means the ordinary run five minutes later still handles it,
+  // and the dedupe absorbs whatever the two runs both find.
+  //
   // Service-role read; scoped by account_id, which carries the user with it.
-  const { data: pendingRows } = await supabase
-    .from("gmail_events")
-    .select("*")
-    .eq("account_id", account.id)
-    .eq("status", "pending")
-    .order("created_at", { ascending: true })
-    .limit(MAX_EVENTS_PER_ACCOUNT);
+  const { data: pendingRows } = config.backfill
+    ? { data: [] }
+    : await supabase
+        .from("gmail_events")
+        .select("*")
+        .eq("account_id", account.id)
+        .eq("status", "pending")
+        .order("created_at", { ascending: true })
+        .limit(MAX_EVENTS_PER_ACCOUNT);
 
   const claimed: GmailEvent[] = [];
   for (const row of (pendingRows ?? []) as GmailEvent[]) {
@@ -309,7 +380,9 @@ async function drainAccount(
   }
 
   report.claimed_events = claimed.length;
-  if (claimed.length === 0) return report;
+  // A backfill is the one run that has work to do with no event to prompt it —
+  // that is the whole point of it (note 7). Every other run stops here.
+  if (claimed.length === 0 && !config.backfill) return report;
 
   /** Put events back where they were, so the next tick retries them. */
   const release = async (message: string) => {
@@ -342,6 +415,13 @@ async function drainAccount(
   let nextCursor: string | null = null;
 
   try {
+    if (config.backfill) {
+      // Asked for explicitly. The cursor is not wrong, it is simply not what we
+      // want to go by — the mail we are after is *behind* it. Same recovery
+      // scan as a pruned cursor, so it takes the same route.
+      throw new GmailHistoryGone("(backfill)");
+    }
+
     if (account.last_history_id === null) {
       // No baseline yet — the watch renew has not run, or this mailbox has
       // never been drained. Treated exactly like a pruned cursor.
@@ -353,7 +433,8 @@ async function drainAccount(
       const response = await historyList(accessToken, {
         startHistoryId: account.last_history_id,
         labelId: config.invoicesLabelId,
-        historyTypes: ["messageAdded"],
+        // Both types, deliberately — see note 6 at the top of this file.
+        historyTypes: ["messageAdded", "labelAdded"],
         pageToken,
       });
 
@@ -361,6 +442,24 @@ async function drainAccount(
         for (const added of record.messagesAdded ?? []) {
           if (messageIds.size < MAX_MESSAGES_PER_RUN) {
             messageIds.add(added.message.id);
+          }
+        }
+
+        // A label applied after delivery. The entry's own labelIds are the
+        // labels that were *added*, so this is where the invoices label is
+        // confirmed — the request-level labelId filter is documented as
+        // matching on the message's labels, which would also let through the
+        // 'processed' label this route adds itself at step 5. Filing our own
+        // bookkeeping as a fresh arrival would be harmless (the dedupe absorbs
+        // it) but it would mean a pointless download of every attachment we
+        // have already read, on every run.
+        for (const labelled of record.labelsAdded ?? []) {
+          const addedLabels = labelled.labelIds;
+          if (addedLabels && !addedLabels.includes(config.invoicesLabelId)) {
+            continue;
+          }
+          if (messageIds.size < MAX_MESSAGES_PER_RUN) {
+            messageIds.add(labelled.message.id);
           }
         }
       }
@@ -391,13 +490,20 @@ async function drainAccount(
     // days is chosen to match Gmail's own history retention: a longer window
     // would re-walk mail this app has already filed, and the dedupe would
     // absorb it, but at the cost of a great many pointless downloads.
-    report.history_reset = true;
+    // Only a genuinely unusable cursor counts as a reset. A backfill reaches
+    // this code deliberately, and reporting it as a history reset would make
+    // an intentional rescan look like Gmail had pruned the mailbox.
+    report.history_reset = !config.backfill;
     try {
       let pageToken: string | undefined;
       for (let page = 0; page < MAX_FALLBACK_PAGES; page++) {
         const response = await messagesList(accessToken, {
           labelIds: [config.invoicesLabelId],
-          q: "has:attachment newer_than:7d",
+          // Deliberately NOT excluding the processed label. A message this app
+          // labelled but failed to file is exactly what a backfill is for, and
+          // that is not hypothetical — the Content-ID bug (see isEmbeddedImage)
+          // stamped five invoices as processed while filing none of them.
+          q: `has:attachment newer_than:${config.scanDays}d`,
           pageToken,
         });
         for (const ref of response.messages ?? []) {
@@ -421,7 +527,9 @@ async function drainAccount(
     // cursor would never be written, and the *next* tick would 404 again and
     // do another full seven-day scan — for ever, on every tick. Asking Gmail
     // where the mailbox is now costs one call and ends that.
-    if (messageIds.size === 0) {
+    // Not on a backfill: that path leaves the cursor alone entirely (step 7),
+    // so there is nothing to re-baseline and a profile call would be waste.
+    if (messageIds.size === 0 && !config.backfill) {
       try {
         const profile = await getProfile(accessToken);
         nextCursor = maxHistoryId(nextCursor, profile.historyId ?? null);
@@ -650,7 +758,21 @@ async function drainAccount(
   }
 
   const patch: Record<string, unknown> = { last_drain_at: new Date().toISOString() };
-  if (nextCursor) patch.last_history_id = nextCursor;
+
+  // A backfill never touches the cursor. It looked at the label, not at the
+  // history, so it has no opinion about where the history walk should resume —
+  // and the messages it found are older than the cursor by definition, so the
+  // only thing writing one here could do is move it *backwards*.
+  //
+  // maxHistoryId guards that on every other path too, and that guard is not
+  // theoretical: on the 404 fallback nextCursor is the newest historyId among
+  // the messages the scan happened to find, which can easily be behind a cursor
+  // that Gmail refused only because it was pruned. Writing it would re-walk the
+  // same window on every tick from then on.
+  if (!config.backfill) {
+    const advanced = maxHistoryId(nextCursor, account.last_history_id);
+    if (advanced) patch.last_history_id = advanced;
+  }
 
   const { error: cursorError } = await supabase
     .from("gmail_accounts")
@@ -663,7 +785,7 @@ async function drainAccount(
     return report;
   }
 
-  report.cursor = nextCursor ?? account.last_history_id;
+  report.cursor = (patch.last_history_id as string | undefined) ?? account.last_history_id;
 
   for (const event of claimed) {
     await supabase
@@ -686,12 +808,42 @@ async function drainAccount(
  * and is true of cron-job.org, and a POST-only export answers 405 and nothing
  * ever drains. POST is kept because triggering a drain by hand (curl, or the
  * settings screen) is genuinely useful. Both verbs run this same function, and
- * both therefore go through the identical isCronRequest() check: the guard is
- * on the work, not on the verb.
+ * both therefore go through the identical authorisation below: the guard is on
+ * the work, not on the verb.
+ *
+ * Query parameters:
+ *   backfill=1  — ignore the cursor and the event queue and rescan the label
+ *                 (note 7). Safe at any time; the dedupe makes a repeat a no-op.
+ *   days=N      — how far back that scan looks. Default DEFAULT_SCAN_DAYS.
  */
 async function handleDrain(req: Request) {
   const startedAt = Date.now();
-  if (!isCronRequest(req)) return error("Not authorised", 401);
+
+  // Two callers, two ways of being authorised — the same split as
+  // /api/gmail/watch/renew, and for the same reason:
+  //
+  //   * the five-minute schedule at cron-job.org, which carries CRON_SECRET and
+  //     no session, and drains every active mailbox;
+  //   * the "Re-scan the mailbox" button on /settings, which carries a session
+  //     and no secret, and may only touch its own mailboxes.
+  //
+  // This route runs service-role, so a signed-in request is pinned to that
+  // user's accounts below. Without the pin the button would drain other
+  // people's mailboxes.
+  let onlyUserId: string | null = null;
+  if (!isCronRequest(req)) {
+    const auth = await requireUser();
+    if ("response" in auth) return auth.response;
+    onlyUserId = auth.user.id;
+  }
+
+  const params = new URL(req.url).searchParams;
+  const backfill = params.get("backfill") === "1";
+  const parsedDays = Number(params.get("days"));
+  const scanDays =
+    Number.isFinite(parsedDays) && parsedDays >= MIN_SCAN_DAYS
+      ? Math.min(Math.floor(parsedDays), MAX_SCAN_DAYS)
+      : DEFAULT_SCAN_DAYS;
 
   const invoicesLabelId = process.env.GMAIL_INVOICES_LABEL_ID;
   if (!invoicesLabelId)
@@ -712,16 +864,20 @@ async function handleDrain(req: Request) {
     processedLabelId: process.env.GMAIL_PROCESSED_LABEL_ID ?? null,
     maxBytes,
     deadline,
+    backfill,
+    scanDays,
   };
 
   // Service-role client: no session on a cron request, so RLS has no
   // auth.uid() to scope by (R3 exception — see the banner at the top).
   const supabase = createServiceClient();
 
-  const { data: rows, error: readError } = await supabase
-    .from("gmail_accounts")
-    .select("*")
-    .eq("status", "active");
+  let query = supabase.from("gmail_accounts").select("*").eq("status", "active");
+  // Not an R3 violation: the service client has no auth.uid() for RLS to use,
+  // so a session-initiated call has to say whose mailboxes it means.
+  if (onlyUserId) query = query.eq("user_id", onlyUserId);
+
+  const { data: rows, error: readError } = await query;
   if (readError) return error(readError.message, 500);
 
   const accounts = (rows ?? []) as GmailAccount[];
@@ -753,6 +909,7 @@ async function handleDrain(req: Request) {
         triaged: 0,
         skipped_duplicates: 0,
         history_reset: false,
+        backfilled: backfill,
         timed_out: false,
         errors: [detail],
         cursor: account.last_history_id,
@@ -774,14 +931,39 @@ async function handleDrain(req: Request) {
   // The full per-account detail goes to the Vercel log, not down the wire. The
   // response body has to stay small: cron-job.org keeps only the first 64KB of
   // it, and an `errors` array grows with every message that misbehaves.
+  //
+  // Logged on *every* run, not only failing ones. It used to be errors-only,
+  // and that is precisely why the labelAdded bug in note 6 went unnoticed for
+  // seven invoices: those runs were textbook successes — one attempt each, no
+  // errors, events marked done — and they printed nothing at all. A drain that
+  // says nothing when it finds nothing is indistinguishable from a drain that
+  // is working, and the difference is the whole point of reading the log.
   const errorCount = reports.reduce((n, r) => n + r.errors.length, 0);
-  if (errorCount > 0) console.error("[gmail drain]", JSON.stringify(reports));
+  const logLine = ["[gmail drain]", JSON.stringify(reports)] as const;
+  if (errorCount > 0) console.error(...logLine);
+  else console.log(...logLine);
+
+  const sum = (pick: (r: AccountReport) => number) =>
+    reports.reduce((n, r) => n + pick(r), 0);
 
   return json({
     ok: errorCount === 0,
+    backfill,
+    ...(backfill ? { scanDays } : {}),
     accountsProcessed: reports.length,
-    eventsProcessed: reports.reduce((n, r) => n + r.claimed_events, 0),
-    uploadsCreated: reports.reduce((n, r) => n + r.uploads_created, 0),
+    eventsProcessed: sum((r) => r.claimed_events),
+    // The four below are what turn "nothing appeared" into a diagnosis, and
+    // they are the reason this body is worth reading by hand. messagesSeen = 0
+    // with events processed means the history walk matched nothing; messagesSeen
+    // above 0 with uploadsCreated 0 means every attachment was rejected by the
+    // MIME/size filter in collectAttachments. Counts only, so the 64KB ceiling
+    // is in no danger.
+    messagesSeen: sum((r) => r.messages_seen),
+    uploadsCreated: sum((r) => r.uploads_created),
+    queuedForExtraction: sum((r) => r.queued_for_extraction),
+    triaged: sum((r) => r.triaged),
+    skippedDuplicates: sum((r) => r.skipped_duplicates),
+    historyReset: reports.some((r) => r.history_reset),
     eventsRemaining: eventsRemaining ?? null,
     errors: errorCount,
     partial,
