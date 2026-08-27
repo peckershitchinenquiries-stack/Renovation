@@ -56,6 +56,38 @@ payment tracking, a budget-vs-forecast dashboard, receipt uploads, and PDF/Excel
 
    Open http://localhost:3000 and sign in.
 
+## External scheduler — a deployment dependency
+
+Gmail invoice ingestion needs `/api/gmail/drain` called every five minutes.
+**Vercel's Hobby plan allows daily crons only** and rejects the deployment
+outright if `vercel.json` asks for anything finer, so that job lives outside
+this repo, at [cron-job.org](https://cron-job.org). Nothing in the codebase
+breaks if the account is lost — mail simply stops being read — so the settings
+are recorded here in order to be rebuildable:
+
+| | |
+| --- | --- |
+| URL | `https://renovation-theta.vercel.app/api/gmail/drain` |
+| Method | `GET` |
+| Schedule | `*/5 * * * *` (every 5 minutes) |
+| Header | `Authorization: Bearer <CRON_SECRET>` |
+| Expect | `200` with a small JSON body, in a few seconds |
+
+`CRON_SECRET` is the same value as the Vercel environment variable of that name,
+so **rotating it is a two-place edit** — Vercel *and* this job's header. Change
+one without the other and every drain answers 401.
+
+Two things about that scheduler shape the drain's code: it closes the connection
+at 30 seconds (so the route holds a 20-second soft budget and returns a partial
+run rather than overrunning) and it keeps only the first 64KB of the response
+(so the route answers with counts, not per-message detail). It also disables a
+job automatically after 15 consecutive failures — `/invoices` shows a warning
+when unprocessed emails pile up, which is how you find out. See about.md §8.4.
+
+The daily watch renewal (`/api/gmail/watch/renew`, 03:17) stays on Vercel Cron
+in `vercel.json`: it is legal on Hobby, and it keeps `CRON_SECRET` from being
+the only protection on that path.
+
 ## Project structure
 
 ```

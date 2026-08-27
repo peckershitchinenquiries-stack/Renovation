@@ -6,8 +6,15 @@
 // entirely, so an unguarded route would be a remote "read and write anything"
 // endpoint. This is the whole of the protection.
 //
-// Vercel Cron sends `Authorization: Bearer $CRON_SECRET` on every scheduled
-// request when CRON_SECRET is set in the project's environment variables.
+// Both callers send `Authorization: Bearer $CRON_SECRET`. /api/gmail/watch/renew
+// is still a Vercel Cron entry in vercel.json, and Vercel adds that header by
+// itself once CRON_SECRET is set in the project's environment variables.
+// /api/gmail/drain is called by cron-job.org instead — Hobby will not accept a
+// five-minute cron — and there the header is configured by hand on the job.
+//
+// That means CRON_SECRET is now also held by a third party. Rotating it is a
+// two-place edit: the Vercel environment variable *and* the cron-job.org job's
+// header. Change one without the other and the drain answers 401 on every run.
 
 import { timingSafeEqual } from "node:crypto";
 

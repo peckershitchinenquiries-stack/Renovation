@@ -1445,26 +1445,125 @@ alive?". Because 0013 is run by hand, the component treats a query error as
 "the table does not exist yet" and says so plainly rather than crashing the
 page.
 
+That heartbeat covers only half the question — it says whether Gmail is still
+*sending*, not whether anything is still *reading*. The other half is
+`components/invoices/DrainHealth.tsx` on `/invoices`; see "Knowing the drain has
+stopped" in §8.4.
+
 ---
 
 ### 8.4 Gmail ingestion, phase 2 — watch, push and drain
 
 Phase 1 stored a credential. Phase 2 is what actually reads the mailbox. Three
-routes and two libraries, on two cron schedules (`vercel.json`).
+routes and two libraries, on two schedules run by **two different schedulers**
+— see "Two schedulers, not one" below.
 
-| Route | Runs | Guard | Does |
-|---|---|---|---|
-| `GET`/`POST /api/gmail/watch/renew` | daily, 03:17 | `CRON_SECRET` bearer, **or** a signed-in session | re-registers `users.watch` on every `active` mailbox |
-| `POST /api/gmail/push` | on every notification | Google OIDC token + `?token=` secret | writes one `gmail_events` row and returns 200 |
-| `GET`/`POST /api/gmail/drain` | every 5 minutes | `CRON_SECRET` bearer | history walk → attachments → Storage → `invoice_uploads` |
+| Route | Runs | Scheduled by | Guard | Does |
+|---|---|---|---|---|
+| `GET`/`POST /api/gmail/watch/renew` | daily, 03:17 | Vercel Cron (`vercel.json`) | `CRON_SECRET` bearer, **or** a signed-in session | re-registers `users.watch` on every `active` mailbox |
+| `POST /api/gmail/push` | on every notification | nothing — Google calls it | Google OIDC token + `?token=` secret | writes one `gmail_events` row and returns 200 |
+| `GET`/`POST /api/gmail/drain` | every 5 minutes | **cron-job.org**, over plain HTTPS | `CRON_SECRET` bearer | history walk → attachments → Storage → `invoice_uploads` |
 
-**Both cron routes export `GET` as well as `POST`, and this matters.** Vercel
-Cron invokes a scheduled path with **GET**; while they exported `POST` only,
-every scheduled invocation answered 405 — nothing drained and no watch was ever
-registered or renewed. Both verbs run the same handler and so go through the
-same `isCronRequest()` check: the guard is on the work, not on the verb. `POST`
-is kept so a drain can be triggered by hand and so the settings button can
-re-register a watch.
+**Both scheduled routes export `GET` as well as `POST`, and this matters.** A
+scheduler invokes a path with **GET** — this was true of Vercel Cron and is true
+of cron-job.org; while they exported `POST` only, every scheduled invocation
+answered 405 and nothing drained and no watch was ever registered or renewed.
+Both verbs run the same handler and so go through the same `isCronRequest()`
+check: the guard is on the work, not on the verb. `POST` is kept so a drain can
+be triggered by hand and so the settings button can re-register a watch.
+
+#### Two schedulers, not one
+
+The drain wants to run every five minutes. **Vercel's Hobby plan allows daily
+crons only**, and rejects the whole deployment — not just the entry — when
+`vercel.json` asks for anything finer. So `vercel.json` now declares one cron,
+the daily watch renewal, and the five-minute drain is triggered by an external
+scheduler (cron-job.org) doing an ordinary HTTPS `GET` with the
+`Authorization: Bearer $CRON_SECRET` header set by hand on the job. No auth
+change was needed: `isCronRequest()` cannot tell the two callers apart, and does
+not need to.
+
+Two consequences worth knowing:
+
+- **`CRON_SECRET` is now held by a third party.** Rotating it is a two-place
+  edit — the Vercel environment variable *and* the header on the cron-job.org
+  job. Change one without the other and every drain answers 401.
+- **Keeping the renewal on Vercel is deliberate.** It is legal on Hobby, and it
+  means `CRON_SECRET` is not the sole protection on the watch-renewal path.
+
+The external scheduler is a **deployment dependency**: lose the cron-job.org
+account and mail stops being read, with nothing broken anywhere in this repo to
+say so. Its settings are recorded in the README so the job can be rebuilt.
+
+#### The drain is partial by design
+
+cron-job.org closes the connection at **30 seconds** and disables a job outright
+after **15 consecutive failures**. A drain that occasionally took 35 seconds
+would therefore quietly switch itself off. Two things keep it inside the window:
+
+- **A 20-second soft budget** (`DRAIN_TIME_BUDGET_MS`). It is checked at the
+  *top* of each account and each message, never part-way through one, so
+  whatever has started always finishes. Exceeding it takes the same route a
+  failed message takes: the claimed events go back to `pending` and **the cursor
+  does not move**, so the next run re-walks the same window and the byte-level
+  dedupe absorbs the repeat. `maxDuration = 60` stays as the hard backstop.
+- **Halved per-run caps**: at most **12** events per account (was 25) and **15**
+  messages per run (was 30).
+
+Neither costs throughput. At 288 runs a day the schedule moves far more than the
+caps ever asked it to, so a smaller batch simply means a leftover is picked up
+five minutes later — and "slow run" stops being a *scheduler failure* and
+becomes an ordinary partial run.
+
+The one thing a time-out does **not** skip is labelling and extraction of the
+uploads that run already created. It must not: the next run re-walks the same
+messages, the dedupe recognises those attachments and skips them, and they would
+never be queued for extraction again — they would sit at `pending` for ever.
+
+#### The response body is counts, not detail
+
+cron-job.org keeps only the first **64KB** of a response, so the drain answers
+with a fixed-size summary rather than the per-account reports it used to return
+(whose `errors` arrays grew with every message that misbehaved):
+
+```json
+{ "ok": true, "accountsProcessed": 1, "eventsProcessed": 3,
+  "uploadsCreated": 2, "eventsRemaining": 0, "errors": 0,
+  "partial": false, "ms": 4210 }
+```
+
+`partial` is true when either loop stopped on the time budget. The full
+per-account detail is still written to the Vercel log whenever anything failed.
+
+Status codes are unchanged and deliberately so. A wholesale failure — no
+`CRON_SECRET`, no `GMAIL_INVOICES_LABEL_ID`, an unreadable `gmail_accounts`
+table — is still a non-2xx, which is what makes cron-job.org's failure
+notification fire. A single unreadable attachment is **not**: it is reported as
+`ok: false` with an `errors` count inside a 200. Turning that into a 500 would
+mean one permanently-bad attachment failing fifteen runs in a row and disabling
+the schedule — precisely the outcome all of the above exists to prevent.
+
+#### Knowing the drain has stopped
+
+`components/invoices/DrainHealth.tsx` on `/invoices` answers the question the
+settings heartbeat cannot. That heartbeat (§8.3) says whether Gmail is still
+*sending*; it says nothing about whether anything is *reading*. Since the
+schedule left Vercel, that gap is a real failure mode — cron-job.org disables a
+job silently as far as this app is concerned, and everything else keeps working:
+mail arrives, Pub/Sub pushes, `gmail_events` rows are written, and then nothing
+drains them. Invoices would just stop appearing.
+
+The evidence is the oldest `gmail_events` row still at `pending`. Under 20
+minutes it is a quiet grey line ("2 emails waiting to be read, oldest 4 min
+ago"); over 20 minutes — four missed runs — it turns amber and says the
+scheduler may have stopped. No pending rows renders nothing at all, like the
+triage queue beside it.
+
+It reads through the **ordinary RLS-scoped server client**, not the service
+client the drain uses, and adds no `.eq("user_id", …)`: the `own gmail events`
+policy from 0013 already scopes it, so R3 holds (§2). One query returns both the
+count and the oldest row, and `idx_gmail_events_status_created` covers exactly
+that shape.
 
 **The first watch is registered by the OAuth callback**, not by the daily cron.
 `/api/gmail/callback` calls `watch()` immediately after the credential upsert

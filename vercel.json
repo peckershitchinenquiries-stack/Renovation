@@ -2,10 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     {
-      "path": "/api/gmail/drain",
-      "schedule": "*/5 * * * *"
-    },
-    {
       "path": "/api/gmail/watch/renew",
       "schedule": "17 3 * * *"
     }

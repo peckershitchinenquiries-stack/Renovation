@@ -2,8 +2,16 @@
 //
 // The other half of the split described in app/api/gmail/push/route.ts. The
 // push endpoint acks in milliseconds and writes a gmail_events row; this does
-// the slow part on a five-minute cron: walk the mailbox's history, pull down
-// the attachments, put them in Storage, and file a row for each one.
+// the slow part on a five-minute schedule: walk the mailbox's history, pull
+// down the attachments, put them in Storage, and file a row for each one.
+//
+// **The five-minute schedule is not Vercel's.** Vercel's Hobby plan allows
+// daily crons only, so this path is called by cron-job.org over plain HTTPS
+// with the same `Authorization: Bearer $CRON_SECRET` header Vercel Cron used to
+// send. Two things follow, and both are handled below: that scheduler hangs up
+// at 30 seconds (hence DRAIN_TIME_BUDGET_MS) and keeps only the first 64KB of
+// the response (hence the counts-only body at the end of handleDrain). See
+// README "External scheduler" and about.md §8.4.
 //
 // ############################################################
 // ##  R3 EXCEPTION — this file, and the two Gmail routes     ##
@@ -86,20 +94,44 @@ import { extractQueued } from "@/lib/gmail/ingestExtract";
 import type { GmailAccount, GmailEvent, SupplierDomain } from "@/types";
 
 export const dynamic = "force-dynamic";
-// Same budget as the extract route. The work is bounded by the caps below
-// rather than by the clock, but a pathological mailbox should not run forever.
+// Same backstop as the extract route, and it stays at the Vercel ceiling. This
+// is *not* the working budget — see DRAIN_TIME_BUDGET_MS below. It is the
+// hard limit that stops a pathological mailbox running forever.
 export const maxDuration = 60;
 
 // ------------------------------------------------------------------
 // Caps. Every one of these exists to bound a single invocation.
 // ------------------------------------------------------------------
 const BUCKET = "invoices";
-const MAX_EVENTS_PER_ACCOUNT = 25;
+// Halved (25 → 12) when the schedule moved off Vercel Cron to cron-job.org,
+// which closes the connection at 30 seconds. See DRAIN_TIME_BUDGET_MS.
+const MAX_EVENTS_PER_ACCOUNT = 12;
 /** After five tries a notification is not going to succeed on the sixth. */
 const MAX_ATTEMPTS = 5;
 const MAX_HISTORY_PAGES = 20;
 const MAX_FALLBACK_PAGES = 5;
-const MAX_MESSAGES_PER_RUN = 30;
+// Halved (30 → 15) for the same reason.
+const MAX_MESSAGES_PER_RUN = 15;
+
+/**
+ * Soft wall-clock budget for one invocation.
+ *
+ * The run is now **partial by design**. Anything left over is picked up by the
+ * next run five minutes later, and at 288 runs a day the throughput is far
+ * higher than the caps above were ever going to need — so a smaller batch costs
+ * nothing, and it turns "slow run" from a *scheduler failure* into an ordinary
+ * partial run. That matters because the schedule now lives at cron-job.org,
+ * which hangs up at 30 seconds and disables a job outright after 15 consecutive
+ * failures; a drain that occasionally takes 35 seconds would quietly switch
+ * itself off. 20 seconds leaves room for the in-flight unit of work to finish
+ * inside the 30-second window.
+ *
+ * The check is always at the TOP of an iteration, never mid-way through one:
+ * whatever has started always completes. Exceeding it does not abandon a batch
+ * — it takes the same route as a failed message, which releases the claimed
+ * events and leaves the cursor exactly where it was.
+ */
+const DRAIN_TIME_BUDGET_MS = 20_000;
 
 // The floor exists to skip junk — logos, signature images, tracking pixels
 // that arrive as attachments — NOT to judge an invoice by its size. It was
@@ -209,6 +241,8 @@ interface AccountReport {
   triaged: number;
   skipped_duplicates: number;
   history_reset: boolean;
+  /** True when the message loop stopped on DRAIN_TIME_BUDGET_MS, not on data. */
+  timed_out: boolean;
   errors: string[];
   cursor: string | null;
 }
@@ -216,7 +250,13 @@ interface AccountReport {
 async function drainAccount(
   supabase: SupabaseClient,
   account: GmailAccount,
-  config: { invoicesLabelId: string; processedLabelId: string | null; maxBytes: number }
+  config: {
+    invoicesLabelId: string;
+    processedLabelId: string | null;
+    maxBytes: number;
+    /** Date.now() past which no *new* message may be started. */
+    deadline: number;
+  }
 ): Promise<AccountReport> {
   const report: AccountReport = {
     email: account.email_address,
@@ -227,6 +267,7 @@ async function drainAccount(
     triaged: 0,
     skipped_duplicates: 0,
     history_reset: false,
+    timed_out: false,
     errors: [],
     cursor: account.last_history_id,
   };
@@ -412,6 +453,16 @@ async function drainAccount(
   let anyMessageFailed = false;
 
   for (const messageId of messageIds) {
+    // The time check, at the top of the iteration so a message that has started
+    // always finishes. Stopping here is handled at step 7 exactly like a failed
+    // message: the events go back to 'pending' and the cursor does not move, so
+    // the next run re-walks this same window and the dedupe absorbs the repeat.
+    // Nothing is claimed, downloaded or filed out of order because of this.
+    if (Date.now() > config.deadline) {
+      report.timed_out = true;
+      break;
+    }
+
     try {
       const message = await messagesGet(accessToken, messageId);
       report.messages_seen++;
@@ -579,10 +630,22 @@ async function drainAccount(
   }
 
   // ---- 7. advance the cursor, last of all (see note 5) -----------------
-  if (anyMessageFailed) {
-    // Something in this batch did not land. Leave the cursor and let the next
-    // tick re-walk the same window; the dedupe makes the repeat harmless.
-    await release("Part of the batch did not complete — will be retried.");
+  // Note that steps 5 and 6 above run even after a time-budget break, and they
+  // must: the uploads this run *did* create have to be labelled and extracted
+  // now. The next run re-walks the same window, but the dedupe recognises those
+  // attachments and skips them, so they would never be queued for extraction a
+  // second time and would sit at 'pending' for ever. Finishing them is worth
+  // the few seconds it can push the run past 20s — maxDuration is the real
+  // ceiling, and 60s still comfortably contains it.
+  if (anyMessageFailed || report.timed_out) {
+    // Something in this batch did not land — a message failed, or the clock ran
+    // out before the rest were looked at. Leave the cursor and let the next run
+    // re-walk the same window; the dedupe makes the repeat harmless.
+    await release(
+      report.timed_out
+        ? "Ran out of time this run — the rest will be picked up on the next one."
+        : "Part of the batch did not complete — will be retried."
+    );
     return report;
   }
 
@@ -619,13 +682,15 @@ async function drainAccount(
 /**
  * The drain itself. Exported below as **both** GET and POST.
  *
- * Vercel Cron invokes a scheduled path with GET, not POST — a POST-only export
- * answers 405 and nothing ever drains. POST is kept because triggering a drain
- * by hand (curl, or the settings screen) is genuinely useful. Both verbs run
- * this same function, and both therefore go through the identical
- * isCronRequest() check: the guard is on the work, not on the verb.
+ * A scheduler invokes a path with GET, not POST — this was true of Vercel Cron
+ * and is true of cron-job.org, and a POST-only export answers 405 and nothing
+ * ever drains. POST is kept because triggering a drain by hand (curl, or the
+ * settings screen) is genuinely useful. Both verbs run this same function, and
+ * both therefore go through the identical isCronRequest() check: the guard is
+ * on the work, not on the verb.
  */
 async function handleDrain(req: Request) {
+  const startedAt = Date.now();
   if (!isCronRequest(req)) return error("Not authorised", 401);
 
   const invoicesLabelId = process.env.GMAIL_INVOICES_LABEL_ID;
@@ -641,10 +706,12 @@ async function handleDrain(req: Request) {
       ? parsedMax
       : DEFAULT_MAX_ATTACHMENT_BYTES;
 
+  const deadline = startedAt + DRAIN_TIME_BUDGET_MS;
   const config = {
     invoicesLabelId,
     processedLabelId: process.env.GMAIL_PROCESSED_LABEL_ID ?? null,
     maxBytes,
+    deadline,
   };
 
   // Service-role client: no session on a cron request, so RLS has no
@@ -659,8 +726,17 @@ async function handleDrain(req: Request) {
 
   const accounts = (rows ?? []) as GmailAccount[];
   const reports: AccountReport[] = [];
+  let partial = false;
 
   for (const account of accounts) {
+    // Top-of-iteration time check, same rule as the message loop: a mailbox
+    // that has been started is always finished. One skipped here is simply not
+    // touched at all — its events stay 'pending' and the next run claims them.
+    if (Date.now() > deadline) {
+      partial = true;
+      break;
+    }
+
     try {
       reports.push(await drainAccount(supabase, account, config));
     } catch (e) {
@@ -677,13 +753,40 @@ async function handleDrain(req: Request) {
         triaged: 0,
         skipped_duplicates: 0,
         history_reset: false,
+        timed_out: false,
         errors: [detail],
         cursor: account.last_history_id,
       });
     }
   }
 
-  return json({ accounts: accounts.length, reports });
+  if (reports.some((r) => r.timed_out)) partial = true;
+
+  // How much is still waiting. One cheap count, and the only number that says
+  // whether the schedule is keeping up — the invoices screen shows the same
+  // figure to the user (components/invoices/DrainHealth.tsx).
+  // Service-role count; there is no auth.uid() to scope by (R3 exception).
+  const { count: eventsRemaining } = await supabase
+    .from("gmail_events")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "pending");
+
+  // The full per-account detail goes to the Vercel log, not down the wire. The
+  // response body has to stay small: cron-job.org keeps only the first 64KB of
+  // it, and an `errors` array grows with every message that misbehaves.
+  const errorCount = reports.reduce((n, r) => n + r.errors.length, 0);
+  if (errorCount > 0) console.error("[gmail drain]", JSON.stringify(reports));
+
+  return json({
+    ok: errorCount === 0,
+    accountsProcessed: reports.length,
+    eventsProcessed: reports.reduce((n, r) => n + r.claimed_events, 0),
+    uploadsCreated: reports.reduce((n, r) => n + r.uploads_created, 0),
+    eventsRemaining: eventsRemaining ?? null,
+    errors: errorCount,
+    partial,
+    ms: Date.now() - startedAt,
+  });
 }
 
 export const GET = handleDrain;

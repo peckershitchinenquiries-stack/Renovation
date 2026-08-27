@@ -3505,3 +3505,142 @@ over with this change: connect Gmail and confirm the watch registers, press the
 manual watch button, trigger a drain with GET, watch an invoice from an unknown
 sender appear in the triage list, use *Trust & extract* and land on the review
 screen, then confirm the next invoice from that same sender skips triage.
+
+---
+
+### 2026-08-27 — The five-minute Gmail drain moved off Vercel to an external scheduler
+
+**What changed (in plain English):**
+The job that reads new invoice emails used to be scheduled by Vercel itself,
+every five minutes. Vercel's free (Hobby) plan only allows jobs that run once a
+day, and it refuses to publish the whole site — not just that one job — while
+`vercel.json` asks for anything more frequent. The five-minute job has therefore
+been moved to an outside service, **cron-job.org**, which simply calls the same
+web address over the internet every five minutes with the same secret password
+in the request. Nothing about the security of that address changed; it already
+accepted exactly this kind of call.
+
+Because the outside service behaves differently from Vercel, three things in the
+app were adjusted to suit it, and one new thing was added:
+
+1. **The drain now stops itself after 20 seconds** and finishes whatever it had
+   already started. cron-job.org hangs up at 30 seconds and counts that as a
+   failure, and it switches a job off entirely after 15 failures in a row.
+2. **It takes smaller bites.** At most 12 email notifications per mailbox per
+   run (was 25) and at most 15 messages per run (was 30).
+3. **It answers with a short summary instead of a long report.** cron-job.org
+   only keeps the first 64KB of a reply, and the old reply grew longer every
+   time a message misbehaved.
+4. **The invoices screen now warns when emails stop being read.** If the outside
+   scheduler is switched off, everything else carries on working — mail arrives
+   and is recorded — and invoices simply stop appearing, with nothing anywhere
+   saying why. The screen now shows how many emails are waiting and how old the
+   oldest one is, and turns amber past 20 minutes.
+
+Stopping early is safe and is the intended behaviour, not a failure. Anything
+left over is picked up by the next run five minutes later. The job runs 288
+times a day, so it moves far more mail than the old limits ever asked it to.
+
+**Why:**
+The deployment was being rejected by Vercel with a validation error on
+`vercel.json`, so nothing could be published at all. Moving the schedule out was
+the only way to keep a five-minute drain on the free plan.
+
+The daily watch-renewal job (03:17) was **deliberately left on Vercel**. It is
+allowed on the free plan, it runs on Vercel's own trusted scheduler, and keeping
+it there means the shared secret is not the only thing protecting the
+watch-renewal address.
+
+**Where the information came from:**
+User request, plus the published limits of the two services (Vercel Hobby: daily
+crons only; cron-job.org: 30-second timeout, 64KB response ceiling, job disabled
+after 15 consecutive failures).
+
+**Files used (read, not changed):**
+- `lib/gmail/ingestExtract.ts` — to check what the slow part of a run actually
+  is, and to confirm the three-at-a-time extraction cap was left alone
+- `supabase/migrations/0013_gmail_ingest.sql` — to confirm `gmail_events` has a
+  row-level-security policy for its owner, so the new warning can be read
+  through the ordinary logged-in connection rather than the admin one
+- `components/invoices/TriageSection.tsx` — for the "render nothing when there
+  is nothing to say" pattern the new component copies
+- `components/settings/GmailSection.tsx` — the existing heartbeat, which turned
+  out to live on the settings screen and not the invoices screen
+
+**Files changed:**
+- `vercel.json` — the `/api/gmail/drain` entry was removed. The daily
+  `/api/gmail/watch/renew` entry at `17 3 * * *` is untouched and is now the
+  only cron Vercel runs
+- `app/api/gmail/drain/route.ts` — added a 20-second soft time budget checked at
+  the top of each mailbox and each message; halved the two per-run limits;
+  replaced the long per-mailbox reply with a fixed-size summary (the detail now
+  goes to the Vercel log instead); rewrote the header comment to say who calls
+  this and why the limits are what they are
+- `lib/gmail/cron.ts` — comment only: records that the secret is now also held
+  by an outside service and that rotating it is a two-place edit
+- `components/invoices/DrainHealth.tsx` — **new.** The "emails are piling up"
+  warning
+- `app/(app)/invoices/page.tsx` — renders it above the triage queue
+- `README.md` — new "External scheduler" section recording the URL, method,
+  schedule and header, so the job can be rebuilt if the cron-job.org account is
+  ever lost
+- `about.md` — §8.3 cross-reference, and §8.4 rewritten: the routes table now
+  names which scheduler runs each route, and four new subsections cover the two
+  schedulers, the partial-by-design run, the counts-only reply, and the new
+  warning
+
+**Security note, stated plainly:** the drain is now triggered by a **third-party
+service**, and `CRON_SECRET` is therefore stored in a cron-job.org account as
+well as in Vercel. Rotating it means changing it in **both** places; change one
+and every run answers 401. Anyone with that secret can trigger a drain — which
+reads the connected mailbox and files invoices — so it is worth the same care as
+a password.
+
+**Database:**
+**None.** No migration was written and none is needed. The new warning reads
+`gmail_events`, which already exists (`0013_gmail_ingest.sql`) and already has
+the `own gmail events` policy and a `select` grant for logged-in users, and the
+index `idx_gmail_events_status_created` already covers the exact query it makes.
+Nothing was run in the Supabase SQL editor.
+
+**Result / numbers after:**
+No money figure moved; `about.md` §13 is unchanged.
+
+| | Before | After |
+|---|---|---|
+| Drain scheduled by | Vercel Cron (`vercel.json`) | cron-job.org (external HTTPS call) |
+| Drain schedule | `*/5 * * * *` — rejected on Hobby | `*/5 * * * *` — accepted |
+| Watch renewal scheduled by | Vercel Cron | Vercel Cron (**unchanged**) |
+| Events per mailbox per run | 25 | 12 |
+| Messages per run | 30 | 15 |
+| Soft time budget | none | 20 seconds |
+| Hard ceiling (`maxDuration`) | 60 seconds | 60 seconds (**unchanged**) |
+| Reply size | grew with every message error | fixed 8-field summary |
+| Warning when the drain stops | none | on `/invoices`, amber past 20 minutes |
+
+Five pieces of the drain were explicitly **not** touched, having been audited
+previously and confirmed correct: the byte-level de-duplication, the
+compare-and-swap event claim, the order in which the cursor advances, the
+supplier-domain gate, and the three-at-a-time extraction limit. The time budget
+was built on top of the drain's existing "something did not land" path, which
+already puts the events back and leaves the cursor where it was — so the point
+at which the cursor is written did not move.
+
+One deliberate judgement call on the reply status code: a wholesale failure (no
+secret configured, no Gmail label configured, the accounts table unreadable) is
+still a non-2xx, so cron-job.org's failure alert fires. A single unreadable
+attachment is **not** — it comes back as `ok: false` and an error count inside a
+200. Making that a 500 would let one permanently-bad attachment fail fifteen
+runs in a row and switch the schedule off, which is the exact outcome this whole
+change exists to avoid.
+
+`npm run build` passes: compiled successfully, types and lint clean, exit 0. The
+`/invoices` route grew from 1.48 kB to 1.56 kB, which is the new warning
+component.
+
+**Not exercised against a live mailbox.** Checklist handed over: confirm the
+deployment now succeeds; call the drain by hand with the secret and confirm a
+200, a small body and a few seconds; call it without the header and confirm 401;
+send a test invoice and confirm it appears within about six minutes; pause the
+scheduler and confirm the amber warning appears on `/invoices`, then un-pause it
+and confirm the warning goes; check the warning on a narrow and a wide screen.
