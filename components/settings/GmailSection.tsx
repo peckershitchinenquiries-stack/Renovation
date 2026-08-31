@@ -8,6 +8,10 @@
 import { createClient } from "@/lib/supabase/server";
 import RenewWatchButton from "./RenewWatchButton";
 import RescanMailboxButton from "./RescanMailboxButton";
+import { SectionHeader } from "@/components/ui/PageHeader";
+import { Icon } from "@/components/ui/Icon";
+import { IconTile } from "@/components/ui/List";
+import { EmptyState } from "@/components/ui/States";
 import type { GmailAccount } from "@/types";
 
 // Rendered as an age rather than a timestamp because the only question this
@@ -32,11 +36,42 @@ const STATUS_LABEL: Record<GmailAccount["status"], string> = {
   paused: "Paused",
 };
 
-const STATUS_CLASS: Record<GmailAccount["status"], string> = {
-  active: "text-green-700",
+const STATUS_DOT: Record<GmailAccount["status"], string> = {
+  active: "bg-emerald-500",
+  needs_reauth: "bg-red-500",
+  paused: "bg-gray-400",
+};
+
+const STATUS_TEXT: Record<GmailAccount["status"], string> = {
+  active: "text-emerald-700",
   needs_reauth: "text-red-600",
   paused: "text-gray-500",
 };
+
+/** One coloured advisory strip. Three of these used three different styles. */
+function Notice({
+  tone,
+  children,
+}: {
+  tone: "good" | "bad" | "warn";
+  children: React.ReactNode;
+}) {
+  const style =
+    tone === "good"
+      ? "bg-emerald-50 text-emerald-800 ring-emerald-600/15"
+      : tone === "bad"
+        ? "bg-red-50 text-red-700 ring-red-600/15"
+        : "bg-amber-50 text-amber-900 ring-amber-600/15";
+  const icon = tone === "good" ? "check" : tone === "bad" ? "alert" : "info";
+  return (
+    <div
+      className={`mb-3 flex items-start gap-2.5 rounded-2xl px-4 py-3 text-[0.8125rem] leading-relaxed ring-1 ring-inset ${style}`}
+    >
+      <Icon name={icon} size={17} className="mt-0.5 shrink-0" />
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
+}
 
 export default async function GmailSection({
   connected,
@@ -54,7 +89,9 @@ export default async function GmailSection({
 }) {
   const supabase = createClient();
 
-  // No .eq("user_id", …) — RLS scopes this to the signed-in user (R3).
+  // No .eq("user_id", …) — RLS scopes this (R3). Since 0015 that means every
+  // mailbox connected by anyone in the shared workspace, not just this
+  // person's: the list is already a list, so it renders them all.
   const { data, error } = await supabase
     .from("gmail_accounts")
     .select("*")
@@ -67,118 +104,123 @@ export default async function GmailSection({
   const accounts = (data ?? []) as GmailAccount[];
 
   return (
-    <section className="mt-8">
-      <h2 className="mb-1 text-lg font-semibold text-gray-900">Gmail</h2>
-      <p className="mb-3 text-sm text-gray-500">
-        Connect a mailbox so supplier invoices sent by email can be read without
-        being downloaded and re-uploaded by hand.
-      </p>
+    <section>
+      <SectionHeader
+        title="Gmail"
+        hint="Read supplier invoices straight out of a mailbox"
+      />
 
-      {connected && (
-        <p className="mb-3 rounded border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
-          Connected {connected}.
-        </p>
-      )}
-      {errorMessage && (
-        <p className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {errorMessage}
-        </p>
-      )}
+      {connected ? <Notice tone="good">Connected {connected}.</Notice> : null}
+      {errorMessage ? <Notice tone="bad">{errorMessage}</Notice> : null}
       {/* Connected, but no Pub/Sub subscription — so no email would ever
           arrive. Surfaced next to the button that fixes it. */}
-      {watchFailed && (
-        <p className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-          The mailbox is connected, but the Gmail watch could not be
-          registered, so no email will arrive yet. Press{" "}
-          <strong>Register / refresh watch</strong> below to try again.
-          {watchError && (
-            <span className="mt-1 block text-xs text-amber-700">
-              {watchError}
-            </span>
-          )}
-        </p>
-      )}
+      {watchFailed ? (
+        <Notice tone="warn">
+          The mailbox is connected, but the Gmail watch could not be registered,
+          so no email will arrive yet. Press{" "}
+          <strong className="font-bold">Register / refresh watch</strong> below
+          to try again.
+          {watchError ? (
+            <span className="mt-1 block text-xs opacity-80">{watchError}</span>
+          ) : null}
+        </Notice>
+      ) : null}
 
-      <div className="card">
-        {tableMissing ? (
-          <p className="text-sm text-gray-500">
+      {tableMissing ? (
+        <div className="card">
+          <p className="text-sm leading-relaxed text-gray-500">
             Not available yet — migration{" "}
-            <code className="text-xs">0013_gmail_ingest.sql</code> has not been
-            run in the Supabase SQL editor.
+            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700">
+              0013_gmail_ingest.sql
+            </code>{" "}
+            has not been run in the Supabase SQL editor.
           </p>
-        ) : accounts.length === 0 ? (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-gray-500">No mailbox connected.</p>
+        </div>
+      ) : accounts.length === 0 ? (
+        <EmptyState
+          icon="mail"
+          compact
+          title="No mailbox connected"
+          description="Connect one and invoices emailed by suppliers are read automatically."
+          action={
             <a href="/api/gmail/connect" className="btn-primary">
+              <Icon name="mail" size={18} />
               Connect Gmail
             </a>
-          </div>
-        ) : (
-          <ul className="divide-y divide-gray-100">
+          }
+        />
+      ) : (
+        <>
+          <div className="card-flush row-divide">
             {accounts.map((a) => (
-              <li
-                key={a.id}
-                className="flex flex-wrap items-center justify-between gap-3 py-2 first:pt-0 last:pb-0"
-              >
-                <div>
-                  <p className="text-sm font-medium text-gray-900">
+              <div key={a.id} className="flex items-start gap-3 px-4 py-3.5">
+                <IconTile
+                  name="mail"
+                  tone={a.status === "active" ? "good" : a.status === "needs_reauth" ? "bad" : "neutral"}
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[0.9375rem] font-semibold text-gray-900">
                     {a.email_address}
                   </p>
-                  <p className="text-xs text-gray-500">
-                    <span className={STATUS_CLASS[a.status]}>
+                  <p className="mt-0.5 flex items-center gap-1.5 text-xs">
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[a.status]}`}
+                    />
+                    <span className={`font-semibold ${STATUS_TEXT[a.status]}`}>
                       {STATUS_LABEL[a.status]}
                     </span>
-                    {" · last email "}
-                    {age(a.last_notification_at)}
+                    <span className="text-gray-400">
+                      · last email {age(a.last_notification_at)}
+                    </span>
                   </p>
-                  <p className="text-xs text-gray-500">
+                  <p className="mt-1 text-xs leading-relaxed text-gray-500">
                     {a.watch_expiration
                       ? `Watch expires ${new Date(
                           a.watch_expiration
                         ).toLocaleString("en-GB")}`
                       : "No watch registered — nothing will arrive until there is one."}
                   </p>
-                  {a.error && (
+                  {a.error ? (
                     <p className="mt-1 text-xs text-red-600">{a.error}</p>
-                  )}
+                  ) : null}
                 </div>
                 <a
                   href="/api/gmail/connect"
-                  className="text-xs text-blue-600 hover:underline"
+                  className="btn-ghost btn-sm shrink-0 text-brand-700"
                 >
                   Reconnect
                 </a>
-              </li>
+              </div>
             ))}
-          </ul>
-        )}
+          </div>
 
-        {/* One button each for the section, not one per row: both act on every
-            mailbox this user has connected. */}
-        {!tableMissing && accounts.length > 0 && (
-          <div className="mt-3 space-y-3 border-t border-gray-100 pt-3">
-            <div className="flex flex-wrap items-center gap-3">
+          {/* One button each for the section, not one per row: both act on every
+              mailbox this user has connected. Each carries its own explanation
+              underneath rather than beside it — a sentence squeezed next to a
+              button wraps to three words per line on a phone. */}
+          <div className="mt-3 space-y-3">
+            <div className="card">
               <RenewWatchButton />
-              <span className="text-xs text-gray-500">
+              <p className="hint">
                 Registers the Gmail watch now. Needed if it failed while
                 connecting, and harmless at any other time.
-              </span>
+              </p>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="card">
               <RescanMailboxButton />
-              <span className="text-xs text-gray-500">
+              <p className="hint">
                 Reads the invoices label again from the last 30 days. Use it when
                 an email arrived in Gmail but never appeared on the invoices
                 screen. Anything already read is skipped.
-              </span>
+              </p>
             </div>
           </div>
-        )}
-      </div>
+        </>
+      )}
 
-      <p className="mt-2 text-xs text-gray-400">
-        While the Google consent screen is in Testing mode the connection
-        expires after seven days and has to be reconnected.
+      <p className="hint mt-2.5">
+        While the Google consent screen is in Testing mode the connection expires
+        after seven days and has to be reconnected.
       </p>
     </section>
   );

@@ -54,7 +54,9 @@ migration file does not apply it. Always tell the user to run it.
    is simply nothing on the other side of it. Do not sum the two anyway. See §5.
 3. **Never add `.eq("user_id", …)` to a query.** RLS does the scoping. But
    a new table with no RLS policy returns nothing — or leaks everything if RLS
-   is left disabled.
+   is left disabled. Since `0015` the scope is **"everyone signed in"**, not
+   "the row's owner": this is one shared workspace, and a new table needs the
+   `shared workspace` policy or it will show a friend an empty tab. See §9.
 4. **CHECK constraints reject, they don't coerce.** A `vat_rate` of 17.5 fails
    the insert outright (0, 5 and 20 are the allowed rates since `0011` — 5 was
    rejected too before that). Match the allowed value lists in §4 exactly.
@@ -476,7 +478,7 @@ accumulated rounding, the three row counts equal, and `expenses_view` reproducin
 |---|---|---|
 | Comes from | the spreadsheet, plus anything added in-app | nothing — the import that fed it was retired by `0009` |
 | Rows | 111 (weeks 1–23) | **0** |
-| Appears in | **Expenses tab** and **all Overview analytics**, **Dashboard cards** | nothing — see the note below |
+| Appears in | **Costs tab** and **all Overview analytics**, **Dashboard cards** | nothing — see the note below |
 | Money | £151,644.78 actual incl-VAT | £0.00 |
 
 > ⚠️ **Since 2026-08-14 the ledger side is empty**, because
@@ -489,7 +491,7 @@ accumulated rounding, the three row counts equal, and `expenses_view` reproducin
 > **Consequence for reading the app today (updated 2026-08-20):** Trades,
 > Labour, Materials, Suppliers and the Price Tracker no longer read
 > `expense_entries` at all — they are built from invoices (§6.6–§6.8), so the
-> `source` split does not reach them. It still governs the Expenses tab, the
+> `source` split does not reach them. It still governs the Costs tab, the
 > Overview analytics and the Dashboard cards, which is where it always
 > mattered.
 
@@ -502,7 +504,7 @@ ledger, `0005` re-imported them all at week 1, and `0009` removed them —
 apply it, and must keep applying it:
 
 - `components/project/ProjectDetail.tsx:73` — `diaryEntries`, feeds Overview
-- `components/project/ExpensesTab.tsx:66` — feeds the Expenses list
+- `components/project/ExpensesTab.tsx:283` — feeds the Costs list
 - `app/(app)/dashboard/page.tsx` — feeds the dashboard cards
   *(added 2026-07-22; its absence was a real bug — the card read 144%)*
 
@@ -524,7 +526,8 @@ empty since `0009` every screen was showing the reader a two-sided split with
 one side missing, plus a note explaining why the halves must never be added.
 `components/purchases/totals.ts` (`combineTotals`) now adds the split up at the
 last moment, for display only, on `/suppliers`, `/suppliers/[id]`,
-`/projects/[id]/purchases` and the project's invoice banner; `/items/[id]` does
+`/projects/[id]/purchases` and the Overview tab's invoice sentence (it fed the
+project's invoice banner until that was deleted, §6.2.1); `/items/[id]` does
 the same inline for its quantity/net figures. The day a second dataset arrives,
 the split is still in the data and the screens are one change away from showing
 it again. See §8.1.
@@ -573,19 +576,64 @@ Input: **diary entries only**, further filtered by
 `ACTIVE = status !== "Cancelled"` (line 19). Every card below excludes
 cancelled rows.
 
-| Card label | Field | Formula | Line |
-|---|---|---|---|
-| **Target Budget** | `target_budget` | `projects.target_budget` — a stored column, not computed | 29 |
-| **Total Quoted** | `total_quoted` | `Σ quoted_amount` — **incl-VAT**, see §3.1 | 26 |
-| **Actual Total** | `forecast_total` | `Σ total_incl_vat` — i.e. **incl-VAT** | 27 |
-| **Variance vs Quote** | `variance` | `forecast_total − total_quoted`, rounded to the penny and normalised so an exact match is `0`, not `-0` | 32 |
-| **Paid to Date** | `paid_to_date` | `Σ paid_amount` — **incl-VAT**, see §3.1 | 28 |
-| **Remaining to Pay** | `remaining_to_pay` | `forecast_total − paid_to_date` | 44 |
-| **Weeks Tracked** | `weeks_tracked` | count of **distinct** `week_number` | 35 |
-| *(not shown)* | `contingency_amount` | `max(variance, 0)` | 33 |
-| *(not shown)* | `forecast_plus_contingency` | `forecast_total + contingency_amount` | 42 |
+**The labels changed on 2026-08-28** (the money vocabulary, §6.2.1). The
+formulas did not — only the words. Old labels are kept in the table so an old
+screenshot or spreadsheet note can still be matched up.
 
-Rendered by `components/project/OverviewTab.tsx:57–85`.
+| Card label | Was called | Field | Formula | Line |
+|---|---|---|---|---|
+| **Budget** | Target Budget | `target_budget` | `projects.target_budget` — a stored column, not computed | 29 |
+| **Committed** | Total Quoted | `total_quoted` | `Σ quoted_amount` — **incl-VAT**, see §3.1 | 26 |
+| **Cost** | Actual Total | `forecast_total` | `Σ total_incl_vat` — i.e. **incl-VAT** | 27 |
+| **Variance** | Variance vs Quote | `variance` | `forecast_total − total_quoted`, rounded to the penny and normalised so an exact match is `0`, not `-0` | 32 |
+| **Paid** | Paid to Date | `paid_to_date` | `Σ paid_amount` — **incl-VAT**, see §3.1 | 28 |
+| **Owed** | Remaining to Pay | `remaining_to_pay` | `forecast_total − paid_to_date` | 44 |
+| **Weeks tracked** | Weeks Tracked | `weeks_tracked` | count of **distinct** `week_number` | 35 |
+| *(not shown)* | — | `contingency_amount` | `max(variance, 0)` | 33 |
+| *(not shown)* | — | `forecast_plus_contingency` | `forecast_total + contingency_amount` | 42 |
+
+Rendered by `components/project/OverviewTab.tsx`. Each card now carries its
+one-line definition as a `hint`, taken from `lib/vocabulary.ts`.
+
+Below the cards sits one sentence saying how much of **Cost** arrived on
+invoices, and how much of that is still **Owed**. That sentence replaced the
+`InvoiceBanner` — see §6.2.1.
+
+### 6.2.1 The money vocabulary — `lib/vocabulary.ts`
+
+Four words, one quantity each, on every screen:
+
+| Word | The quantity | Columns behind it |
+|---|---|---|
+| **Committed** | agreed or quoted, incl VAT | `quoted_amount` |
+| **Cost** | what it actually cost, incl VAT | `total_incl_vat`, `gross_total`, `line_gross` |
+| **Paid** | money handed over | `paid_amount`, `payments.amount` |
+| **Owed** | Cost − Paid | `remaining`, `balance` |
+
+**Budget** is deliberately not one of them: it is a target set on the project,
+not a figure derived from spend.
+
+Before this, the same number had a different name on nearly every screen —
+`total_incl_vat` was *Actual*, *Actual Total*, *Gross*, *Total*, *Invoiced*,
+*Total spend* and *Spent*; `total − paid` was *Remaining*, *Balance*,
+*Outstanding* and *Owed*. Nothing said those were the same quantity, so each
+screen read as a fresh set of figures that had to be reconciled by hand.
+
+The labels are display-only. Column and field names are unchanged, and so is
+every formula — `lib/vocabulary.ts` says explicitly that it is what the reader
+is told, not what the database calls it.
+
+**The `InvoiceBanner` is gone** (deleted, `components/project/InvoiceBanner.tsx`).
+It sat above all seven tabs showing *Invoiced / Paid / Outstanding* off
+`purchases`. Because invoice rows arrive with `source: "invoice"` and the diary
+filter is `source !== "ledger"`, they were **already counted in the Overview's
+Cost card** directly beneath it — so the banner was printing a subset of the
+number next to it, in different words, as though it were a separate total.
+Anyone comparing the two concluded the app disagreed with itself. It is now one
+sentence on Overview that says plainly it is a part of Cost.
+
+The dashboard card had the same fault in miniature — an "Invoices" block headed
+*Invoiced* beside *Spent* — and now reads "Of that, on N invoices".
 
 **Header "% of budget"** — `ProjectDetail.tsx:89` —
 `round(forecast_total / target_budget × 100)`.
@@ -660,7 +708,12 @@ Two slices only: `Materials` (category = Materials) and `Labour` (everything
 else). Both `Σ total_incl_vat`, cancelled excluded.
 Feeds `components/charts/CategoryDonut.tsx`.
 
-### 6.6 Trades and Labour tabs — `lib/invoiceViews.ts`
+### 6.6 Analysis: by trade, and the Labour filter — `lib/invoiceViews.ts`
+
+> Since 2026-08-28 these are **pivots of the Analysis tab**, not tabs of their
+> own (§8, "The four tabs"). Every formula below is unchanged — only where the
+> reader finds it changed.
+
 
 > **Changed 2026-08-20.** These read **invoices**, not `expense_entries`. The
 > old `buildTrades` in `lib/summary.ts` still exists and still works — the API
@@ -761,8 +814,8 @@ Three rules the form enforces on screen:
   Suppliers will therefore show a balance even though the status reads Paid. It
   saves anyway — a deposit against a labour bill is a real thing.
 
-The payment is written as a **difference**, the same rule Mark Paid follows
-(§4.7): a purchase has no paid column, so the amount handed over is the gap
+The payment is written as a **difference**, the same rule the Costs tab's **Pay**
+button follows (§4.7): a purchase has no paid column, so the amount handed over is the gap
 between what you say is paid and what the `payments` rows already total. On a
 new entry that total is zero, so the gap is the whole amount — but it is
 computed rather than assumed, so re-saving can never double-pay.
@@ -780,7 +833,7 @@ reason — the item timeline on `/items` is what makes that tracking work.
 ordinary purchase, so it is edited on `/projects/[id]/purchases/[pid]/edit`
 through `PurchaseForm` — which is where the Labour tab's row links already go.
 
-### 6.7 Materials and Suppliers tabs — `lib/invoiceViews.ts`
+### 6.7 Analysis: by material and by supplier — `lib/invoiceViews.ts`
 
 **Materials — `materialLines`.** One row per invoice line where the category is
 **not** `"Labour"` — so Materials, Skip/Disposal, Other **and uncategorised**.
@@ -808,7 +861,7 @@ and expandable to the lines bought from that merchant.
 This is the **project-scoped** view. `/suppliers` in the nav bar is the
 cross-project one (§8.1) and is a different question.
 
-### 6.8 Price Tracker — `buildItemPriceRows`, `lib/invoiceViews.ts`
+### 6.8 Analysis: price history — `buildItemPriceRows`, `lib/invoiceViews.ts`
 
 Answers "did this item cost more this time?" — the reason the spreadsheet was
 dropped in favour of invoices at all.
@@ -849,12 +902,28 @@ or a unit change) sorts last.
 > (§3.0). It still exists for `/api/projects/[id]/prices` and the Excel export,
 > and still carries that weakness.
 
-### 6.9 Expenses tab totals — `components/project/ExpensesTab.tsx`
+### 6.9 Costs tab totals — `components/project/ExpensesTab.tsx`
 
-Diary rows only (line 66). Filters — week from/to, category, trade, status,
-payment method — are applied client-side (line 76), then the footer totals are
-summed over the **filtered** set (line 90). So the totals reflect what you are
-looking at, not the whole project.
+Diary rows only. Search (description / supplier / trade), the **All · Owed ·
+Paid** quick filter and the six optional filters — week from/to, category,
+trade, status, payment method — are all applied client-side in one pass, then
+the footer totals are summed over the **filtered** set. So the totals reflect
+what you are looking at, not the whole project.
+
+**Cancelled rows are listed but never counted**, in the grand totals or in a
+week subtotal. That is unchanged, and it means the footer cannot be reconciled
+by adding up the rows on screen; since 2026-08-28 a Cancelled row's expander
+says so in as many words.
+
+**Each week carries its own subtotal** — `Week 12 · Cost £3,410 · Owed £900` —
+on the same basis. Weeks are listed newest first.
+
+**Owed has no column.** It is `Cost − Paid`, so it is shown where it answers a
+question — the row expander and the totals row — rather than as a fourth money
+column repeating a subtraction. **Committed has no column either** unless
+*Compare to committed* is ticked, which swaps the Cost column for
+`Committed → Cost` with a variance chip per row. Nothing about how any of these
+is calculated changed; see §6.1 and §6.2.1.
 
 ---
 
@@ -871,10 +940,10 @@ per request from `expense_entries`. Treat these seven as the app's "views":
 | `buildSummary` | 21 | `ProjectSummary` — the 7 Overview cards | Overview tab, `/summary`, both exports |
 | `buildByWeek` | 48 | `WeekTotal[]` | weekly chart, Week-by-Week table, `/summary/by-week` |
 | `buildByCategory` | 77 | `CategoryTotal[]` | category donut, `/summary/by-category` |
-| `buildTrades` | 91 | `TradeSummary[]` | Trades tab, `/trades`, both exports |
+| `buildTrades` | 91 | `TradeSummary[]` | `/trades`, both exports |
 | `buildMaterials` | 116 | `MaterialSummary[]` (by supplier) | `/materials`, both exports |
-| `buildMaterialLedger` | 150 | `MaterialLedgerRow[]` (flat) | Materials tab UI |
-| `buildPriceHistory` | 184 | `PriceHistoryItem[]` | Price Tracker tab, `/prices`, Excel export |
+| `buildMaterialLedger` | 150 | `MaterialLedgerRow[]` (flat) | **nothing** — the Materials screen moved to `lib/invoiceViews.ts` |
+| `buildPriceHistory` | 184 | `PriceHistoryItem[]` | `/prices`, Excel export |
 | `buildPriceAlerts` | 247 | `PriceHistoryItem[]` — only those whose latest unit price rose | the amber alert at the top of the Overview tab |
 
 **Consequence:** changing a formula here changes every screen at once, with no
@@ -933,18 +1002,19 @@ it today.**
 |---|---|---|
 | `/dashboard` | `dashboard/page.tsx` | project cards: Spent, Budget, % bar |
 | `/projects/new` | `projects/new/page.tsx` | create project |
-| `/projects/[id]` | `projects/[id]/page.tsx` → `ProjectDetail.tsx` | the 5 tabs |
+| `/projects/[id]` | `projects/[id]/page.tsx` → `ProjectDetail.tsx` | the 4 tabs |
 | `/projects/[id]/edit` | `…/edit/page.tsx` | edit project |
 | `/projects/[id]/expenses/new` | `…/expenses/new/page.tsx` | add expense |
-| `/projects/[id]/purchases` | `…/purchases/page.tsx` | invoices filed against this project (read + edit only — adding is at `/invoices`) |
+| `/projects/[id]/purchases` | `…/purchases/page.tsx` → `InvoicesTab.tsx` | invoices filed against this project (read + edit only — adding is at `/invoices`). **The same component as the Invoices tab** since 2026-08-28 |
 | `/projects/[id]/purchases/[pid]/edit` | `…/purchases/[pid]/edit/page.tsx` | edit one invoice |
 | `/invoices` | `invoices/page.tsx` | add an invoice: upload or manual — see §8.2 |
 | `/invoices/upload` | `invoices/upload/page.tsx` | upload queue |
 | `/invoices/new` | `invoices/new/page.tsx` | manual entry |
 | `/invoices/[uploadId]/review` | `invoices/[uploadId]/review/page.tsx` | review an extracted invoice |
-| `/suppliers` | `suppliers/page.tsx` | supplier list — see §8.1 |
+| `/directory` | `directory/page.tsx` → `Directory.tsx` | the cross-project register: Suppliers ⇄ Items, one pivot — see §8.1 |
+| `/suppliers` | `suppliers/page.tsx` → `Directory.tsx` | the Directory on its Suppliers half (route kept — many links point at it) |
 | `/suppliers/[id]` | `suppliers/[id]/page.tsx` | one supplier's statement |
-| `/items` | `items/page.tsx` | item list |
+| `/items` | `items/page.tsx` → `Directory.tsx` | the Directory on its Items half |
 | `/items/[id]` | `items/[id]/page.tsx` | one item's price timeline |
 | `/settings` | `settings/page.tsx` | trade lookups |
 | `/` | `app/page.tsx` | login |
@@ -999,8 +1069,30 @@ What that required:
   a week that was typed by hand.
 
 Each project keeps its `/projects/[id]/purchases` list — that is where you
-land after saving — but its "+ Log invoice" button and empty-state action now
-point at `/invoices`. There is one add flow, not one per project.
+land after saving — and everything that starts this flow points at `/invoices`.
+There is one add flow, not one per project.
+
+**Where you start it from, since 2026-08-28 (UX phase 4).** The project header
+carries a single **"+ Add"** control — a dropdown on a computer, a floating
+**+** button bottom-right on a phone — offering **Cost**, **Invoice** and
+**Labour** (`components/project/AddMenu.tsx`, wired in `ProjectDetail.tsx`).
+Invoice is this flow, unchanged: `/invoices` → upload or manual → review →
+commit. It is the one multi-step flow in the app that earns its steps, so only
+the door into it moved.
+
+That replaced four unrelated add patterns, one of which was a genuine bug: the
+labour form at `/projects/[id]/labour/new` was reachable **only** from the
+Labour view's empty state, so it vanished as soon as the project had any labour
+on it. All three items are now reachable at all times, from every tab.
+
+The per-tab add buttons are gone with it. Two places still carry one of their
+own, both deliberately:
+
+- **empty states** — "no costs yet", "no purchases yet", "no labour yet". An
+  empty screen is the one place the action belongs in the body of the page.
+- **`/projects/[id]/purchases`** as a standalone route, which renders
+  `InvoicesTab` with `chrome="page"` and so has no project header above it. Its
+  "+ Log invoice" button is its only way in.
 
 **`UploadInvoicePanel.tsx`** (Client Component) drives each file through:
 `POST /api/invoices/upload-url` → `PUT` straight to the returned signed URL
@@ -1112,46 +1204,189 @@ which this page does not use — it signs its own URL directly.
 Two components, rendered together by `app/(app)/layout.tsx`; each is hidden at
 the other's breakpoint (`sm` = 640px).
 
-- **`TopNav`** (`hidden sm:block`) — the desktop horizontal bar.
-- **`MobileNav`** (`sm:hidden`) — a compact sticky top bar with a hamburger that
-  opens a **left-hand slide-in drawer**. Replaced the old `BottomNav` tab bar on
-  2026-08-05. The drawer closes on route change, on Escape, and on overlay click,
-  and locks body scroll while open.
+- **`TopNav`** (`hidden sm:block`) — the desktop horizontal bar, sticky at
+  `top-0`, `z-30`.
+- **`BottomNav`** (`sm:hidden`) — a **fixed bottom tab bar**, one tab per
+  destination, sitting above the iOS home indicator via `pb-safe`. Reinstated on
+  2026-08-28, replacing the hamburger + left-hand slide-in drawer that had itself
+  replaced a bottom tab bar on 2026-08-05. The reason for going back: the app is
+  used almost entirely on phones, and a drawer puts every destination two taps
+  and an animation away, behind a control in the hardest corner of the screen to
+  reach one-handed. `MobileNav` is kept as a deprecated alias of `BottomNav` so
+  any straggling import still compiles.
 
-`isActive()` is shared. Note `/projects` matches project detail pages but
-deliberately **excludes** `/projects/new`, which is its own nav item — before
-2026-08-05 both lit up at once.
+**Pages reserve room for the bar themselves.** `app/(app)/layout.tsx` puts
+`pb-nav` on `<main>` — a utility in `globals.css` that resolves to the bar's
+height plus `env(safe-area-inset-bottom)` plus a little air. Anything else fixed
+near the bottom edge (the FAB in `AddMenu`/`Fab`, the toast stack) offsets itself
+by `var(--nav-h)` the same way. **A new fixed-bottom element that does not do
+this will sit underneath the navigation.**
+
+`PageHeader` (`components/ui/PageHeader.tsx`) is the sticky bar at the top of
+every screen: back arrow, title, subtitle, actions, and an optional full-width
+row beneath (search fields, the project tab strip). It sits at `z-20` and
+`sm:top-12`, which is what keeps it below and clear of `TopNav` on a desktop
+screen where both are sticky.
+
+**Four destinations since 2026-08-28** — Dashboard · Invoices · Directory ·
+Settings — where there were six.
+
+- **"Add Project" is gone.** It was an *action* sitting in a list of *places*,
+  and the Dashboard already carries a "+ Create project" button. `/projects/new`
+  is still a route; it simply has no nav item, so `isActive()` no longer excludes
+  it and Dashboard now stays lit while you are on it. (Before 2026-08-05 both lit
+  at once, which is why the exclusion existed at all.)
+- **Suppliers and Items merged into "Directory".** They were two items holding
+  the same kind of thing — the cross-project register that sits above the project
+  (§4.6) — and neither mentioned the other or the project screen's per-project
+  view of the same data. `isActive("/directory")` therefore also matches
+  `/suppliers` and `/items`, which still exist and still render the Directory;
+  without that the nav goes blank on every supplier and item page.
+
+### The design system — `app/globals.css`, `tailwind.config.ts`, `components/ui/`
+
+Rebuilt mobile-first on 2026-08-28. Three things decide how anything new should
+look, and reaching for a raw Tailwind class instead of one of them is how a
+screen starts drifting away from the rest of the app.
+
+1. **The component classes in `globals.css`** — `.btn-*`, `.input`, `.textarea`,
+   `.label`, `.hint`, `.card`, `.card-flush`, `.card-sunken`, `.row`, `.eyebrow`,
+   `.tnum`. These are what every screen already uses, so they are the single
+   point where the visual language is set. `.input` is deliberately **16px on
+   mobile** and 14px from `sm:` — anything smaller makes iOS Safari zoom the
+   viewport when a field is focused, which reads as a bug.
+2. **`gray` is overridden, not extended,** in `tailwind.config.ts`. Every
+   existing `text-gray-500` now points at a warm, faintly green neutral instead
+   of Tailwind's cool default, so the neutrals stop fighting the green brand. The
+   brand scale is built *around* the original `#0f5d4a`, which is still
+   `brand-700` and `brand.DEFAULT` — the identity did not change, it just gained
+   the tints and shades a real interface needs.
+3. **The primitives in `components/ui/`** — `Icon`, `Sheet`, `Select`,
+   `DatePicker`, `PageHeader`, `List`, `Fab`, `SegmentedControl`, `Badge`,
+   `StatCard`, `States`, `Toast`, `ConfirmDialog`, `Drawer`.
+
+Four of those are worth knowing about before writing a form:
+
+- **`Sheet` is the one overlay primitive.** A bottom sheet on a phone, a centred
+  dialog from `sm:` up. Everything modal is built on it, so overlays cannot drift
+  apart. It **portals into `document.body`**: the panel animates with a
+  `transform`, and a transformed ancestor becomes the containing block for
+  `position: fixed` descendants — without the portal, a `Select` opened from
+  inside a sheet would be clipped to that sheet's box. It also tracks a
+  module-level open count so **Escape only closes the topmost sheet**; sheets
+  genuinely nest here (the Costs tab's status dialog contains a `Select` and a
+  `DatePicker`).
+- **`Select` replaces every native `<select>`,** and **`DatePicker` replaces
+  every `<input type="date">`.** There are none of either left in the codebase.
+  Both keep the same API shape as the control they replaced — `value` in,
+  `onChange(value)` out, ISO `yyyy-mm-dd` for dates — so no form logic changed
+  when they were swapped in. `Select` gains a search box past 8 options and a
+  second `hint` line per option; `DatePicker` gains Today / Yesterday shortcuts,
+  which is most of the dates entered here.
+- **`Icon` is the only icon set.** The emoji that used to stand in for icons
+  (`▦`, `🧾`, `⚙`, `📎`, `▸`) are gone: they render differently on every
+  platform and cannot inherit colour.
+
+`components/charts/theme.ts` holds the chart palette. Its three series colours
+were checked with a palette validator, not chosen by eye — they clear the
+lightness band, the chroma floor and 3:1 contrast against the card, and keep
+ΔE ≥ 9.6 between adjacent pairs under protanopia. **Re-validate if you change
+them.** The previous colours were three steps of the brand green — a *sequential*
+ramp doing a *categorical* job — and the lightest of them sat at 1.6:1 against
+the card, so the VAT band was barely visible.
 
 ### Responsive pattern for tables
 
 Every data table renders twice: a `sm:hidden` card list and a
-`hidden sm:block` table, from the same array. This applies to all seven project
-tabs and the Week-by-Week table. **If you add a column, add it to both**, or it
-will be invisible on a phone.
+`hidden sm:block` table, from the same array. This applies to every project tab
+and the Week-by-Week table. **If you add a column, add it to both**, or it will
+be invisible on a phone. On the Analysis tab both renders come out of one
+`PivotTable` call, so the rule is enforced by the shell rather than by memory.
 
-### The seven tabs — `components/project/`
+### The four tabs — `components/project/`
 
 `ProjectDetail.tsx` is the client shell. It holds entries in state and computes
 every summary with `useMemo`, from **two different sources** — which is the
 thing to know before changing any of them.
 
-| Tab | Component | Basis |
-|---|---|---|
-| Overview | `OverviewTab.tsx` | entries, **non-ledger only** |
-| Expenses | `ExpensesTab.tsx` | entries, **non-ledger only** |
-| Trades | `TradesTab.tsx` | invoices (`purchases`) |
-| Labour | `LabourTab.tsx` | invoice lines, category = Labour |
-| Materials | `MaterialsTab.tsx` | invoice lines, category ≠ Labour |
-| Suppliers | `SuppliersTab.tsx` | invoices, grouped by supplier |
-| Price Tracker | `PricesTab.tsx` | invoice lines with a unit price |
+| Tab | Key | Component | Basis |
+|---|---|---|---|
+| Overview | `overview` | `OverviewTab.tsx` | entries, **non-ledger only** |
+| Costs | `expenses` | `ExpensesTab.tsx` | entries, **non-ledger only** |
+| Invoices | `invoices` | `InvoicesTab.tsx` | `getProjectPurchases` rows — one per document |
+| Analysis | `analysis` | `AnalysisTab.tsx` | invoice lines and purchases, pivoted four ways |
 
-> **Split 2026-08-20.** "Trades & Labour" and "Materials & Suppliers" were each
-> two questions sharing one screen. They are four tabs now because the answers
-> come from different shapes of data: Trades and Suppliers roll up whole
-> invoices (payment is a document-level fact), Labour and Materials list
-> individual lines. See §6.6–§6.8.
+> **Seven tabs became four, 2026-08-28.** Trades, Labour, Materials, Suppliers
+> and Price Tracker all read the *same* dataset — `invoiceLines` / `purchases`,
+> built in `lib/invoiceViews.ts` — grouped by a different column. Five tab stops
+> for one `group by` is a pivot wearing a tab strip, so they are one Analysis
+> screen with a segmented control. Meanwhile Invoices was the opposite fault: a
+> separate *route* that left the tab context entirely and needed a `?tab=` link
+> to get back, so it came in as a tab.
+>
+> The 2026-08-20 split note that used to sit here is superseded. Its reasoning
+> was sound about the *data* — Trades and Suppliers roll up whole invoices
+> because payment is a document-level fact, while Labour and Materials list
+> individual lines (§6.6–§6.8, all still true) — but a difference in row shape
+> is a reason for a different column set, not for a different destination.
 
-The Expenses tab shows **both**: hand-entered `expense_entries` and the
+**Analysis is one screen, four pivots.** The segmented control reads
+`By trade · By supplier · By material · Price history`, and every pivot renders
+through one `PivotTable` shell (`components/project/PivotTable.tsx`) with one
+totals row; a segment supplies its column set and its mobile card and nothing
+else. The five components it replaced are deleted.
+
+- **Labour is a filter, not a segment.** "By material" carries a second control
+  — `All lines · Materials · Labour` — backed by the same `materialLines()` and
+  `labourLines()` builders as before. Making labour a destination of its own
+  implied labour lines came from somewhere other than the invoices, which they
+  do not: both an invoice filed under the Labour category and a "Log labour"
+  entry are purchases, and both arrive through `labourLines()`.
+- **The explanatory paragraph above each of those five tables is gone.** Prose
+  above a table is a tell that the table's placement is not self-evident. With a
+  pivot control the reader chose the grouping a moment ago, so the segment label
+  *is* the explanation. The amber "N lines have no category set" note stays —
+  that is a statement about the data, not about the screen.
+- **Every builder in `lib/invoiceViews.ts` is untouched.** This was a
+  presentation change: no calculation and no schema moved.
+
+**Deep links: `?tab=` and `?view=`.** `?tab=expenses` is unchanged (§8 below
+says why that key is load-bearing). The new form is
+`?tab=analysis&view=trade|supplier|material|labour|price`. The five retired tab
+keys — `trades`, `suppliers`, `materials`, `labour`, `prices` — are kept as
+**aliases** in `RETIRED` in `ProjectDetail.tsx`: each resolves to Analysis on
+the right pivot, `labour` also selecting the Labour filter. They cost a dozen
+lines and they keep working every link saved before the collapse, including a
+`returnTo` sitting in a half-finished labour form. In-app callers were moved to
+the canonical form (`LabourForm.tsx`, `labour/new/page.tsx`).
+
+**The header's "Invoices" button is gone** — it existed only to leave the tab
+strip for a route that had no way back, and that route is now a tab. Overview's
+"See the invoices" sentence switches tab instead of navigating.
+
+**Why the project page fetches the invoice rows it may not use.**
+`projects/[id]/page.tsx` calls `getProjectPurchases` in a `Promise.all` beside
+`getProjectBundle`, and passes `purchaseRows` into `ProjectDetail`. That
+re-reads purchases, lines, payments and suppliers the bundle already fetched,
+on every project page load, whether or not the Invoices tab is opened. It was
+chosen over a client fetch on tab activation deliberately: one row builder means
+the tab and the `/purchases` route can never disagree, and `router.refresh()` —
+which `reloadEntries` already calls after every change — brings the tab up to
+date with no extra wiring. If that cost ever matters, the alternative is a
+`GET /api/projects/[id]/purchases` and a loading state.
+
+> **`InvoiceBanner` removed 2026-08-28.** Something used to render above this
+> tab strip on every tab — a blue "Invoice Summary" card. It is gone, and its
+> content is one sentence on Overview. §6.2.1 says why. Every tab labels money
+> with the four words in `lib/vocabulary.ts`.
+
+> **The Expenses tab is called "Costs" from 2026-08-28.** Only the word on the
+> strip changed — the tab **key is still `expenses`**, because `?tab=expenses`
+> is what the invoice edit form's `returnTo` link carries and what every deep
+> link into this screen uses. The component file keeps its name too. The tab
+> lists invoices as well as expenses, and nobody calls an invoice an expense.
+
+The Costs tab shows **both**: hand-entered `expense_entries` and the
 project's invoices, the latter as synthetic entries with an `inv:<uuid>` id
 (`purchasesToSyntheticEntries`, `lib/purchases.ts`). Invoice rows carry an
 "Invoice" badge, and their **Edit** opens the invoice form rather than the
@@ -1166,22 +1401,49 @@ the lines it is made of.
 `Partial` when something is paid, `Unpaid` otherwise. Nothing about it is
 stored. Everything on the Expenses tab reads it:
 
-- The **Mark Paid** button appears only when the state is `Unpaid` or
-  `Partial`, and reads "Mark Fully Paid" on a partial row. A settled row no
-  longer offers to settle itself again.
-- Clicking it opens a dialog asking for the **paid date** (defaulting to today,
-  because that is when the money moved — an invoice's own `paid_date` is the
-  *document's* date), the **amount** (defaulting to what is still owed) and an
-  optional **payment method**. Nothing is written until it is submitted.
-- The **status dropdown is the same path.** Choosing `Paid` on a row that is not
-  actually paid opens that same dialog instead of labelling it Paid with no
-  money against it. Choosing `Planned` or `In Progress` on a row that has
-  payment data asks first, and clears `paid_date` / `paid_amount` if confirmed.
-  On an *invoice* it only changes the status and says so: an invoice's payments
-  are separate rows and are removed on the invoice form (see below).
+- **The chip on every row is the derived state, spelled out**: `Unpaid`,
+  `Part-paid £400 of £1,200`, `Paid`, or `Cancelled`. "Partial" on its own never
+  said how much was left.
+- **The stored `status` column is demoted to a small grey flag** beside the
+  chip — `Planned` or `In Progress`, and `Marked Paid` when the column claims
+  Paid but no money reached the row, which is a disagreement worth seeing.
 - **A row whose state is `Unpaid` shows no paid date at all** — `—` in the
-  table, and no "Paid …" line on the mobile card — however old the column value
-  is. A Planned row displaying a paid date was the visible half of this bug.
+  expander, and no date on the mobile card — however old the column value is.
+  A Planned row displaying a paid date was the visible half of this bug.
+- The **Pay** button appears only when the state is `Unpaid` or `Partial`, and
+  reads "Pay balance" on a partial row. A settled row no longer offers to settle
+  itself again. It is the row's one primary affordance; everything else
+  (Repeat, Edit, View receipt, Delete) is in the row's `⋯` menu, with Delete
+  below a divider and in red.
+
+**One control, one dialog (2026-08-28).** Until then the status was a `<select>`
+on every row whose `onChange` did one of three different things: choosing `Paid`
+opened a payment dialog, choosing `Planned` / `In Progress` on a paid row opened
+a *different* dialog, and anything else wrote silently. A control that looks
+like a dropdown but sometimes opens a modal is unpredictable, and it was the
+worst interaction on the screen.
+
+The chip is now a button, and it always opens the same **Update status** dialog,
+which carries status, amount, paid date and payment method together. The **Pay**
+button opens that same dialog with `Paid` already chosen and the outstanding
+amount filled in. Every guard the dropdown used to hide is still there, now in
+`submitStatus` and in sight of the fields it applies to:
+
+- Choosing `Paid` on a row that still owes money and typing no amount is
+  **refused in the dialog** — nothing is ever marked Paid with no money against
+  it.
+- Choosing `Planned` or `In Progress` on a row that has payment data still asks
+  the clear-payment question first, and clears `paid_date` / `paid_amount` if
+  confirmed. On an *invoice* it only changes the status and says so: an
+  invoice's payments are separate rows and are removed on the invoice form (see
+  below).
+- The paid date still defaults to **today**, because that is when the money
+  moved — an invoice's own `paid_date` is the *document's* date.
+- Nothing is written until Save, and a failed Save leaves the dialog open with
+  the message, because the commonest failure is over-paying an invoice.
+- An amount can also be typed against `In Progress`, which is how a part payment
+  is recorded without claiming the row is settled. If it happens to settle the
+  row, the status lands on `Paid` — the same rule the old dialog applied.
 
 The amount is always sent as the **cumulative** figure. An expense row stores it
 directly; for an invoice the PATCH handler turns it into a `payments` row for
@@ -1191,19 +1453,76 @@ already has against it is refused with a 409 — that is a refund or a correctio
 to a specific payment, and it belongs on the invoice form where you can see
 which payment you are changing.
 
-**The invoice number opens the original document (2026-08-21).** An invoice row
-whose description links out is one that was created from an upload and still has
-its file in the private `invoices` bucket (`invoice_uploads.storage_path`, with
+**Six columns, not twelve (2026-08-28).** The desktop table used to carry Wk,
+Description, Category, Trade, Notes, Quoted, Actual, Paid, Remaining, Date Paid,
+Status and Actions. It now carries:
+
+`Description · Category · Cost · Paid · Status · ⋯`
+
+- **Description** carries a second line — `supplier · trade · week N`, plus a
+  📎 when the row has a receipt — which is where Trade and Wk went.
+- **Notes**, **date paid** and **payment method** are in a row expander, opened
+  by clicking the description. Committed and Owed are in there too.
+- **Owed** is `Cost − Paid`, so it is derivable and has no column: it appears in
+  the expander, in each week's subtotal header and in the totals row.
+- **Committed** appears only when *Compare to committed* is ticked, which swaps
+  the Cost column for `Committed → Cost` with a per-row variance chip (over
+  quote red, under quote green, "on quote" grey).
+- **Rows are grouped by week**, newest first, under a sticky subtotal header
+  reading `Week 12 · Cost £3,410 · Owed £900`. `week_number` is the organising
+  fact of this data — it is a week-by-week plan — and it used to be a
+  two-character first column.
+
+**An invoice row looks different before you click it.** It leads with a violet
+document tile and keeps its "Invoice" badge; an expense row leads with a grey
+dot. This matters because the two behave differently — an invoice's Edit leaves
+the screen for the invoice form, it has no Repeat, and deleting it takes its
+lines and payments with it. The test is unchanged: `isInvoice()` keys on the
+`inv:` id prefix.
+
+**Filters: a search box and the daily question.** Six always-visible dropdowns
+used to fill a card before any data appeared. There is now a **search** input
+(description / supplier / trade, same behaviour as the Materials tab), a
+segmented **All · Owed · Paid** quick filter — which is the question actually
+asked every day — and **+ Add filter**, which adds any of the original six as a
+removable pill. A result count (`14 of 111`) and **Clear all** sit beside them.
+Every filter predicate is the same one as before.
+
+**Two missing states, both fixed.** The empty check was `entries.length === 0`
+while the table rendered `diaryEntries`, so a project holding only `ledger` rows
+showed a table with no rows in it and no empty state — invisible today only
+because the ledger is empty (§5). It is now `diaryEntries.length === 0`. And a
+filter that matches nothing renders "Nothing matches" *instead of* the table and
+its footer, the way `MaterialsTab.tsx` already did: a totals row of £0.00 under
+an empty table reads as a project that has spent nothing.
+
+**Mobile no longer repeats the table.** The card shows the description, the
+cost and the status chip; tapping it expands the same details as the desktop
+expander; `⋯` opens a bottom sheet with the same actions the desktop menu has,
+built from one list so the two cannot drift apart.
+
+**The invoice number opens the original document — on the Invoices & purchases
+page, and nowhere else (2026-08-21, moved 2026-08-28).** A linked invoice number
+is one whose purchase was created from an upload and still has its file in the
+private `invoices` bucket (`invoice_uploads.storage_path`, with
 `status = 'committed'` and `invoice_id` pointing at the purchase — `0010`).
 Invoices typed in by hand have no file and stay plain text: a link that opens
-nothing is worse than no link. `getProjectBundle` returns
-`documentPurchaseIds` — ids only, never URLs. The link points at
+nothing is worse than no link. `getProjectPurchases` sets `has_document` per
+row — a boolean, never a URL. The link points at
 `GET /api/projects/[id]/purchases/[pid]/document`, which resolves the purchase
 to its stored file, signs a URL valid for 60 seconds and redirects (`no-store`),
 404 when there is no file. **Signing at page load would be wrong**: a signed URL
 expires, so every link on a list left open would be dead by the time it was
 clicked — the same expiry problem the review screen has with its ten-minute
 window (§8.2).
+
+Until 2026-08-28 the link lived on the Expenses tab instead, on an invoice row's
+*description*, fed by a `documentPurchaseIds` array on `getProjectBundle`. That
+link and that array are both gone. The document now opens from exactly one
+screen, from the invoice number itself — the thing you read off the paper you
+are checking against. Both the desktop table and the mobile card link it, which
+is the rule for that page: a column on only one of the two renders is invisible
+to whoever is on the other device.
 
 > ⚠️ `/api/projects/[id]/expenses` must return the invoices too, not just
 > `expense_entries` — the tab refetches it after every change. When it returned
@@ -1224,23 +1543,46 @@ before when the param is absent or not a real tab key. The redirect pairs
 its new values immediately: without it, the target route could be served from
 the router cache with the pre-edit figures.
 
-### 8.1 The supplier and item screens (Phase 1)
+### 8.1 The Directory — supplier and item screens (Phase 1)
 
 Four routes, added 2026-08-14, reading the §4.6 transaction core. They are
 **read-only** — no form, no API route, no mutation of any kind; writes are
-Phase 2's job. All four are async Server Components with `dynamic =
-"force-dynamic"`, and all four ship **no client JavaScript**: the expand/collapse
-on a purchase is a plain `<details>` element, not React state.
+Phase 2's job. The two `[id]` screens are async Server Components with
+`dynamic = "force-dynamic"` shipping **no client JavaScript**: the
+expand/collapse on a purchase is a plain `<details>` element, not React state.
 
-They are also **cross-project by design**. A supplier and an item sit above the
+They are **cross-project by design**. A supplier and an item sit above the
 project (§4.6), so these pages deliberately span every project at once — which
 is why none of them shows a "project total".
 
+> **The two lists became one destination, 2026-08-28.** Suppliers and Items were
+> separate nav items holding the same kind of thing, so they are now the two
+> halves of **Directory** — `/directory`, with `?view=suppliers|items`. The
+> server half is `components/directory/Directory.tsx`; the client half is
+> `DirectoryScreen.tsx`, on the same `PivotTable` shell as the project screen's
+> Analysis tab. `/suppliers` and `/items` still work and render the same screen,
+> because a great many links point at them.
+>
+> **The pivot lives in the URL here, and in component state on Analysis.** That
+> is not an inconsistency: `getSuppliers()` and `getItems()` each read the whole
+> transaction core, so only the half being looked at is fetched, and a fetch is
+> a navigation. Analysis's four pivots all come out of one bundle that has
+> already been loaded, so switching them costs nothing and needs no round trip.
+>
+> **What the scope control does and does not do.** It links to a project's
+> Analysis pivot; it does **not** filter this page. `getSuppliers()` and
+> `getItems()` return totals split by `entry_source` with no project
+> attribution, so a real "this project" filter needs a new loader — a data
+> change, not a presentation one. The reciprocal link ("Suppliers / Items across
+> all projects") sits on the Analysis tab. Before this, the global page and the
+> per-project view of the same data had no link between them in either
+> direction, which is the actual fault the merge was for.
+
 | Route | Loader in `lib/data.ts` | Shows |
 |---|---|---|
-| `/suppliers` | `getSuppliers()` | every supplier: records, total spend + owed, last purchase. Sorted by record **count** |
+| `/directory`, `/suppliers` | `getSuppliers()` | every supplier: records, total spend + owed, last purchase. Sorted by record **count** |
 | `/suppliers/[id]` | `getSupplierBundle(id)` | four combined stat cards, then one statement table: date, invoice, project, gross, paid, balance, status, payment dates + methods, running total. Each row expands to its lines and payments |
-| `/items` | `getItems()` | every **Materials**-category item (Labour items are filtered out): category, unit, times bought, suppliers, latest unit price, trend, last bought. Sorted by times bought |
+| `/directory?view=items`, `/items` | `getItems()` | every **Materials**-category item (Labour items are filtered out): category, unit, times bought, suppliers, latest unit price, trend, last bought. Sorted by times bought |
 | `/items/[id]` | `getItemBundle(id)` | the price timeline, oldest → newest across every supplier and project: date, supplier, project, invoice, qty, unit, unit price, line net, and the change vs the previous purchase |
 
 The loaders follow `getProjectBundle`'s shape: a fixed handful of queries per
@@ -1420,12 +1762,13 @@ The full status lifecycle, with where each state is visible:
 | `processing` | extraction in flight | the upload queue; a Gmail-sourced one as *"Still reading"* |
 | `extracted` | there is a proposal, waiting for a human | the review screen. A Gmail-sourced one is linked from the "Invoices from email" list, badged *"Ready to review"* |
 | `failed` | extraction gave up; `error` says why | the review screen; retryable. A Gmail-sourced one is on the "Invoices from email" list, badged *"Couldn't be read"*, with the error shown inline |
-| `committed` | accepted and written into `purchases` | the review screen says "Already saved"; the "Invoices from email" list links straight to the saved invoice |
+| `committed` | accepted and written into `purchases` | the review screen says "Already saved". It **leaves** the "Invoices from email" list (2026-08-28) and appears on its project's Invoices & purchases page, where the invoice number opens the original document |
 
 **Every Gmail-sourced state above has a screen.** That was not true until
 2026-08-27: a `gmail` upload that extracted *successfully* appeared nowhere at
 all, because the only list on `/invoices` filtered on `needs_triage`. See
-"Seeing what arrived by email" below.
+"Seeing what arrived by email" below. `committed` is the one state whose screen
+is not on `/invoices` — by design, since the work on it is done.
 
 `needs_triage` is a Gmail-only state — a manually uploaded file never enters
 it, because a human chose that file.
@@ -1573,10 +1916,21 @@ that shape.
 #### Seeing what arrived by email
 
 `components/invoices/EmailInvoices.tsx` on `/invoices` lists every
-`invoice_uploads` row with `source_channel = 'gmail'` except `needs_triage`,
-newest first — filename, subject, sender, received date, status, and a link that
-depends on the status (review it, open the saved invoice, or nothing while it is
-still being read). A `failed` row shows its `error` inline.
+`invoice_uploads` row with `source_channel = 'gmail'` **except `needs_triage`
+and `committed`**, newest first — filename, subject, sender, received date,
+status, and a link that depends on the status (review it, see why it failed, or
+nothing while it is still being read). A `failed` row shows its `error` inline.
+
+Two statuses are excluded, for opposite reasons. `needs_triage` belongs to
+`TriageSection` above it, which renders those rows *with the buttons that act on
+them*. `committed` is excluded because **the list is the outstanding queue**: an
+invoice that has been reviewed and logged is finished, and leaving it here read
+as one more thing needing attention on a list that then only ever grew. It used
+to stay, on the reasoning that a saved row is the most reassuring thing on the
+list; in use, the reassurance was not worth the noise. From the moment it is
+committed the invoice lives on its project's **Invoices & purchases** page,
+where its number opens the original document (§8, "The invoice number opens the
+original document").
 
 It exists because the pipeline used to end in a dead end. `TriageSection`
 filtered on `needs_triage` and nothing else anywhere queried `invoice_uploads`
@@ -2001,15 +2355,63 @@ them.
   `0014_service_role_grants.sql` gives it them, and sets default privileges so
   new tables inherit them. A missing grant is a hard `42501 permission denied`,
   not the silent empty result a missing policy gives — see §8.4.
-- Every table has one policy: `for all using (auth.uid() = user_id) with check
-  (auth.uid() = user_id)`.
+- Every table has one policy: `for all to authenticated using (true) with check
+  (true)`, named `shared workspace`. All sixteen of them, set by `0015`.
 - **No query under a user session filters by `user_id`.** Scoping is entirely
   implicit. The one documented exception is the Gmail push and drain path,
   which has no session for `auth.uid()` to return and therefore sets `user_id`
   explicitly on every write — §8.4.
 
-**An empty result is ambiguous** — it means either "no rows" or "rows owned by
-a different user". This exact ambiguity caused a real incident. See §11.
+### 9.1 One shared workspace (since `0015`)
+
+Until `0015` (2026-08-27) the policy on every table was
+`for all using (auth.uid() = user_id) with check (auth.uid() = user_id)` —
+a **multi-tenant** rule giving each account its own private copy of the app.
+46 Glenferrie Road is one renovation with one set of books, so when the owner
+added a friend in the Supabase dashboard that friend signed in successfully and
+saw *nothing*: every row belonged to `admin@pk.com`'s uuid and RLS filtered all
+of them out. Nothing was broken; the policy was doing what it said.
+
+`0015` replaced all sixteen with `to authenticated using (true)`. **Signing in
+is now the whole of the authorisation model.** Sign-up is still disabled and
+users are still created by hand in the Supabase dashboard, so "anyone signed
+in" means "anyone the owner deliberately let in" — and any of them can delete
+the project, with no undo (§11).
+
+`to authenticated` is what stops this being a public database: the `anon` role
+a signed-out browser uses is not granted the policy and still matches no rows.
+
+Three things `0015` had to move with the policies, none of them obvious:
+
+- **Storage.** Both private buckets were laid out as `{user.id}/…` with
+  policies keyed on `storage.foldername(name)[1] = auth.uid()::text`. Sharing
+  the rows without the files would have been the worst outcome: a friend sees
+  an invoice in the list, clicks it, and `createSignedUrl` — which runs under
+  *their* session — is refused. SELECT and DELETE are now shared; **INSERT is
+  deliberately still own-folder**, because nothing in the app writes anywhere
+  else and the layout stays predictable.
+- **`trade_lookups`.** `trg_seed_trades` seeds 13 default trades per new
+  account (§11, step 3). Shared, the second person to sign in would have made
+  the Trade dropdown 26 entries long. The trigger now seeds **only when the
+  table is empty**, and a global unique index on `lower(btrim(name))` keeps
+  the list one list.
+- **`supplier_domains`.** The drain used to read it with
+  `.eq("user_id", account.user_id)`. But `/api/invoices/[id]/triage` stamps a
+  newly trusted domain with whoever pressed the button, who is not necessarily
+  the person whose mailbox is connected — so a friend's triage decision would
+  never have reached the gate and that supplier would land in triage for ever.
+  The drain now reads **every** row, and a global unique index on
+  `norm_key(domain)` keeps one row per domain.
+
+`user_id` itself is untouched everywhere — every column, index, FK and unique
+constraint, and every insert still stamps its creator. It is now **provenance**
+(who added this expense), not permission. Its `on delete cascade` hazard is
+unchanged and, if anything, sharper: deleting a *friend's* auth user now
+destroys the work that friend did.
+
+**An empty result is ambiguous** — it means either "no rows" or, before `0015`,
+"rows owned by a different user". This exact ambiguity caused a real incident.
+See §11.
 
 ---
 
@@ -2136,8 +2538,11 @@ If the app shows no data:
    rows are gone, not hidden — RLS is a red herring.
 2. **Check `select id, email from auth.users`.** A recreated account gets a
    **new UUID**. Same email does *not* mean same user.
-3. Beware the decoy: `trg_seed_trades` gives a fresh account 13 trade lookups
-   immediately, so "some data exists" is misleading.
+3. Beware the decoy: `trg_seed_trades` used to give *every* fresh account 13
+   trade lookups immediately, so "some data exists" was misleading. Since
+   `0015` it seeds only when `trade_lookups` is completely empty — which is
+   exactly the state a wiped database is in, so the decoy is still there on
+   the one occasion it matters most.
 4. **Rebuild from the spreadsheet.** Set `USER_ID` at the top of
    `scripts/build_import_sql.py` to the current UUID, run
    `python scripts/build_import_sql.py`, then run the regenerated
@@ -2174,6 +2579,7 @@ place. The same deletion would cause the same loss again.
 | `0012_upload_before_project.sql` | makes `invoice_uploads.project_id` **nullable**, so an invoice can be uploaded before anyone has said which job it belongs to (§8.2), plus a CHECK that a `committed` upload must still have one. Re-runnable, only widens what is allowed, and raises rather than commits if the column is still NOT NULL afterwards. No §13 figure moves | ✅ **run** — 0013 asserts this file's constraint exists and committed, so it was already in place by 2026-08-25 |
 | `0013_gmail_ingest.sql` | Gmail ingestion phase 1 (§8.3): `gmail_accounts`, `gmail_events`, `supplier_domains`, eight new nullable/defaulted columns on `invoice_uploads` with the `file_hash` dedupe index, and one widened CHECK adding `needs_triage` to `invoice_uploads.status`. Reuses `norm_key()` from 0008. Additive and re-runnable; every existing row stays valid and no §13 figure moves. Raises rather than commits if the widened CHECK did not take or if 0012 was never run | ✅ **run** — 2026-08-25, per the banner in the file; confirmed live on 2026-08-27 by `gmail_events` rows draining normally |
 | `0014_service_role_grants.sql` | gives `service_role` full privileges on the tables, views, sequences and functions in schema `public`, plus a default-privileges rule so tables created later are covered. Fixes a hard `42501 permission denied` — **not** an RLS failure — that had broken every Gmail route since the feature shipped: the drain 500'd every five minutes and push 503'd on every delivery, because `service_role` had never been granted anything and only the three machine-to-machine Gmail routes use it (§8.4, R3). `anon` and `authenticated` are deliberately untouched. No data, policy or schema change; no §13 figure moves. Raises rather than commits if any of the four Gmail tables is still refused | ✅ **run** — 2026-08-27. Confirmed by seven `gmail_events` rows being claimed and marked `done` through `createServiceClient()`, which was a hard refusal beforehand |
+| `0015_shared_workspace.sql` | turns the app from one-tenant-per-user into **one shared workspace** (§9.1): all sixteen `own …` policies become one `shared workspace` policy, `for all to authenticated using (true) with check (true)`. Storage SELECT/DELETE on both private buckets become shared too (INSERT stays own-folder); `trg_seed_trades` now seeds only into an empty table; duplicate `trade_lookups` and `supplier_domains` are collapsed and given global unique indexes. `user_id` columns, indexes and inserts are all untouched — the column becomes provenance rather than permission. No expense data is touched and no §13 figure moves. Re-runnable, and raises rather than commits if any table is still on the old policy | ⬜ **not yet run** |
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.

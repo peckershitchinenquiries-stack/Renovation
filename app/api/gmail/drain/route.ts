@@ -546,11 +546,17 @@ async function drainAccount(
   }
 
   // ---- 3. the declared supplier domains, read once ---------------------
-  // Service-role read: explicit user_id, because RLS has no auth.uid() here.
+  // Every domain, not just this account's. Migration 0015 made the whole
+  // database one shared workspace, so the trust list is shared too — and it
+  // has to be read that way or the gate quietly stops seeing half of it:
+  // /api/invoices/[id]/triage stamps a new domain with the user_id of
+  // whoever pressed "trust this sender", which is not necessarily the person
+  // whose mailbox is connected. Filtering by account.user_id would mean a
+  // friend's triage decision never reached the drain and the same supplier
+  // landed in triage for ever.
   const { data: domainRows } = await supabase
     .from("supplier_domains")
-    .select("*")
-    .eq("user_id", account.user_id);
+    .select("*");
   const declaredDomains = ((domainRows ?? []) as SupplierDomain[]).map((d) =>
     normKey(d.domain)
   );

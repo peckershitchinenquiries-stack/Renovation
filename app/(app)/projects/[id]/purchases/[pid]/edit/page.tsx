@@ -4,6 +4,7 @@ import { getPurchaseEditBundle, getPurchaseFormBundle } from "@/lib/data";
 import { safeReturnTo } from "@/lib/safeReturnTo";
 import PurchaseForm from "@/components/forms/PurchaseForm";
 import { EmptyState } from "@/components/ui/States";
+import { PageHeader } from "@/components/ui/PageHeader";
 
 export const dynamic = "force-dynamic";
 
@@ -29,21 +30,10 @@ export default async function EditPurchasePage({
   if (!bundle?.project || !purchase) notFound();
   const project = bundle.project;
 
-  const crumbs = (
-    <nav className="mb-4 text-sm text-gray-500">
-      <Link href={`/projects/${project.id}`} className="hover:underline">
-        {project.name}
-      </Link>{" "}
-      /{" "}
-      <Link
-        href={`/projects/${project.id}/purchases`}
-        className="hover:underline"
-      >
-        Invoices
-      </Link>{" "}
-      / Edit
-    </nav>
-  );
+  // The two-level breadcrumb is gone: on a phone it wrapped to two lines above
+  // every heading. The header's back arrow goes to the invoice list, which is
+  // where this screen is opened from.
+  const backHref = returnTo ?? `/projects/${project.id}/purchases`;
 
   // The same rule the API enforces: a purchase copied from the week-by-week
   // sheet is the same money as its expense row, and that row is what the
@@ -51,10 +41,16 @@ export default async function EditPurchasePage({
   if (purchase.purchase.origin === "legacy_import")
     return (
       <div className="mx-auto max-w-4xl">
-        {crumbs}
+        <PageHeader
+          title="Edit invoice"
+          subtitle={project.name}
+          backHref={backHref}
+          backLabel="Back to invoices"
+        />
         <EmptyState
-          title="This one is edited in the Expenses tab"
-          description="It was copied from the week-by-week sheet by migration 0008, so the same purchase is recorded twice — once here and once as an expense row. The Expenses tab owns it until the two are merged."
+          icon="info"
+          title="This one is edited in the Costs tab"
+          description="It was copied from the week-by-week sheet by migration 0008, so the same purchase is recorded twice — once here and once as an expense row. The Costs tab owns it until the two are merged."
           action={
             <Link href={`/projects/${project.id}`} className="btn-primary">
               Open the project
@@ -66,13 +62,21 @@ export default async function EditPurchasePage({
 
   return (
     <div className="mx-auto max-w-4xl">
-      {crumbs}
-      <h1 className="mb-1 text-2xl font-bold text-gray-900">Edit invoice</h1>
-      <p className="mb-4 text-sm text-gray-500">
+      <PageHeader
+        title="Edit invoice"
+        subtitle={project.name}
+        backHref={backHref}
+        backLabel="Back to invoices"
+      />
+      <p className="mb-4 text-[0.8125rem] leading-relaxed text-gray-500">
         Saving replaces the document&rsquo;s lines and payments with what is
         below.
       </p>
-      <PurchaseForm bundle={bundle} purchase={purchase} returnTo={returnTo ?? undefined} />
+      <PurchaseForm
+        bundle={bundle}
+        purchase={purchase}
+        returnTo={returnTo ?? undefined}
+      />
     </div>
   );
 }

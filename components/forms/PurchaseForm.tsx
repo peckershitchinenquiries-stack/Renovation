@@ -20,6 +20,9 @@ import type { SupplierResolution, ItemResolution } from "@/lib/invoice/resolve";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Spinner } from "@/components/ui/States";
+import { Icon } from "@/components/ui/Icon";
+import { Select } from "@/components/ui/Select";
+import { DatePicker } from "@/components/ui/DatePicker";
 import { useToast } from "@/components/ui/Toast";
 import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
 import { SupplierFields } from "@/components/purchases/SupplierFields";
@@ -779,30 +782,27 @@ export default function PurchaseForm({
           because it is the first question — everything below is about the
           document, this is about which job it belongs to. */}
       {choosingProject && (
-        <fieldset className="card border-brand-100 bg-brand-50/40">
-          <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
+        <fieldset className="card border-brand-200/70 bg-brand-50/50">
+          <legend className="eyebrow mb-2.5">
             Which project
           </legend>
           <label className="label" htmlFor="project_id">
             Project *
           </label>
-          <select
+          <Select
             id="project_id"
-            className="input sm:max-w-md"
+            title="Which project"
+            placeholder="Choose a project"
+            invalid={Boolean(errors.project_id)}
+            className="sm:max-w-md"
             value={projectId}
-            onChange={(e) => chooseProject(e.target.value)}
-          >
-            <option value="">— choose a project —</option>
-            {bundle.projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+            onChange={chooseProject}
+            options={bundle.projects.map((p) => ({ value: p.id, label: p.name }))}
+          />
           {errors.project_id ? (
             <p className="field-error">{errors.project_id}</p>
           ) : (
-            <p className="mt-1 text-xs text-gray-500">
+            <p className="hint">
               This invoice is saved against the project you pick here, and you
               are taken straight to it.
             </p>
@@ -812,9 +812,7 @@ export default function PurchaseForm({
 
       {/* ---------------- the document ---------------- */}
       <fieldset className="card">
-        <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
-          The invoice
-        </legend>
+        <legend className="eyebrow mb-2.5">The invoice</legend>
 
         {documentNotes && documentNotes.length > 0 && (
           <ul className="mb-3 space-y-1">
@@ -833,36 +831,45 @@ export default function PurchaseForm({
             </label>
             {supplierResolution ? (
               supplierChoice === "candidate" && supplierConfirmed ? (
-                <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2">
-                  <span className="text-sm font-medium text-emerald-800">
+                <div className="flex min-h-touch items-center gap-2.5 rounded-xl bg-emerald-50 px-3.5 py-2 ring-1 ring-inset ring-emerald-600/15">
+                  <Icon
+                    name="check"
+                    size={16}
+                    strokeWidth={2.5}
+                    className="shrink-0 text-emerald-600"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-emerald-800">
                     {header.supplier_name}
                   </span>
                   <button
                     type="button"
-                    className="text-xs font-medium text-emerald-700 underline"
+                    className="btn-ghost btn-sm shrink-0 text-emerald-800"
                     onClick={() => setSupplierConfirmed(false)}
                   >
                     Change
                   </button>
                 </div>
               ) : supplierChoice === "candidate" ? (
-                <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
-                  <p className="text-xs text-amber-800">{supplierResolution.reason}</p>
+                <div className="space-y-2 rounded-2xl bg-amber-50 p-3 ring-1 ring-inset ring-amber-600/15">
+                  <p className="text-xs leading-relaxed text-amber-900">
+                    {supplierResolution.reason}
+                  </p>
                   {supplierResolution.candidates.map((c) => (
                     <label
                       key={c.supplier_id}
-                      className="flex min-h-touch cursor-pointer items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm"
+                      className="flex min-h-touch cursor-pointer items-center gap-2.5 rounded-xl bg-white px-3 py-2.5 text-sm shadow-card transition active:bg-gray-50"
                     >
                       <input
                         type="radio"
                         name="supplier-candidate"
+                        className="h-4 w-4 shrink-0 accent-brand"
                         checked={selectedCandidateId === c.supplier_id}
                         onChange={() => {
                           setSelectedCandidateId(c.supplier_id);
                           setField("supplier_name", c.name);
                         }}
                       />
-                      <span className="flex-1">
+                      <span className="min-w-0 flex-1 truncate font-medium text-gray-900">
                         {c.name}
                         {c.is_unverified && (
                           <span className="ml-1 text-xs text-amber-600">
@@ -876,10 +883,10 @@ export default function PurchaseForm({
                       </span>
                     </label>
                   ))}
-                  <div className="flex flex-wrap gap-3 pt-1">
+                  <div className="flex flex-col gap-2 pt-1 sm:flex-row">
                     <button
                       type="button"
-                      className="text-xs font-semibold text-amber-800 underline"
+                      className="btn-secondary btn-sm"
                       onClick={() => {
                         setSupplierChoice("draft");
                         setSelectedCandidateId(null);
@@ -889,22 +896,22 @@ export default function PurchaseForm({
                         );
                       }}
                     >
-                      None of these — add new supplier
+                      None of these — add new
                     </button>
                     <button
                       type="button"
-                      className="text-xs text-gray-500 underline"
+                      className="btn-ghost btn-sm text-amber-900"
                       onClick={() => setSupplierChoice("search")}
                     >
-                      Search existing suppliers instead
+                      Search existing suppliers
                     </button>
                   </div>
                 </div>
               ) : supplierChoice === "draft" ? (
-                <div className="space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <div className="space-y-2 rounded-2xl bg-amber-50 p-3 ring-1 ring-inset ring-amber-600/15">
                   <button
                     type="button"
-                    className="text-xs font-medium text-gray-600 underline"
+                    className="btn-secondary btn-sm w-full"
                     onClick={() => setSupplierChoice("search")}
                   >
                     Search existing suppliers instead
@@ -927,7 +934,7 @@ export default function PurchaseForm({
                     }}
                     errors={{ name: errors.supplier_name }}
                   />
-                  <p className="text-xs text-amber-700">
+                  <p className="text-xs leading-relaxed text-amber-900">
                     New supplier — created and marked unverified when you save.
                   </p>
                 </div>
@@ -946,11 +953,11 @@ export default function PurchaseForm({
                   {errors.supplier_name && (
                     <p className="field-error">{errors.supplier_name}</p>
                   )}
-                  <p className="mt-1 text-xs text-gray-500">
+                  <p className="hint">
                     {matchedSupplier ? (
                       <>Existing supplier: {matchedSupplier.name}</>
                     ) : header.supplier_name.trim() ? (
-                      <span className="text-amber-700">
+                      <span className="font-medium text-amber-700">
                         New supplier — it will be created when you save
                       </span>
                     ) : null}
@@ -973,11 +980,11 @@ export default function PurchaseForm({
                   <p className="field-error">{errors.supplier_name}</p>
                 )}
                 {supplierTyped && (
-                  <p className="mt-1 text-xs text-gray-500">
+                  <p className="hint">
                     {matchedSupplier ? (
                       <>Existing supplier: {matchedSupplier.name}</>
                     ) : (
-                      <span className="text-amber-700">
+                      <span className="font-medium text-amber-700">
                         New supplier — it will be created when you save
                       </span>
                     )}
@@ -991,12 +998,12 @@ export default function PurchaseForm({
             <label className="label" htmlFor="purchase_date">
               Date
             </label>
-            <input
+            <DatePicker
               id="purchase_date"
-              type="date"
-              className="input"
+              title="Invoice date"
+              invalid={Boolean(errors.purchase_date)}
               value={header.purchase_date}
-              onChange={(e) => setField("purchase_date", e.target.value)}
+              onChange={(v) => setField("purchase_date", v)}
             />
             {errors.purchase_date && (
               <p className="field-error">{errors.purchase_date}</p>
@@ -1055,19 +1062,15 @@ export default function PurchaseForm({
             <label className="label" htmlFor="category">
               Category
             </label>
-            <select
+            <Select
               id="category"
-              className="input"
+              title="Category"
+              placeholder="None"
+              clearable
               value={header.category}
-              onChange={(e) => setField("category", e.target.value)}
-            >
-              <option value="">—</option>
-              {EXPENSE_CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setField("category", v)}
+              options={EXPENSE_CATEGORIES.map((c) => ({ value: c, label: c }))}
+            />
           </div>
           <div>
             <label className="label" htmlFor="trade">
@@ -1085,24 +1088,20 @@ export default function PurchaseForm({
             <label className="label" htmlFor="entry_status">
               Status
             </label>
-            <select
+            <Select
               id="entry_status"
-              className="input"
+              title="Status"
+              invalid={Boolean(errors.entry_status)}
               value={header.entry_status}
-              onChange={(e) => setField("entry_status", e.target.value)}
-            >
-              {EXPENSE_STATUSES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setField("entry_status", v)}
+              options={EXPENSE_STATUSES.map((s) => ({ value: s, label: s }))}
+            />
             {errors.entry_status && (
               <p className="field-error">{errors.entry_status}</p>
             )}
           </div>
         </div>
-        <p className="mt-1 text-xs text-gray-400">
+        <p className="hint">
           Status is the job&rsquo;s own state. Whether the invoice is paid is
           worked out from the payments below, never typed.
         </p>
@@ -1110,11 +1109,15 @@ export default function PurchaseForm({
         <button
           type="button"
           onClick={() => setShowMore((s) => !s)}
-          className="mt-3 flex min-h-touch w-full items-center justify-between rounded-lg border border-gray-200 px-3 text-sm font-medium text-gray-700"
+          className="mt-3 flex min-h-touch w-full items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 text-left text-sm font-semibold text-gray-700 transition active:bg-gray-50"
           aria-expanded={showMore}
         >
           <span>Room and notes</span>
-          <span aria-hidden>{showMore ? "▴" : "▾"}</span>
+          <Icon
+            name={showMore ? "chevronUp" : "chevronDown"}
+            size={18}
+            className="shrink-0 text-gray-400"
+          />
         </button>
         {showMore && (
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1136,7 +1139,7 @@ export default function PurchaseForm({
               </label>
               <textarea
                 id="notes"
-                className="input"
+                className="textarea"
                 rows={2}
                 value={header.notes}
                 onChange={(e) => setField("notes", e.target.value)}
@@ -1148,30 +1151,24 @@ export default function PurchaseForm({
 
       {/* ---------------- the lines ---------------- */}
       <fieldset className="card">
-        <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
-          What was on it
-        </legend>
+        <legend className="eyebrow mb-2.5">What was on it</legend>
         {errors.lines && <p className="field-error">{errors.lines}</p>}
 
         <div className="space-y-3">
           {lines.map((line, index) => {
             const info = lineInfo[index];
             return (
-              <div
-                key={line.key}
-                className="rounded-lg border border-gray-200 p-3"
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    Line {index + 1}
-                  </span>
+              <div key={line.key} className="card-sunken">
+                <div className="mb-2.5 flex items-center justify-between">
+                  <span className="eyebrow">Line {index + 1}</span>
                   <button
                     type="button"
                     onClick={() => removeLine(line.key)}
                     disabled={lines.length === 1}
-                    className="text-xs text-red-600 hover:underline disabled:text-gray-300 disabled:no-underline"
+                    aria-label={`Remove line ${index + 1}`}
+                    className="btn-icon h-9 min-h-0 w-9 min-w-0 text-red-600 disabled:pointer-events-none disabled:text-gray-300"
                   >
-                    Remove
+                    <Icon name="trash" size={16} />
                   </button>
                 </div>
 
@@ -1209,7 +1206,8 @@ export default function PurchaseForm({
                       inputMode="decimal"
                       min={0}
                       step="0.001"
-                      className="input"
+                      placeholder="0"
+                      className="input tnum"
                       value={line.qty}
                       onChange={(e) => updateLine(line.key, { qty: e.target.value })}
                     />
@@ -1240,7 +1238,8 @@ export default function PurchaseForm({
                       inputMode="decimal"
                       min={0}
                       step="0.0001"
-                      className="input"
+                      placeholder="0.00"
+                      className="input tnum"
                       value={line.unit_price}
                       onChange={(e) =>
                         updateLine(line.key, { unit_price: e.target.value })
@@ -1258,7 +1257,8 @@ export default function PurchaseForm({
                       inputMode="decimal"
                       min={0}
                       step="0.01"
-                      className="input"
+                      placeholder="0.00"
+                      className={`input tnum ${errors[`lines.${index}.line_net`] ? "input-invalid" : ""}`}
                       value={line.line_net}
                       onChange={(e) =>
                         updateLine(line.key, { line_net: e.target.value })
@@ -1275,26 +1275,24 @@ export default function PurchaseForm({
                     <label className="label" htmlFor={`${line.key}-vat`}>
                       VAT
                     </label>
-                    <select
+                    {/* The empty placeholder is only ever showing when the
+                        invoice reader could not store the rate it read (see
+                        documentNotes). Without it the control would silently
+                        display 0% for a blank value — the exact substitution
+                        it is here to stop. Validation refuses to save while it
+                        is empty. */}
+                    <Select
                       id={`${line.key}-vat`}
-                      className="input"
-                      value={line.vat_rate}
-                      onChange={(e) =>
-                        updateLine(line.key, { vat_rate: e.target.value })
-                      }
-                    >
-                      {/* Only ever present when the invoice reader could not
-                          store the rate it read (see documentNotes). Without
-                          it the select would silently display 0% for a blank
-                          value — the exact substitution this is here to stop.
-                          Validation refuses to save while it is selected. */}
-                      {line.vat_rate === "" && <option value="">— pick —</option>}
-                      {VAT_RATES.map((r) => (
-                        <option key={r} value={r}>
-                          {r}%
-                        </option>
-                      ))}
-                    </select>
+                      title="VAT rate"
+                      placeholder="Pick a rate"
+                      invalid={Boolean(errors[`lines.${index}.vat_rate`])}
+                      value={String(line.vat_rate)}
+                      onChange={(v) => updateLine(line.key, { vat_rate: v })}
+                      options={VAT_RATES.map((r) => ({
+                        value: String(r),
+                        label: `${r}%`,
+                      }))}
+                    />
                     {errors[`lines.${index}.vat_rate`] && (
                       <p className="field-error">
                         {errors[`lines.${index}.vat_rate`]}
@@ -1304,11 +1302,11 @@ export default function PurchaseForm({
                 </div>
 
                 {/* What this line will be filed under. */}
-                <p className="mt-2 text-xs text-gray-500">
+                <p className="mt-2.5 text-xs text-gray-500">
                   {info.item ? (
                     <>Item: {info.item.canonical_name}</>
                   ) : info.isNewItem ? (
-                    <span className="text-amber-700">
+                    <span className="font-medium text-amber-700">
                       New item — it will be created when you save
                     </span>
                   ) : (
@@ -1420,43 +1418,47 @@ export default function PurchaseForm({
           })}
         </div>
 
-        <button type="button" className="btn-secondary mt-3" onClick={addLine}>
-          + Add line
+        <button
+          type="button"
+          className="btn-secondary mt-3 w-full"
+          onClick={addLine}
+        >
+          <Icon name="plus" size={17} strokeWidth={2.25} />
+          Add line
         </button>
       </fieldset>
 
       {/* ---------------- payments ---------------- */}
       <fieldset className="card">
-        <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
-          Payments
-        </legend>
-        <p className="mb-3 text-xs text-gray-500">
+        <legend className="eyebrow mb-2.5">Payments</legend>
+        <p className="mb-3 text-xs leading-relaxed text-gray-500">
           One row per time money changed hands, each with its own date and
           method. What is still owed is worked out from these — it is never
           stored.
         </p>
 
         {payments.length === 0 ? (
-          <p className="text-sm text-gray-500">Nothing paid yet.</p>
+          <p className="rounded-xl bg-gray-100 px-4 py-3 text-sm text-gray-500">
+            Nothing paid yet.
+          </p>
         ) : (
           <div className="space-y-3">
             {payments.map((payment, index) => (
               <div
                 key={payment.key}
-                className="grid grid-cols-2 gap-3 rounded-lg border border-gray-200 p-3 sm:grid-cols-12"
+                className="card-sunken grid grid-cols-2 gap-3 sm:grid-cols-12"
               >
                 <div className="sm:col-span-3">
                   <label className="label" htmlFor={`${payment.key}-date`}>
                     Paid on
                   </label>
-                  <input
+                  <DatePicker
                     id={`${payment.key}-date`}
-                    type="date"
-                    className="input"
+                    title="Date of payment"
+                    clearable={false}
+                    invalid={Boolean(errors[`payments.${index}.paid_on`])}
                     value={payment.paid_on}
-                    onChange={(e) =>
-                      updatePayment(payment.key, { paid_on: e.target.value })
-                    }
+                    onChange={(v) => updatePayment(payment.key, { paid_on: v })}
                   />
                   {errors[`payments.${index}.paid_on`] && (
                     <p className="field-error">
@@ -1468,18 +1470,24 @@ export default function PurchaseForm({
                   <label className="label" htmlFor={`${payment.key}-amount`}>
                     Amount
                   </label>
-                  <input
-                    id={`${payment.key}-amount`}
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    step="0.01"
-                    className="input"
-                    value={payment.amount}
-                    onChange={(e) =>
-                      updatePayment(payment.key, { amount: e.target.value })
-                    }
-                  />
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-semibold text-gray-400">
+                      £
+                    </span>
+                    <input
+                      id={`${payment.key}-amount`}
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step="0.01"
+                      placeholder="0.00"
+                      className={`input tnum pl-8 ${errors[`payments.${index}.amount`] ? "input-invalid" : ""}`}
+                      value={payment.amount}
+                      onChange={(e) =>
+                        updatePayment(payment.key, { amount: e.target.value })
+                      }
+                    />
+                  </div>
                   {errors[`payments.${index}.amount`] && (
                     <p className="field-error">
                       {errors[`payments.${index}.amount`]}
@@ -1490,21 +1498,15 @@ export default function PurchaseForm({
                   <label className="label" htmlFor={`${payment.key}-method`}>
                     Method
                   </label>
-                  <select
+                  <Select
                     id={`${payment.key}-method`}
-                    className="input"
+                    title="Payment method"
+                    placeholder="Not recorded"
+                    clearable
                     value={payment.method}
-                    onChange={(e) =>
-                      updatePayment(payment.key, { method: e.target.value })
-                    }
-                  >
-                    <option value="">—</option>
-                    {PAYMENT_METHODS.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(v) => updatePayment(payment.key, { method: v })}
+                    options={PAYMENT_METHODS.map((m) => ({ value: m, label: m }))}
+                  />
                 </div>
                 <div className="sm:col-span-3">
                   <label className="label" htmlFor={`${payment.key}-reference`}>
@@ -1522,14 +1524,16 @@ export default function PurchaseForm({
                 <div className="col-span-2 flex items-end sm:col-span-1">
                   <button
                     type="button"
+                    aria-label={`Remove payment ${index + 1}`}
                     onClick={() =>
                       setPayments((current) =>
                         current.filter((p) => p.key !== payment.key)
                       )
                     }
-                    className="text-xs text-red-600 hover:underline"
+                    className="btn-danger-soft btn-sm w-full sm:w-auto sm:px-2.5"
                   >
-                    Remove
+                    <Icon name="trash" size={16} />
+                    <span className="sm:hidden">Remove payment</span>
                   </button>
                 </div>
               </div>
@@ -1537,16 +1541,17 @@ export default function PurchaseForm({
           </div>
         )}
 
-        <div className="mt-3 flex flex-wrap gap-2">
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
           <button
             type="button"
             className="btn-secondary"
             onClick={() => setPayments((c) => [...c, blankPayment()])}
           >
-            + Add payment
+            <Icon name="plus" size={17} strokeWidth={2.25} />
+            Add payment
           </button>
           {balance > 0.005 && (
-            <button type="button" className="btn-secondary" onClick={payTheBalance}>
+            <button type="button" className="btn-soft" onClick={payTheBalance}>
               Pay the balance ({formatCurrency(balance)})
             </button>
           )}
@@ -1561,12 +1566,14 @@ export default function PurchaseForm({
       </fieldset>
 
       {/* ---------------- totals ---------------- */}
-      <div className="rounded-lg bg-brand-50 p-3 text-sm">
-        <div className="flex justify-between">
-          <span className="text-gray-600">
+      <div className="overflow-hidden rounded-2xl bg-brand-50 p-4 text-[0.8125rem] ring-1 ring-inset ring-brand-600/10">
+        <div className="flex justify-between gap-3">
+          <span className="text-brand-900/60">
             Net of {lines.length} {lines.length === 1 ? "line" : "lines"}
           </span>
-          <span className="font-medium">{formatCurrency(totals.net_total)}</span>
+          <span className="tnum font-semibold text-brand-900">
+            {formatCurrency(totals.net_total)}
+          </span>
         </div>
         {netMismatch && (
           <p className="field-warning">
@@ -1579,9 +1586,11 @@ export default function PurchaseForm({
             .
           </p>
         )}
-        <div className="flex justify-between">
-          <span className="text-gray-600">VAT</span>
-          <span className="font-medium">{formatCurrency(totals.vat_total)}</span>
+        <div className="mt-1.5 flex justify-between gap-3">
+          <span className="text-brand-900/60">VAT</span>
+          <span className="tnum font-semibold text-brand-900">
+            {formatCurrency(totals.vat_total)}
+          </span>
         </div>
         {vatMismatch && (
           <p className="field-warning">
@@ -1591,40 +1600,49 @@ export default function PurchaseForm({
             each line.
           </p>
         )}
-        <div className="flex justify-between">
-          <span className="text-gray-600">Total incl. VAT</span>
-          <span className="font-medium">
+        <div className="mt-1.5 flex justify-between gap-3">
+          <span className="text-brand-900/60">Total incl. VAT</span>
+          <span className="tnum font-semibold text-brand-900">
             {formatCurrency(totals.gross_total)}
           </span>
         </div>
-        <div className="flex justify-between">
-          <span className="text-gray-600">Paid</span>
-          <span className="font-medium">{formatCurrency(paid)}</span>
+        <div className="mt-1.5 flex justify-between gap-3">
+          <span className="text-brand-900/60">Paid</span>
+          <span className="tnum font-semibold text-brand-900">
+            {formatCurrency(paid)}
+          </span>
         </div>
-        <div className="mt-1 flex items-center justify-between border-t border-brand-100 pt-1 text-base font-bold text-brand">
-          <span>Still owed</span>
-          <span className="flex items-center gap-2">
+        <div className="mt-3 flex items-center justify-between gap-3 border-t border-brand-600/10 pt-3">
+          <span className="flex items-center gap-2 text-sm font-bold text-brand-900">
+            Still owed
             <Badge label={status} />
+          </span>
+          <span className="tnum text-xl font-bold tracking-[-0.02em] text-brand-800">
             {formatCurrency(balance)}
           </span>
         </div>
 
-        <div className="mt-3 border-t border-brand-100 pt-3">
+        <div className="mt-3 border-t border-brand-600/10 pt-3">
           <label className="label" htmlFor="stated_gross">
             Invoice total as printed (optional check)
           </label>
-          <input
-            id="stated_gross"
-            type="number"
-            inputMode="decimal"
-            min={0}
-            step="0.01"
-            className="input"
-            value={statedGross}
-            onChange={(e) => setStatedGross(e.target.value)}
-            placeholder="type what the paper says, incl. VAT"
-          />
-          <p className="mt-1 text-xs text-gray-500">
+          <div className="relative">
+            <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-semibold text-gray-400">
+              £
+            </span>
+            <input
+              id="stated_gross"
+              type="number"
+              inputMode="decimal"
+              min={0}
+              step="0.01"
+              className="input tnum pl-8"
+              value={statedGross}
+              onChange={(e) => setStatedGross(e.target.value)}
+              placeholder="what the paper says, incl. VAT"
+            />
+          </div>
+          <p className="mt-1.5 text-xs leading-relaxed text-brand-900/60">
             Not saved. It only checks the lines against the document — if they
             disagree, a line is missing or mistyped.
           </p>
@@ -1639,23 +1657,27 @@ export default function PurchaseForm({
         </div>
       </div>
 
-      <div className="sticky bottom-0 -mx-4 flex gap-2 border-t border-gray-200 bg-white px-4 py-3 sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pb-2 sm:pt-0">
-        <button type="submit" disabled={saving} className="btn-primary flex-1">
-          {saving && <Spinner />}
-          {editing ? "Save changes" : "Log invoice"}
-        </button>
-        <button type="button" className="btn-secondary" onClick={cancel}>
-          Cancel
-        </button>
+      {/* Delete is an icon button at the far end rather than a full red button
+          the same size as Save — it was competing with the primary action on a
+          form whose whole job is to save. */}
+      <div className="sticky bottom-0 -mx-3 flex gap-2 border-t border-gray-200 bg-white/95 px-3 py-3 pb-safe backdrop-blur-xl sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pb-2 sm:pt-0 sm:backdrop-blur-none">
         {editing && (
           <button
             type="button"
-            className="btn-danger"
+            aria-label="Delete invoice"
+            className="btn-danger-soft shrink-0 px-3"
             onClick={() => setConfirmDelete(true)}
           >
-            Delete
+            <Icon name="trash" size={18} />
           </button>
         )}
+        <button type="button" className="btn-secondary shrink-0" onClick={cancel}>
+          Cancel
+        </button>
+        <button type="submit" disabled={saving} className="btn-primary flex-1">
+          {saving ? <Spinner /> : null}
+          {editing ? "Save changes" : "Log invoice"}
+        </button>
       </div>
 
       <ConfirmDialog

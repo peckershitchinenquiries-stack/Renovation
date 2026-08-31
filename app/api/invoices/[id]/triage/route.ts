@@ -79,12 +79,13 @@ export async function POST(
         400
       );
 
-    // Idempotent by hand rather than by upsert: 0013's uniqueness is the
-    // expression index ux_supplier_domains_user_domain on
-    // (user_id, public.norm_key(domain)), and PostgREST's on_conflict can only
-    // name plain columns. So: look first, insert if absent, and treat a 23505
-    // from a concurrent insert as success — the row we wanted exists either
-    // way.
+    // Idempotent by hand rather than by upsert: the uniqueness is an
+    // expression index — ux_supplier_domains_domain on
+    // public.norm_key(domain), added by 0015 when the trust list became one
+    // shared list — and PostgREST's on_conflict can only name plain columns.
+    // So: look first, insert if absent, and treat a 23505 from a concurrent
+    // insert as success — the row we wanted exists either way. The row found
+    // here may well have been trusted by somebody else; that is the point.
     const { data: existing } = await supabase
       .from("supplier_domains")
       .select("id")

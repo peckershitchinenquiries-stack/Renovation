@@ -61,9 +61,23 @@ pasted into the Supabase SQL editor and run by hand, in filename order.
 
 ### Queries never filter by user — RLS does it
 
-No query anywhere includes `.eq("user_id", ...)`. Every table has an
-`auth.uid() = user_id` policy, so scoping is entirely implicit. Two consequences
-worth internalising:
+No query anywhere includes `.eq("user_id", ...)`. Every table has one policy, so
+scoping is entirely implicit.
+
+**Since migration `0015` that policy is `for all to authenticated using (true)
+with check (true)`, named `shared workspace`.** This is one shared workspace,
+not a multi-tenant app: 46 Glenferrie Road is a single renovation and the owner
+wants friends working on it, so **signing in is the whole of the authorisation
+model** — anyone with a login sees and can edit everything, including deleting
+it. Sign-up is disabled and users are created by hand in the Supabase
+dashboard, which is what keeps that list short. `to authenticated` is load-
+bearing: it is the only thing stopping a signed-out `anon` browser reading the
+database. See about.md §9.1.
+
+`user_id` still exists on every table and every insert still sets it, but it is
+now **provenance, not permission** — do not write a policy against it.
+
+Two consequences worth internalising:
 
 - Adding a table means adding its RLS policy, or it returns nothing (or leaks
   everything, if RLS is left disabled). It also means granting `authenticated`
@@ -71,8 +85,12 @@ worth internalising:
   `service_role`. A missing grant is a hard `42501 permission denied`, not an
   empty result; migration `0014` covers the tables that exist today and sets
   default privileges for future ones.
-- An empty result is ambiguous: no rows, or rows owned by a different user.
-  See "Data recovery" below — this exact ambiguity caused a real incident.
+- An empty result is ambiguous: no rows, or a table still on a pre-`0015`
+  owner-scoped policy. See "Data recovery" below — this exact ambiguity caused
+  a real incident.
+- Deleting an auth user is now worse, not better: `on delete cascade` means
+  deleting a **friend's** account destroys the rows that friend created, and
+  everyone else loses them too.
 
 ### Totals are computed, never stored
 

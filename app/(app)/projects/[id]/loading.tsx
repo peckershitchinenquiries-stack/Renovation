@@ -1,15 +1,18 @@
-import { Skeleton, CardSkeletonGrid } from "@/components/ui/States";
+import {
+  CardSkeletonGrid,
+  HeaderSkeleton,
+  Skeleton,
+} from "@/components/ui/States";
 
 export default function Loading() {
   return (
-    <div className="space-y-4">
-      <div className="card">
-        <Skeleton className="h-6 w-48" />
-        <Skeleton className="mt-2 h-4 w-64" />
-      </div>
-      <CardSkeletonGrid count={4} />
-      <div className="card">
-        <Skeleton className="h-60 w-full" />
+    <div>
+      {/* `below` stands in for the tab strip inside the header. */}
+      <HeaderSkeleton below />
+      <Skeleton className="h-40 w-full rounded-3xl" />
+      <div className="mt-5 space-y-3">
+        <CardSkeletonGrid count={4} />
+        <Skeleton className="h-64 w-full rounded-2xl" />
       </div>
     </div>
   );

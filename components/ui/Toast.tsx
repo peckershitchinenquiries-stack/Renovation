@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useCallback, useContext, useState } from "react";
+import { Icon, type IconName } from "./Icon";
 
 type ToastKind = "success" | "error" | "info";
 interface Toast {
@@ -21,6 +22,12 @@ export function useToast() {
   return ctx.toast;
 }
 
+const KIND: Record<ToastKind, { icon: IconName; dot: string }> = {
+  success: { icon: "check", dot: "bg-emerald-400" },
+  error: { icon: "alert", dot: "bg-red-400" },
+  info: { icon: "info", dot: "bg-blue-400" },
+};
+
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -35,20 +42,31 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
-      <div className="fixed bottom-20 right-4 z-50 flex flex-col gap-2 sm:bottom-4">
+      {/*
+        Toasts sit above the bottom tab bar on mobile — a message that covers
+        the navigation is a message that blocks the way out. One dark surface
+        for all three kinds, with the colour carried by the icon: three
+        full-width coloured slabs is a lot of shouting for "Saved".
+      */}
+      <div
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col
+          items-center gap-2 px-4 pb-[calc(var(--nav-h)+env(safe-area-inset-bottom)+0.75rem)]
+          sm:inset-x-auto sm:right-4 sm:items-end sm:pb-4"
+      >
         {toasts.map((t) => (
           <div
             key={t.id}
             role="status"
-            className={`max-w-xs rounded-lg px-4 py-3 text-sm text-white shadow-lg ${
-              t.kind === "success"
-                ? "bg-emerald-600"
-                : t.kind === "error"
-                  ? "bg-red-600"
-                  : "bg-gray-800"
-            }`}
+            className="pointer-events-auto flex w-full max-w-sm animate-toast-in items-center gap-3
+              rounded-2xl bg-gray-900/95 px-4 py-3 text-sm font-medium text-white
+              shadow-pop backdrop-blur-xl"
           >
-            {t.message}
+            <span
+              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${KIND[t.kind].dot} text-gray-900`}
+            >
+              <Icon name={KIND[t.kind].icon} size={14} strokeWidth={2.5} />
+            </span>
+            <span className="min-w-0 flex-1 leading-snug">{t.message}</span>
           </div>
         ))}
       </div>

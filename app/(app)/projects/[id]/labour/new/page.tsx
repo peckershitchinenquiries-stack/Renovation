@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { safeReturnTo } from "@/lib/safeReturnTo";
 import LabourForm from "@/components/forms/LabourForm";
+import { PageHeader } from "@/components/ui/PageHeader";
 import type { Project, TradeLookup } from "@/types";
 
 export const dynamic = "force-dynamic";
@@ -33,24 +33,18 @@ export default async function NewLabourPage({
 
   return (
     <div className="mx-auto max-w-2xl">
-      <nav className="mb-4 text-sm text-gray-500">
-        <Link href={`/projects/${named.id}`} className="hover:underline">
-          {named.name}
-        </Link>{" "}
-        /{" "}
-        <Link
-          href={`/projects/${named.id}?tab=labour`}
-          className="hover:underline"
-        >
-          Labour
-        </Link>{" "}
-        / Log labour
-      </nav>
-      <h1 className="mb-1 text-2xl font-bold text-gray-900">Log labour</h1>
-      <p className="mb-4 text-sm text-gray-500">
+      {/* The three-level breadcrumb is gone — on a phone it wrapped onto two
+          lines above the heading. The back arrow goes where it pointed. */}
+      <PageHeader
+        title="Log labour"
+        subtitle={named.name}
+        backHref={returnTo ?? `/projects/${named.id}?tab=analysis&view=labour`}
+        backLabel="Back to labour"
+      />
+      <p className="mb-4 text-[0.8125rem] leading-relaxed text-gray-500">
         For work paid direct rather than invoiced. Saved as a Labour entry, so it
-        shows up on the Labour, Trades, Suppliers and Overview tabs alongside
-        everything else.
+        shows up on the Overview, Costs and Analysis tabs alongside everything
+        else.
       </p>
       <div className="card">
         <LabourForm

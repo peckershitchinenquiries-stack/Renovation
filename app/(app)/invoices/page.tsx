@@ -2,6 +2,8 @@ import Link from "next/link";
 import DrainHealth from "@/components/invoices/DrainHealth";
 import TriageSection from "@/components/invoices/TriageSection";
 import EmailInvoices from "@/components/invoices/EmailInvoices";
+import { PageHeader, SectionHeader } from "@/components/ui/PageHeader";
+import { Icon, type IconName } from "@/components/ui/Icon";
 
 export const dynamic = "force-dynamic";
 
@@ -21,52 +23,85 @@ export const dynamic = "force-dynamic";
 export default function AddInvoicePage() {
   return (
     <div className="mx-auto max-w-2xl">
+      <PageHeader
+        title="Invoices"
+        subtitle="Add one, or check what arrived by email"
+        flush
+      />
+
+      {/* Adding comes first now. The email sections used to sit above the
+          heading, so the page opened on a status report for a background job
+          rather than on the thing the reader came to do. */}
+      <section className="mb-6">
+        <SectionHeader
+          title="Add an invoice"
+          hint="You pick the project when you save it."
+        />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <AddChoice
+            href="/invoices/upload"
+            icon="camera"
+            tone="brand"
+            title="Upload a photo or PDF"
+            description="The supplier, lines and total are read automatically. You check it before it saves."
+          />
+          <AddChoice
+            href="/invoices/new"
+            icon="edit"
+            tone="info"
+            title="Type it in"
+            description="Enter the supplier, the lines on the invoice and any payments yourself."
+          />
+        </div>
+      </section>
+
       <DrainHealth />
       <TriageSection />
       {/* Everything else that came out of the mailbox. Unlike the two above it
           this one always renders something, because "did my email arrive?" has
           no useful silent answer. */}
       <EmailInvoices />
-
-      <h1 className="mb-1 text-2xl font-bold text-gray-900">Add an invoice</h1>
-      <p className="mb-4 text-sm text-gray-500">
-        Upload a photo or PDF and let it read the details, or type everything
-        in yourself. Either way you pick the project when you save it.
-      </p>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Link
-          href="/invoices/upload"
-          className="card flex min-h-touch flex-col items-start gap-2 p-5 text-left transition hover:border-brand hover:shadow-md"
-        >
-          <span className="text-3xl" aria-hidden>
-            📤
-          </span>
-          <span className="text-base font-semibold text-gray-900">
-            Upload invoice
-          </span>
-          <span className="text-sm text-gray-500">
-            Photo or PDF — the supplier, lines and total are read
-            automatically. You check it before it saves.
-          </span>
-        </Link>
-
-        <Link
-          href="/invoices/new"
-          className="card flex min-h-touch flex-col items-start gap-2 p-5 text-left transition hover:border-brand hover:shadow-md"
-        >
-          <span className="text-3xl" aria-hidden>
-            📝
-          </span>
-          <span className="text-base font-semibold text-gray-900">
-            Enter manually
-          </span>
-          <span className="text-sm text-gray-500">
-            Type in the supplier, the lines on the invoice and any payments
-            yourself.
-          </span>
-        </Link>
-      </div>
     </div>
+  );
+}
+
+const TONES = {
+  brand: "bg-brand-50 text-brand-700",
+  info: "bg-blue-50 text-blue-600",
+} as const;
+
+function AddChoice({
+  href,
+  icon,
+  tone,
+  title,
+  description,
+}: {
+  href: string;
+  icon: IconName;
+  tone: keyof typeof TONES;
+  title: string;
+  description: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className="card flex items-start gap-3.5 transition active:scale-[0.99] hover:border-brand-200 hover:shadow-soft"
+    >
+      <span
+        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl ${TONES[tone]}`}
+      >
+        <Icon name={icon} size={21} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[0.9375rem] font-bold text-gray-900">
+          {title}
+        </span>
+        <span className="mt-1 block text-[0.8125rem] leading-relaxed text-gray-500">
+          {description}
+        </span>
+      </span>
+      <Icon name="chevronRight" size={18} className="mt-1 shrink-0 text-gray-300" />
+    </Link>
   );
 }

@@ -111,7 +111,7 @@ export default function RescanMailboxButton() {
       type="button"
       onClick={run}
       disabled={busy}
-      className="btn-secondary text-xs disabled:opacity-50"
+      className="btn-secondary btn-sm w-full"
     >
       {busy ? "Re-scanning…" : "Re-scan the mailbox"}
     </button>

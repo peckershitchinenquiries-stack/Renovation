@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { apiFetch, ApiError } from "@/lib/fetcher";
 import { Spinner } from "@/components/ui/States";
+import { Select } from "@/components/ui/Select";
+import { Icon } from "@/components/ui/Icon";
 import type { TradeLookup } from "@/types";
 
 // Trade is still stored as a plain name string on expense_entries.trade and
@@ -85,63 +87,77 @@ export default function TradeSelect({
 
   if (adding) {
     return (
-      <div className="flex flex-wrap items-start gap-2">
-        <div className="min-w-[10rem] flex-1">
-          <input
-            id={id}
-            className={className}
-            autoFocus
-            autoComplete="off"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="New trade name"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                saveNewTrade();
-              }
+      <div>
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <input
+              id={id}
+              className={`input ${error ? "input-invalid" : ""}`}
+              autoFocus
+              autoComplete="off"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="New trade name"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  saveNewTrade();
+                }
+              }}
+            />
+          </div>
+          <button
+            type="button"
+            className="btn-primary shrink-0"
+            disabled={saving}
+            onClick={saveNewTrade}
+          >
+            {saving ? <Spinner /> : null}
+            Save
+          </button>
+          <button
+            type="button"
+            aria-label="Cancel adding a trade"
+            className="btn-icon shrink-0 border border-gray-200 text-gray-500"
+            onClick={() => {
+              setAdding(false);
+              setError(null);
             }}
-          />
-          {error && <p className="field-error">{error}</p>}
+          >
+            <Icon name="close" size={18} />
+          </button>
         </div>
-        <button
-          type="button"
-          className="btn-secondary shrink-0"
-          disabled={saving}
-          onClick={saveNewTrade}
-        >
-          {saving && <Spinner />}
-          Save
-        </button>
-        <button
-          type="button"
-          className="shrink-0 text-xs text-gray-500 underline"
-          onClick={() => {
-            setAdding(false);
-            setError(null);
-          }}
-        >
-          Cancel
-        </button>
+        {error ? <p className="field-error">{error}</p> : null}
       </div>
     );
   }
 
+  // The "+ Add new trade" row stays an option in the list rather than becoming
+  // a button beside it: adding a trade is something you discover *while*
+  // looking for one that is not there, which is exactly when the list is open.
   return (
-    <select
+    <Select
       id={id}
-      className={className}
+      title="Trade"
+      placeholder="No trade"
+      clearable
+      className={className === "input" ? "" : className}
       value={value}
-      onChange={(e) => handleSelect(e.target.value)}
-    >
-      <option value="">— None —</option>
-      {currentIsUnknown && <option value={value}>{value} (not in list)</option>}
-      {trades.map((t) => (
-        <option key={t.id} value={t.name}>
-          {t.name}
-        </option>
-      ))}
-      <option value={ADD_NEW}>+ Add new trade</option>
-    </select>
+      onChange={handleSelect}
+      options={[
+        ...(currentIsUnknown
+          ? [{ value, label: value, hint: "Not in the trade list" }]
+          : []),
+        ...trades.map((t) => ({
+          value: t.name,
+          label: t.name,
+          hint:
+            Number(t.default_rate) > 0
+              ? `£${Number(t.default_rate).toFixed(2)}/hr`
+              : undefined,
+        })),
+        { value: ADD_NEW, label: "+ Add a new trade" },
+      ]}
+    />
   );
 }

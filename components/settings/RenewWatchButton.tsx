@@ -76,7 +76,7 @@ export default function RenewWatchButton() {
       type="button"
       onClick={run}
       disabled={busy}
-      className="btn-secondary text-xs disabled:opacity-50"
+      className="btn-secondary btn-sm w-full"
     >
       {busy ? "Registering…" : "Register / refresh watch"}
     </button>

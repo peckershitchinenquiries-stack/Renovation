@@ -65,21 +65,13 @@ export interface ProjectBundle {
   weeks: ProjectWeek[];
   invoiceTotals: PurchaseTotals[];
   // The transaction core for this project, flattened one line per row. This is
-  // what the Trades / Labour / Materials / Suppliers / Price Tracker tabs are
-  // built from — see lib/invoiceViews.ts for why they no longer read
-  // expense_entries.
+  // what the Analysis tab's four pivots are built from — see lib/invoiceViews.ts
+  // for why they no longer read expense_entries.
   invoiceLines: InvoiceLineView[];
   // Whole documents, for the screens that report paid / outstanding: payment is
   // recorded per invoice, never per line.
   purchases: PurchaseComputed[];
   supplierNames: Record<string, string>;
-  // Purchase ids that still have the original photo or PDF behind them, i.e.
-  // the ones committed from an upload (migration 0010). Only these can be
-  // opened, so only these are linked — an invoice typed in by hand has no
-  // document, and offering a link to one would be a promise the app cannot
-  // keep. Ids only: a signed URL expires, so it is minted when clicked
-  // (app/api/projects/[id]/purchases/[pid]/document).
-  documentPurchaseIds: string[];
 }
 
 export async function getProjectBundle(id: string): Promise<ProjectBundle | null> {
@@ -114,13 +106,9 @@ export async function getProjectBundle(id: string): Promise<ProjectBundle | null
   // Second pass: payments and lines scoped to this project's purchase IDs
   // only. selectIn handles the empty-array case without a wasted round trip.
   const purchaseIds = ((rawPurchases ?? []) as Purchase[]).map((p) => p.id);
-  const [projectPayments, purchaseLines, committedUploads] = await Promise.all([
+  const [projectPayments, purchaseLines] = await Promise.all([
     selectIn<Payment>(supabase, "payments", "purchase_id", purchaseIds),
     selectIn<PurchaseLine>(supabase, "purchase_lines", "purchase_id", purchaseIds),
-    // Which of these invoices still have their original file. Scoped by
-    // invoice_id rather than project_id so an upload can only ever mark a
-    // purchase this project actually owns.
-    selectIn<InvoiceUpload>(supabase, "invoice_uploads", "invoice_id", purchaseIds),
   ]);
 
   const computedPurchases = computePurchases(
@@ -186,13 +174,6 @@ export async function getProjectBundle(id: string): Promise<ProjectBundle | null
     ),
     purchases: computedPurchases,
     supplierNames: Object.fromEntries(supplierNames),
-    // Only a committed upload with a file behind it counts. Anything else —
-    // pending, failed, abandoned — is not the document for this invoice.
-    documentPurchaseIds: distinct(
-      committedUploads
-        .filter((u) => u.status === "committed" && Boolean(u.storage_path))
-        .map((u) => u.invoice_id)
-    ),
   };
 }
 
@@ -665,7 +646,7 @@ export async function getProjectPurchases(
   const purchases = (rawPurchases ?? []) as Purchase[];
   const purchaseIds = purchases.map((p) => p.id);
 
-  const [lines, payments, suppliers] = await Promise.all([
+  const [lines, payments, suppliers, uploads] = await Promise.all([
     selectIn<PurchaseLine>(supabase, "purchase_lines", "purchase_id", purchaseIds),
     selectIn<Payment>(supabase, "payments", "purchase_id", purchaseIds),
     selectIn<Supplier>(
@@ -674,7 +655,17 @@ export async function getProjectPurchases(
       "id",
       distinct(purchases.map((p) => p.supplier_id))
     ),
+    // Which of these invoices still have their original document, so the
+    // invoice number can be linked to it. Same rule as the document route
+    // itself: committed, and with a file actually stored.
+    selectIn<InvoiceUpload>(supabase, "invoice_uploads", "invoice_id", purchaseIds),
   ]);
+
+  const withDocument = new Set(
+    uploads
+      .filter((u) => u.status === "committed" && Boolean(u.storage_path))
+      .map((u) => u.invoice_id)
+  );
 
   const supplierNames = new Map(suppliers.map((s) => [s.id, s.name]));
   const linesByPurchase = indexBy(lines, (l) => l.purchase_id);
@@ -693,6 +684,7 @@ export async function getProjectPurchases(
         line_count: own.length,
         payment_count: (paymentsByPurchase.get(purchase.id) ?? []).length,
         first_description: own[0]?.description_raw ?? null,
+        has_document: withDocument.has(purchase.id),
       };
     })
     .sort((a, b) => purchaseOrderKey(b) - purchaseOrderKey(a));

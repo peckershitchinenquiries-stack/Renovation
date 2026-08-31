@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { TopNav, MobileNav } from "@/components/ui/AppNav";
+import { TopNav, BottomNav } from "@/components/ui/AppNav";
 
 export default async function AppLayout({
   children,
@@ -14,12 +14,14 @@ export default async function AppLayout({
   if (!user) redirect("/");
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen bg-gray-50">
       <TopNav />
-      <MobileNav />
-      <main className="mx-auto max-w-6xl px-3 pb-10 pt-4 sm:px-4 sm:pb-8">
+      {/* `pb-nav` reserves the height of the fixed bottom tab bar plus the iOS
+          home indicator, so the last row of any list is never trapped under it. */}
+      <main className="mx-auto max-w-6xl px-3 pb-nav pt-0 sm:px-4 sm:pb-10 sm:pt-4">
         {children}
       </main>
+      <BottomNav />
     </div>
   );
 }

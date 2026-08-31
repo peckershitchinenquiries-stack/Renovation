@@ -1,20 +1,18 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getProjectPurchases } from "@/lib/data";
-import { formatCurrency } from "@/lib/calculations";
-import { Badge } from "@/components/ui/Badge";
-import { StatCard } from "@/components/ui/StatCard";
-import { EmptyState } from "@/components/ui/States";
-import { combineTotals } from "@/components/purchases/totals";
-import type { ProjectPurchaseRow } from "@/types";
+import InvoicesTab from "@/components/project/InvoicesTab";
 
 export const dynamic = "force-dynamic";
 
-// What one row says it is: a hand-typed invoice, or a row copied over from the
-// old week-by-week sheet. Only the former is editable through this form; the
-// rest show a plain "imported" label instead of an Edit link.
-const isManual = (row: ProjectPurchaseRow) => row.origin !== "legacy_import";
-
+/**
+ * The standalone invoice list.
+ *
+ * Since the four-tab collapse this is the same component as the project
+ * screen's Invoices tab — the invoice edit form, the review screen and the
+ * upload flow all redirect here, so the route stays. `chrome="page"` is the
+ * only difference: standing on its own it needs the heading and breadcrumb
+ * that the tab gets from the project header above it.
+ */
 export default async function ProjectPurchasesPage({
   params,
 }: {
@@ -23,198 +21,13 @@ export default async function ProjectPurchasesPage({
   const list = await getProjectPurchases(params.id);
   if (!list) notFound();
   const { project, rows, totals } = list;
-  const total = combineTotals(totals);
 
   return (
-    <div className="space-y-4">
-      <div>
-        <nav className="text-xs text-gray-400">
-          <Link href={`/projects/${project.id}`} className="hover:underline">
-            {project.name}
-          </Link>{" "}
-          / Invoices
-        </nav>
-        <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-bold text-gray-900 sm:text-2xl">
-            Invoices &amp; purchases
-          </h1>
-          {/* Adding happens from the nav bar's Invoices menu, not here: an
-              invoice is filed against a project on the form itself now, so
-              there is one add flow rather than one per project. This page is
-              the record of what has been filed against this one. */}
-          <Link href="/invoices" className="btn-primary">
-            + Log invoice
-          </Link>
-        </div>
-        <p className="mt-1 text-sm text-gray-500">
-          Every document filed against this project — one row per invoice, with
-          its own lines and payments underneath. Add one from{" "}
-          <span className="font-medium">Invoices</span> in the menu above, where
-          you pick the project as you save.
-        </p>
-      </div>
-
-      {/* One set of totals for the project. Cancelled documents are already
-          excluded upstream. */}
-      {total && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <StatCard
-            label="Invoiced (incl VAT)"
-            value={formatCurrency(total.gross)}
-          />
-          <StatCard label="Paid" value={formatCurrency(total.paid)} />
-          <StatCard
-            label="Outstanding"
-            value={formatCurrency(total.balance)}
-            tone={total.balance > 0.001 ? "bad" : "good"}
-          />
-          <StatCard label="Documents" value={String(total.purchase_count)} />
-        </div>
-      )}
-
-      {rows.length === 0 ? (
-        <EmptyState
-          title="No purchases yet"
-          description="Log the first invoice from the Invoices menu — upload a photo or type it in, then choose this project as you save it."
-          action={
-            <Link href="/invoices" className="btn-primary">
-              Log invoice
-            </Link>
-          }
-        />
-      ) : (
-        <>
-          {/* Mobile: one card per document. */}
-          <div className="space-y-2 sm:hidden">
-            {rows.map((row) => (
-              <div key={row.id} className="card p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="font-medium text-gray-900">
-                      {row.supplier_name || "No supplier"}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      {row.purchase_date || "no date"}
-                      {row.invoice_no ? ` · ${row.invoice_no}` : ""}
-                      {row.week_no ? ` · week ${row.week_no}` : ""}
-                    </p>
-                  </div>
-                  <Badge label={row.status} />
-                </div>
-                <p className="mt-1 truncate text-xs text-gray-500">
-                  {row.line_count}{" "}
-                  {row.line_count === 1 ? "line" : "lines"}
-                  {row.first_description ? ` · ${row.first_description}` : ""}
-                </p>
-                <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-gray-100 pt-2 text-xs">
-                  <dt className="text-gray-500">Gross</dt>
-                  <dd className="text-right">
-                    {formatCurrency(Number(row.gross_total))}
-                  </dd>
-                  <dt className="text-gray-500">Paid</dt>
-                  <dd className="text-right">{formatCurrency(row.paid)}</dd>
-                  <dt className="text-gray-500">Balance</dt>
-                  <dd className="text-right">{formatCurrency(row.balance)}</dd>
-                </dl>
-                <div className="mt-2 flex items-center justify-between border-t border-gray-100 pt-2 text-xs">
-                  <span className="flex gap-1">
-                    {row.entry_status === "Cancelled" && (
-                      <Badge label="Cancelled" />
-                    )}
-                  </span>
-                  {isManual(row) ? (
-                    <Link
-                      href={`/projects/${project.id}/purchases/${row.id}/edit`}
-                      className="text-brand hover:underline"
-                    >
-                      Edit
-                    </Link>
-                  ) : (
-                    <span className="text-gray-400">imported</span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="card hidden overflow-x-auto sm:block">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs uppercase text-gray-500">
-                  <th className="py-2 pr-2">Date</th>
-                  <th className="py-2 pr-2">Supplier</th>
-                  <th className="py-2 pr-2">Invoice</th>
-                  <th className="py-2 pr-2 text-right">Lines</th>
-                  <th className="py-2 pr-2 text-right">Gross</th>
-                  <th className="py-2 pr-2 text-right">Paid</th>
-                  <th className="py-2 pr-2 text-right">Balance</th>
-                  <th className="py-2 pr-2">Status</th>
-                  <th className="py-2 pr-2" />
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {rows.map((row) => (
-                  <tr key={row.id} className="align-top">
-                    <td className="whitespace-nowrap py-2 pr-2">
-                      {row.purchase_date || (
-                        <span className="text-gray-400">no date</span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-2">
-                      {row.supplier_id && row.supplier_name ? (
-                        <Link
-                          href={`/suppliers/${row.supplier_id}`}
-                          className="text-brand hover:underline"
-                        >
-                          {row.supplier_name}
-                        </Link>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
-                      {row.first_description && (
-                        <span className="block max-w-xs truncate text-xs text-gray-500">
-                          {row.first_description}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-2">{row.invoice_no || "—"}</td>
-                    <td className="py-2 pr-2 text-right">{row.line_count}</td>
-                    <td className="py-2 pr-2 text-right">
-                      {formatCurrency(Number(row.gross_total))}
-                    </td>
-                    <td className="py-2 pr-2 text-right">
-                      {formatCurrency(row.paid)}
-                    </td>
-                    <td className="py-2 pr-2 text-right">
-                      {formatCurrency(row.balance)}
-                    </td>
-                    <td className="py-2 pr-2">
-                      <Badge label={row.status} />
-                      {row.entry_status === "Cancelled" && (
-                        <span className="ml-1">
-                          <Badge label="Cancelled" />
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2 pr-2 text-right">
-                      {isManual(row) ? (
-                        <Link
-                          href={`/projects/${project.id}/purchases/${row.id}/edit`}
-                          className="text-brand hover:underline"
-                        >
-                          Edit
-                        </Link>
-                      ) : (
-                        <span className="text-xs text-gray-400">imported</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-    </div>
+    <InvoicesTab
+      project={project}
+      rows={rows}
+      totals={totals}
+      chrome="page"
+    />
   );
 }

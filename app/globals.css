@@ -2,8 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Mobile-first design system.
+ *
+ * The app is used almost entirely on phones, so every shared class below is
+ * sized for a thumb first and only widened at `sm:`. The component classes
+ * (.btn-*, .input, .card, .label) are the ones already used across the whole
+ * codebase — they are the single point where the visual language is defined.
+ */
+
 :root {
   --brand: #0f5d4a;
+
+  /* Surfaces */
+  --surface: #ffffff;
+  --surface-sunken: #f4f6f5;
+  --page: #f7f8f7;
+  --line: #e3e6e4;
+
+  /* Chrome heights, so pages can reserve space without magic numbers. */
+  --header-h: 3.5rem;
+  --nav-h: 4.25rem;
+}
+
+html {
+  /* Stops iOS Safari inflating text in landscape. */
+  -webkit-text-size-adjust: 100%;
 }
 
 html,
@@ -12,38 +36,175 @@ body {
 }
 
 body {
-  @apply bg-gray-50 text-gray-900 antialiased;
+  @apply bg-gray-50 font-sans text-gray-900 antialiased;
+  /* Keeps the pull-to-refresh / overscroll area on-theme rather than white. */
+  overscroll-behavior-y: none;
 }
 
-/* Ensure interactive controls meet the 44px touch target requirement. */
+/* Money and quantities line up in columns only with tabular figures. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Removes the grey flash Android puts on every tap. */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
 @layer components {
+  /* ---------------------------------------------------------------- Buttons */
+
   .btn {
-    @apply inline-flex min-h-touch items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50;
+    @apply inline-flex min-h-touch select-none items-center justify-center gap-2
+      rounded-xl px-4 text-sm font-semibold leading-none
+      transition-[transform,background-color,border-color,box-shadow]
+      duration-150 active:scale-[0.98]
+      disabled:pointer-events-none disabled:opacity-45;
   }
   .btn-primary {
-    @apply btn bg-brand text-white hover:bg-brand-dark;
+    @apply btn bg-brand text-white shadow-sm hover:bg-brand-600 active:bg-brand-800;
   }
   .btn-secondary {
-    @apply btn border border-gray-300 bg-white text-gray-700 hover:bg-gray-50;
+    @apply btn border border-gray-200 bg-white text-gray-800 shadow-card
+      hover:border-gray-300 hover:bg-gray-50 active:bg-gray-100;
+  }
+  /* Quiet tertiary action — no border, for use inside cards and toolbars. */
+  .btn-ghost {
+    @apply btn bg-transparent text-gray-600 hover:bg-gray-100 active:bg-gray-200;
+  }
+  .btn-soft {
+    @apply btn bg-brand-50 text-brand-800 hover:bg-brand-100 active:bg-brand-200;
   }
   .btn-danger {
-    @apply btn bg-red-600 text-white hover:bg-red-700;
+    @apply btn bg-red-600 text-white shadow-sm hover:bg-red-700 active:bg-red-800;
   }
+  .btn-danger-soft {
+    @apply btn bg-red-50 text-red-700 hover:bg-red-100 active:bg-red-200;
+  }
+  /* Full-bleed primary action pinned to the bottom of a form. */
+  .btn-block {
+    @apply w-full;
+  }
+  .btn-sm {
+    @apply min-h-0 h-9 rounded-lg px-3 text-[0.8125rem];
+  }
+  .btn-lg {
+    @apply h-12 rounded-2xl px-5 text-base;
+  }
+  /* Circular icon button — the 44px target is the whole point. */
+  .btn-icon {
+    @apply inline-flex min-h-touch min-w-touch shrink-0 items-center justify-center
+      rounded-full text-gray-600 transition active:scale-95 active:bg-gray-100;
+  }
+
+  /* ----------------------------------------------------------------- Fields */
+
   .input {
-    @apply block w-full min-h-touch rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand disabled:bg-gray-100 disabled:text-gray-400;
+    @apply block min-h-touch w-full rounded-xl border border-gray-200 bg-white
+      px-3.5 py-2.5 text-base text-gray-900 shadow-card
+      placeholder:text-gray-400
+      focus:border-brand focus:outline-none focus:ring-4 focus:ring-brand/10
+      disabled:bg-gray-100 disabled:text-gray-400
+      sm:text-sm;
   }
+  /* `input` is 16px on mobile on purpose: anything smaller makes iOS Safari
+     zoom the viewport on focus, which feels broken. It drops to 14px at sm:. */
+
+  .textarea {
+    @apply input min-h-[6rem] py-3 leading-relaxed;
+  }
+
   .label {
-    @apply mb-1 block text-sm font-medium text-gray-700;
+    @apply mb-1.5 block text-[0.8125rem] font-semibold text-gray-700;
   }
-  .card {
-    @apply rounded-xl border border-gray-200 bg-white p-4 shadow-sm;
+  .hint {
+    @apply mt-1.5 text-xs leading-relaxed text-gray-500;
   }
   .field-error {
-    @apply mt-1 text-xs text-red-600;
+    @apply mt-1.5 text-xs font-medium text-red-600;
   }
   /* Non-blocking advisory shown under a field (price jump, likely duplicate). */
   .field-warning {
-    @apply mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800;
+    @apply mt-2 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-900;
+  }
+  .input-invalid {
+    @apply border-red-300 focus:border-red-500 focus:ring-red-500/10;
+  }
+
+  /* --------------------------------------------------------------- Surfaces */
+
+  .card {
+    @apply rounded-2xl border border-gray-200/80 bg-white p-4 shadow-card;
+  }
+  /* Card whose children are full-bleed rows (lists). */
+  .card-flush {
+    @apply overflow-hidden rounded-2xl border border-gray-200/80 bg-white shadow-card;
+  }
+  .card-sunken {
+    @apply rounded-2xl bg-gray-100 p-4;
+  }
+
+  /* A tappable row in a list — the core mobile pattern in this app. */
+  .row {
+    @apply flex min-h-touch w-full items-center gap-3 px-4 py-3.5 text-left
+      transition active:bg-gray-100;
+  }
+  .row-divide > * + * {
+    @apply border-t border-gray-200/70;
+  }
+
+  /* ----------------------------------------------------------- Typography */
+
+  .page-title {
+    @apply text-[1.375rem] font-bold leading-tight tracking-[-0.01em] text-gray-900;
+  }
+  .section-title {
+    @apply text-base font-bold tracking-[-0.01em] text-gray-900;
+  }
+  /* Small all-caps label above a group. Used sparingly — it is loud. */
+  .eyebrow {
+    @apply text-2xs font-bold uppercase tracking-wider text-gray-500;
+  }
+  .muted {
+    @apply text-sm text-gray-500;
+  }
+
+  /* ------------------------------------------------------------------ Misc */
+
+  .divider {
+    @apply h-px w-full bg-gray-200/80;
+  }
+  /* Focus ring for custom (non-native) controls. */
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-brand/20;
+  }
+}
+
+@layer utilities {
+  /* Clears the fixed bottom navigation, home indicator included. */
+  .pb-nav {
+    padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 1rem);
+  }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  /* Horizontal chip strips: scroll, but never show a scrollbar. */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .snap-x-start {
+    scroll-snap-type: x mandatory;
+  }
+  .snap-x-start > * {
+    scroll-snap-align: start;
   }
 }
 
@@ -62,7 +223,11 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .drawer-left {
-    animation: none;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

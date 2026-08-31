@@ -540,6 +540,11 @@ export interface ProjectPurchaseRow extends PurchaseComputed {
   line_count: number;
   payment_count: number;
   first_description: string | null;
+  // True when the original photo or PDF is still in Storage behind this
+  // invoice, i.e. it was committed from an upload (migration 0010). Only these
+  // rows get a clickable invoice number; a hand-typed invoice has no file and a
+  // link that opens nothing reads as a bug.
+  has_document: boolean;
 }
 
 export interface ProjectPurchaseList {

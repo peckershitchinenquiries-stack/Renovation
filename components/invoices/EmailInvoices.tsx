@@ -24,6 +24,9 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { Badge } from "@/components/ui/Badge";
+import { SectionHeader } from "@/components/ui/PageHeader";
+import { EmptyState } from "@/components/ui/States";
+import { IconTile } from "@/components/ui/List";
 import type { InvoiceUpload } from "@/types";
 
 // User-facing names for invoice_uploads.status. The database values never
@@ -57,16 +60,24 @@ export default async function EmailInvoices() {
 
   // No .eq("user_id", …) — RLS scopes this (R3).
   //
-  // 'needs_triage' is excluded because TriageSection already renders those, with
-  // the two buttons that act on them. Everything else that came from a mailbox
-  // is here, committed rows included: an invoice that has been saved is the
-  // most reassuring row on the list, and dropping it would make a working
-  // pipeline look idle.
+  // Two statuses are excluded, for opposite reasons:
+  //
+  //   'needs_triage' — TriageSection already renders those, with the two
+  //                    buttons that act on them.
+  //   'committed'    — the invoice has been reviewed and logged, so it is no
+  //                    longer mail waiting to be dealt with. It used to stay
+  //                    here as reassurance that the pipeline works, but in
+  //                    practice it read as an item still needing attention and
+  //                    the list only ever grew. The saved invoice lives on the
+  //                    project's Invoices & purchases page from that point on.
+  //
+  // This list is therefore strictly the outstanding queue: read, still reading,
+  // or unreadable.
   const { data, error } = await supabase
     .from("invoice_uploads")
     .select("*")
     .eq("source_channel", "gmail")
-    .neq("status", "needs_triage")
+    .not("status", "in", "(needs_triage,committed)")
     .order("received_at", { ascending: false, nullsFirst: false })
     .order("created_at", { ascending: false })
     .limit(50);
@@ -80,62 +91,85 @@ export default async function EmailInvoices() {
   if (rows.length === 0) {
     return (
       <section className="mb-6">
-        <h2 className="mb-1 text-lg font-semibold text-gray-900">
-          Invoices from email
-        </h2>
-        <p className="text-sm text-gray-500">
-          Nothing has arrived by email yet. Check the mailbox connection on the{" "}
-          <Link href="/settings" className="text-blue-600 hover:underline">
-            settings screen
-          </Link>
-          .
-        </p>
+        <SectionHeader title="Invoices from email" />
+        <EmptyState
+          icon="mail"
+          compact
+          title="Nothing waiting"
+          description="Anything that arrived has been reviewed and logged."
+          action={
+            <Link href="/settings" className="btn-secondary btn-sm">
+              Check the mailbox connection
+            </Link>
+          }
+        />
       </section>
     );
   }
 
   return (
     <section className="mb-6">
-      <h2 className="mb-1 text-lg font-semibold text-gray-900">
-        Invoices from email{" "}
-        <span className="text-sm font-normal text-gray-500">
-          ({rows.length})
-        </span>
-      </h2>
-      <p className="mb-3 text-sm text-gray-500">
-        Attachments pulled out of the connected mailbox. Anything marked{" "}
-        <em>{READY_LABEL}</em> has been read and is waiting for you to check it
-        before it is saved.
-      </p>
+      <SectionHeader
+        title={
+          <span className="flex items-center gap-2">
+            Invoices from email
+            <span className="inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-gray-200 px-1.5 text-2xs font-bold text-gray-600">
+              {rows.length}
+            </span>
+          </span>
+        }
+        hint={`Pulled out of the connected mailbox. “${READY_LABEL}” means it has been read and is waiting for you to check it.`}
+      />
 
       {/* Mobile: one card per upload. */}
-      <div className="space-y-2 sm:hidden">
+      <div className="space-y-2.5 sm:hidden">
         {rows.map((row) => (
-          <div key={row.id} className="card p-3">
-            <div className="flex items-start justify-between gap-2">
-              <p className="min-w-0 break-words font-medium text-gray-900">
-                {row.original_name ?? "Untitled attachment"}
-              </p>
+          <div key={row.id} className="card">
+            <div className="flex items-start gap-3">
+              <IconTile
+                name="receipt"
+                tone={
+                  row.status === "extracted"
+                    ? "good"
+                    : row.status === "failed"
+                      ? "bad"
+                      : "neutral"
+                }
+              />
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-[0.9375rem] font-bold leading-snug text-gray-900">
+                  {row.original_name ?? "Untitled attachment"}
+                </p>
+                {row.subject ? (
+                  <p className="mt-0.5 break-words text-xs text-gray-500">
+                    {row.subject}
+                  </p>
+                ) : null}
+              </div>
               <span className="shrink-0">
                 <StatusBadge upload={row} />
               </span>
             </div>
-            {row.subject && (
-              <p className="break-words text-xs text-gray-500">{row.subject}</p>
-            )}
-            <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-gray-100 pt-2 text-xs">
-              <dt className="text-gray-500">From</dt>
-              <dd className="break-all text-right">
-                {senderLabel(row.from_address)}
-              </dd>
-              <dt className="text-gray-500">Received</dt>
-              <dd className="text-right">{whenLabel(row)}</dd>
+
+            <dl className="mt-3 space-y-1.5 border-t border-gray-200/70 pt-2.5 text-xs">
+              <div className="flex justify-between gap-3">
+                <dt className="shrink-0 text-gray-500">From</dt>
+                <dd className="min-w-0 break-all text-right font-medium text-gray-800">
+                  {senderLabel(row.from_address)}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-gray-500">Received</dt>
+                <dd className="font-medium text-gray-800">{whenLabel(row)}</dd>
+              </div>
             </dl>
-            {row.status === "failed" && row.error && (
-              <p className="mt-2 break-words text-xs text-red-600">
+
+            {row.status === "failed" && row.error ? (
+              <p className="mt-2.5 break-words rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700">
                 {row.error}
               </p>
-            )}
+            ) : null}
+
             <div className="mt-3">
               <RowAction upload={row} />
             </div>
@@ -149,18 +183,18 @@ export default async function EmailInvoices() {
       <div className="card hidden overflow-x-auto sm:block">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left text-xs uppercase text-gray-500">
-              <th className="py-2 pr-2">File</th>
-              <th className="py-2 pr-2">From</th>
-              <th className="py-2 pr-2">Received</th>
-              <th className="py-2 pr-2">Status</th>
-              <th className="py-2 pr-2" />
+            <tr className="text-left text-2xs font-bold uppercase tracking-wider text-gray-500">
+              <th className="pb-2.5 pr-3">File</th>
+              <th className="pb-2.5 pr-3">From</th>
+              <th className="pb-2.5 pr-3">Received</th>
+              <th className="pb-2.5 pr-3">Status</th>
+              <th className="pb-2.5" />
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
+          <tbody className="divide-y divide-gray-200/70">
             {rows.map((row) => (
-              <tr key={row.id}>
-                <td className="py-2 pr-2 font-medium">
+              <tr key={row.id} className="align-top">
+                <td className="py-2.5 pr-3 font-semibold text-gray-900">
                   {row.original_name ?? "Untitled attachment"}
                   {row.subject && (
                     <span className="block text-xs font-normal text-gray-500">
@@ -173,14 +207,14 @@ export default async function EmailInvoices() {
                     </span>
                   )}
                 </td>
-                <td className="break-all py-2 pr-2">
+                <td className="break-all py-2.5 pr-3 text-gray-600">
                   {senderLabel(row.from_address)}
                 </td>
-                <td className="py-2 pr-2">{whenLabel(row)}</td>
-                <td className="py-2 pr-2">
+                <td className="whitespace-nowrap py-2.5 pr-3 text-gray-600">{whenLabel(row)}</td>
+                <td className="py-2.5 pr-3">
                   <StatusBadge upload={row} />
                 </td>
-                <td className="py-2 pr-2">
+                <td className="py-2.5">
                   <RowAction upload={row} />
                 </td>
               </tr>
@@ -192,8 +226,9 @@ export default async function EmailInvoices() {
   );
 }
 
+// 'committed' has no case here: those rows are filtered out of the query above,
+// because a reviewed-and-logged invoice has left this queue.
 function StatusBadge({ upload }: { upload: InvoiceUpload }) {
-  if (upload.status === "committed") return <Badge label="Paid" />;
   if (upload.status === "extracted") return <Badge label={READY_LABEL} />;
   if (upload.status === "failed") return <Badge label={UNREADABLE_LABEL} />;
   // 'pending' and 'processing' — queued for a read, or being read right now.
@@ -205,30 +240,17 @@ function StatusBadge({ upload }: { upload: InvoiceUpload }) {
 /**
  * Where the row goes when clicked.
  *
- * 'committed' points at the saved invoice rather than the review screen, which
- * would only tell the user it was already saved. 'pending'/'processing' get no
- * link at all — the review screen has nothing to show yet.
+ * 'pending'/'processing' get no link at all — the review screen has nothing to
+ * show yet. 'committed' never reaches here: those rows leave the list once the
+ * invoice has been checked and saved, and are found on the project's Invoices
+ * & purchases page instead.
  */
 function RowAction({ upload }: { upload: InvoiceUpload }) {
-  if (upload.status === "committed") {
-    if (!upload.invoice_id || !upload.project_id) {
-      return <span className="text-xs text-gray-500">Saved</span>;
-    }
-    return (
-      <Link
-        href={`/projects/${upload.project_id}/purchases/${upload.invoice_id}/edit`}
-        className="text-xs text-blue-600 hover:underline"
-      >
-        Open the invoice
-      </Link>
-    );
-  }
-
   if (upload.status === "extracted") {
     return (
       <Link
         href={`/invoices/${upload.id}/review`}
-        className="btn-primary min-h-touch text-xs"
+        className="btn-primary btn-sm"
       >
         Check &amp; save
       </Link>
@@ -241,7 +263,7 @@ function RowAction({ upload }: { upload: InvoiceUpload }) {
     return (
       <Link
         href={`/invoices/${upload.id}/review`}
-        className="text-xs text-blue-600 hover:underline"
+        className="btn-secondary btn-sm"
       >
         Details
       </Link>

@@ -66,22 +66,24 @@ export default function TriageActions({ uploadId }: { uploadId: string }) {
   }
 
   return (
-    <div className="flex flex-wrap gap-2">
+    // Stacked on a phone, side by side from sm: — two buttons sharing a 343px
+    // row give each about 24 characters, which is not enough for either label.
+    <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
       <button
         type="button"
         onClick={() => run(true)}
         disabled={busy !== null}
-        className="btn-primary min-h-touch text-xs disabled:opacity-50"
+        className="btn-primary btn-sm"
       >
-        {busy === "trust" ? "Reading…" : "Trust this sender & extract"}
+        {busy === "trust" ? "Reading…" : "Trust sender & read"}
       </button>
       <button
         type="button"
         onClick={() => run(false)}
         disabled={busy !== null}
-        className="btn-secondary min-h-touch text-xs disabled:opacity-50"
+        className="btn-secondary btn-sm"
       >
-        {busy === "once" ? "Reading…" : "Extract once"}
+        {busy === "once" ? "Reading…" : "Read this one only"}
       </button>
     </div>
   );

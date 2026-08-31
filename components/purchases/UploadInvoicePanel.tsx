@@ -6,6 +6,8 @@ import type { RealtimeChannel, RealtimePostgresChangesPayload } from "@supabase/
 import { apiFetch, ApiError } from "@/lib/fetcher";
 import { createClient } from "@/lib/supabase/client";
 import { Spinner } from "@/components/ui/States";
+import { Icon } from "@/components/ui/Icon";
+import { IconTile } from "@/components/ui/List";
 import type { InvoiceUpload } from "@/types";
 
 // Step 1 of invoice ingestion, from the browser's side: get a file into
@@ -299,7 +301,7 @@ export default function UploadInvoicePanel() {
   return (
     <div className="space-y-4">
       <div
-        className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition ${
+        className={`flex flex-col items-center justify-center rounded-2xl border-2 border-dashed px-5 py-8 text-center transition ${
           dragOver ? "border-brand bg-brand-50" : "border-gray-300 bg-white"
         }`}
         onDragOver={(e) => {
@@ -309,29 +311,34 @@ export default function UploadInvoicePanel() {
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
       >
-        <span className="text-3xl" aria-hidden>
-          📄
+        <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-50 text-brand-700">
+          <Icon name="camera" size={26} />
         </span>
-        <p className="mt-2 text-sm font-medium text-gray-900">
-          Drag invoices here, or choose files
+        <p className="mt-3 text-[0.9375rem] font-bold text-gray-900">
+          Photograph or upload an invoice
         </p>
-        <p className="mt-1 text-xs text-gray-500">
+        <p className="mt-1 max-w-xs text-xs leading-relaxed text-gray-500">
           JPG, PNG, WebP or PDF, up to 20MB each. You can add several at once.
         </p>
-        <div className="mt-4 flex flex-wrap justify-center gap-2">
+        {/* The camera comes first on a phone: photographing the paper in your
+            hand is the common case, and file-picking is the fallback. Both
+            buttons are full width so neither is a small target. */}
+        <div className="mt-4 flex w-full max-w-xs flex-col gap-2 sm:flex-row">
           <button
             type="button"
-            className="btn-primary"
-            onClick={() => inputRef.current?.click()}
+            className="btn-primary flex-1"
+            onClick={() => cameraInputRef.current?.click()}
           >
-            Choose files
+            <Icon name="camera" size={18} />
+            Take a photo
           </button>
           <button
             type="button"
-            className="btn-secondary"
-            onClick={() => cameraInputRef.current?.click()}
+            className="btn-secondary flex-1"
+            onClick={() => inputRef.current?.click()}
           >
-            Take a photo
+            <Icon name="upload" size={18} />
+            Choose files
           </button>
         </div>
         <input
@@ -386,58 +393,76 @@ function UploadRow({
   onRemove: () => void;
 }) {
   return (
-    <div className="card p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-gray-900">
+    <div className="card">
+      <div className="flex items-start gap-3">
+        <IconTile
+          name="receipt"
+          tone={
+            item.phase === "extracted"
+              ? "good"
+              : item.phase === "failed"
+                ? "bad"
+                : "info"
+          }
+        />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[0.9375rem] font-semibold text-gray-900">
             {item.file.name}
           </p>
-          <p className="text-xs text-gray-500">{formatBytes(item.file.size)}</p>
+          <p className="tnum mt-0.5 text-xs text-gray-500">
+            {formatBytes(item.file.size)}
+          </p>
         </div>
         <StatusBadge phase={item.phase} />
       </div>
 
       {item.phase === "uploading" && (
-        <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
           <div
-            className="h-full bg-brand transition-all"
-            style={{ width: `${Math.round(item.progress * 100)}%` }}
+            className="h-full rounded-full bg-brand transition-all"
+            style={{ width: `${Math.max(Math.round(item.progress * 100), 3)}%` }}
           />
         </div>
       )}
 
       {item.phase === "processing" && (
-        <p className="mt-2 flex items-center gap-2 text-xs text-gray-500">
+        <p className="mt-3 flex items-center gap-2 text-xs text-gray-500">
           <Spinner />
           Reading the invoice — this can take up to a minute.
         </p>
       )}
 
       {item.phase === "extracted" && item.uploadId && (
-        <div className="mt-2 flex items-center justify-between">
-          <p className="text-xs text-emerald-700">Read successfully.</p>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <p className="flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
+            <Icon name="check" size={14} strokeWidth={2.5} />
+            Read successfully
+          </p>
           <Link
             href={`/invoices/${item.uploadId}/review`}
-            className="btn-secondary"
+            className="btn-primary btn-sm"
           >
-            Review
+            Check &amp; save
           </Link>
         </div>
       )}
 
       {item.phase === "failed" && (
-        <div className="mt-2">
-          <p className="field-warning">{item.error}</p>
-          <div className="mt-2 flex flex-wrap gap-2">
-            <button type="button" className="btn-secondary" onClick={onRetry}>
+        <div className="mt-3">
+          <p className="rounded-xl bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700">
+            {item.error}
+          </p>
+          <div className="mt-2.5 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+            <button type="button" className="btn-secondary btn-sm" onClick={onRetry}>
+              <Icon name="refresh" size={15} />
               Retry
             </button>
-            <Link href="/invoices/new" className="btn-secondary">
-              Enter manually instead
+            <Link href="/invoices/new" className="btn-secondary btn-sm">
+              Type it in instead
             </Link>
             <button
               type="button"
-              className="text-xs text-gray-400 hover:text-gray-600"
+              className="btn-ghost btn-sm sm:ml-auto"
               onClick={onRemove}
             >
               Dismiss
@@ -457,14 +482,14 @@ function StatusBadge({ phase }: { phase: ItemPhase }) {
     failed: "Failed",
   };
   const STYLE: Record<ItemPhase, string> = {
-    uploading: "bg-blue-100 text-blue-800",
-    processing: "bg-amber-100 text-amber-800",
-    extracted: "bg-emerald-100 text-emerald-800",
-    failed: "bg-red-100 text-red-700",
+    uploading: "bg-blue-50 text-blue-700 ring-blue-600/15",
+    processing: "bg-amber-50 text-amber-800 ring-amber-600/20",
+    extracted: "bg-emerald-50 text-emerald-700 ring-emerald-600/15",
+    failed: "bg-red-50 text-red-700 ring-red-600/15",
   };
   return (
     <span
-      className={`inline-flex shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${STYLE[phase]}`}
+      className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2.5 py-1 text-2xs font-semibold leading-none ring-1 ring-inset ${STYLE[phase]}`}
     >
       {LABEL[phase]}
     </span>

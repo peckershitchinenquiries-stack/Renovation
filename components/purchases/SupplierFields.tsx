@@ -34,9 +34,10 @@ export function SupplierFields({
         </label>
         <input
           id={`${uid}-name`}
-          className="input"
+          className={`input ${errors?.name ? "input-invalid" : ""}`}
           autoComplete="off"
           maxLength={200}
+          placeholder="e.g. Lawsons"
           value={value.name}
           onChange={(e) => onChange({ name: e.target.value })}
         />
@@ -63,6 +64,7 @@ export function SupplierFields({
           id={`${uid}-address`}
           className="input"
           autoComplete="off"
+          placeholder="Optional"
           value={value.address}
           onChange={(e) => onChange({ address: e.target.value })}
         />

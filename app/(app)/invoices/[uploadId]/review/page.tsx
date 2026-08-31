@@ -5,6 +5,8 @@ import { getPurchaseFormBundle } from "@/lib/data";
 import PurchaseForm, { type PurchaseFormPrefill } from "@/components/forms/PurchaseForm";
 import { InvoiceScopeNote } from "@/components/purchases/SourceNote";
 import { EmptyState } from "@/components/ui/States";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Icon } from "@/components/ui/Icon";
 import { parseExtraction } from "@/lib/invoice/schema";
 import { documentNotes as buildDocumentNotes } from "@/lib/invoice/reconcile";
 import { normaliseExtraction } from "@/lib/invoice/normalise";
@@ -45,25 +47,25 @@ export default async function ReviewInvoicePage({
   const bundle = await getPurchaseFormBundle(upload.project_id);
   if (!bundle) notFound();
 
-  const crumbs = (
-    <nav className="mb-4 text-sm text-gray-500">
-      <Link href="/invoices" className="hover:underline">
-        Invoices
-      </Link>{" "}
-      /{" "}
-      <Link href="/invoices/upload" className="hover:underline">
-        Upload
-      </Link>{" "}
-      / Review
-    </nav>
+  // One header for every state this screen can be in. It replaces the
+  // three-level breadcrumb, which wrapped onto two lines on a phone above
+  // every one of the five outcomes below.
+  const header = (
+    <PageHeader
+      title="Review invoice"
+      subtitle={upload.original_name ?? "From the mailbox"}
+      backHref="/invoices"
+      backLabel="Back to invoices"
+    />
   );
 
   // Already saved — this upload has nothing left to review.
   if (upload.status === "committed") {
     return (
       <div className="mx-auto max-w-2xl">
-        {crumbs}
+        {header}
         <EmptyState
+          icon="check"
           title="Already saved"
           description="This upload was already committed to an invoice."
           action={
@@ -91,8 +93,9 @@ export default async function ReviewInvoicePage({
   if (upload.status === "needs_triage") {
     return (
       <div className="mx-auto max-w-2xl">
-        {crumbs}
+        {header}
         <EmptyState
+          icon="clock"
           title="Waiting to be checked"
           description={`This arrived by email from ${
             upload.from_address ?? "an unknown sender"
@@ -111,8 +114,9 @@ export default async function ReviewInvoicePage({
   if (upload.status !== "extracted") {
     return (
       <div className="mx-auto max-w-2xl">
-        {crumbs}
+        {header}
         <EmptyState
+          icon={upload.status === "failed" ? "alert" : "clock"}
           title={upload.status === "failed" ? "This upload failed" : "Still processing"}
           description={
             upload.status === "failed"
@@ -135,8 +139,9 @@ export default async function ReviewInvoicePage({
   if (!extraction) {
     return (
       <div className="mx-auto max-w-2xl">
-        {crumbs}
+        {header}
         <EmptyState
+          icon="alert"
           title="This extraction can't be read"
           description="The stored result doesn't match the expected shape. Retry the upload, or enter the invoice by hand."
           action={
@@ -215,11 +220,9 @@ export default async function ReviewInvoicePage({
 
   return (
     <div className="mx-auto max-w-7xl">
-      {crumbs}
-      <h1 className="mb-1 text-2xl font-bold text-gray-900">Review invoice</h1>
-      <p className="mb-3 text-sm text-gray-500">
-        Everything below was read automatically from{" "}
-        {upload.original_name ?? "the file"} — check it against the original
+      {header}
+      <p className="mb-3 text-[0.8125rem] leading-relaxed text-gray-500">
+        Everything below was read automatically — check it against the original
         and correct anything that&rsquo;s wrong. Nothing here blocks saving.
       </p>
       <InvoiceScopeNote className="mb-4" />
@@ -229,7 +232,24 @@ export default async function ReviewInvoicePage({
           fields beside it are readable without scrolling past it; click
           "Open full size" for the document itself. */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_3fr]">
-        <div className="lg:sticky lg:top-4 lg:self-start">
+        {/*
+          On a phone the document is a collapsed panel rather than a permanent
+          45vh slab: it is the reference, and leaving it open pushed the form —
+          the actual work — below the fold on every visit. It starts open from
+          `lg:` up, where there is a column to spare beside the form.
+        */}
+        <details open className="group lg:sticky lg:top-4 lg:self-start">
+          <summary className="mb-2 flex min-h-touch cursor-pointer list-none items-center gap-2 rounded-xl bg-white px-4 text-sm font-semibold text-gray-800 shadow-card lg:hidden">
+            <Icon name="receipt" size={17} className="text-gray-400" />
+            <span className="min-w-0 flex-1 truncate">
+              {upload.original_name ?? "The original document"}
+            </span>
+            <Icon
+              name="chevronDown"
+              size={16}
+              className="shrink-0 text-gray-400 transition-transform group-open:rotate-180"
+            />
+          </summary>
           <div className="card overflow-hidden p-0">
             {signed?.signedUrl ? (
               isPdf ? (
@@ -257,12 +277,13 @@ export default async function ReviewInvoicePage({
               href={signed.signedUrl}
               target="_blank"
               rel="noreferrer"
-              className="mt-2 inline-block text-sm text-brand hover:underline"
+              className="btn-secondary btn-sm mt-2 w-full lg:w-auto"
             >
-              Open full size ↗
+              <Icon name="link" size={15} />
+              Open full size
             </a>
           )}
-        </div>
+        </details>
 
         <PurchaseForm
           bundle={bundle}

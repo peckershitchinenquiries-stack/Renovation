@@ -9,6 +9,8 @@ import { round2 } from "@/lib/purchases";
 import { safeReturnTo } from "@/lib/safeReturnTo";
 import { useToast } from "@/components/ui/Toast";
 import { Spinner } from "@/components/ui/States";
+import { Select } from "@/components/ui/Select";
+import { DatePicker } from "@/components/ui/DatePicker";
 import TradeSelect from "@/components/forms/TradeSelect";
 import {
   EXPENSE_STATUSES,
@@ -84,7 +86,10 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
   const [amountTouched, setAmountTouched] = useState(false);
 
   const safeTarget = safeReturnTo(returnTo);
-  const fallback = `/projects/${projectId}?tab=labour`;
+  // Labour is a filter of the Analysis tab's line view, not a tab of its own.
+  // `?tab=labour` still resolves to the same place for links saved before the
+  // collapse — see RETIRED in ProjectDetail.tsx — but new links use this form.
+  const fallback = `/projects/${projectId}?tab=analysis&view=labour`;
 
   const expectedTotal = useMemo(
     () => round2(asNumber(form.rate) * asNumber(form.hours)),
@@ -216,7 +221,7 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
           placeholder="e.g. Dave Gardener, Owen Brickwork"
         />
         {errors.name && <p className="field-error">{errors.name}</p>}
-        <p className="mt-1 text-xs text-gray-400">
+        <p className="hint">
           The worker or subcontractor who did the work. Recorded against the job
           itself, not as a supplier account.
         </p>
@@ -240,41 +245,40 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
           <label className="label" htmlFor="labour_status">
             Status *
           </label>
-          <select
+          <Select
             id="labour_status"
-            className="input"
+            title="Status"
             value={form.status}
-            onChange={(e) => set("status", e.target.value)}
-          >
-            {EXPENSE_STATUSES.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => set("status", v)}
+            options={EXPENSE_STATUSES.map((s) => ({ value: s, label: s }))}
+          />
           {errors.status && <p className="field-error">{errors.status}</p>}
         </div>
       </div>
 
-      <fieldset className="rounded-lg border border-gray-200 p-3">
-        <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
-          The work
-        </legend>
+      <fieldset className="card-sunken">
+        <legend className="eyebrow mb-2.5">The work</legend>
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="label" htmlFor="labour_rate">
-              Rate (£/hr) *
+              Rate per hour <span className="text-red-500">*</span>
             </label>
-            <input
-              id="labour_rate"
-              type="number"
-              inputMode="decimal"
-              min={0}
-              step="0.01"
-              className="input"
-              value={form.rate}
-              onChange={(e) => set("rate", e.target.value)}
-            />
+            <div className="relative">
+              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-semibold text-gray-400">
+                £
+              </span>
+              <input
+                id="labour_rate"
+                type="number"
+                inputMode="decimal"
+                min={0}
+                step="0.01"
+                placeholder="0.00"
+                className={`input tnum pl-8 ${errors.rate ? "input-invalid" : ""}`}
+                value={form.rate}
+                onChange={(e) => set("rate", e.target.value)}
+              />
+            </div>
             {errors.rate && <p className="field-error">{errors.rate}</p>}
           </div>
           <div>
@@ -287,7 +291,8 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
               inputMode="decimal"
               min={0}
               step="0.25"
-              className="input"
+              placeholder="0"
+              className={`input tnum ${errors.hours ? "input-invalid" : ""}`}
               value={form.hours}
               onChange={(e) => set("hours", e.target.value)}
             />
@@ -298,21 +303,27 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
         <div className="mt-3 grid grid-cols-2 gap-3">
           <div>
             <label className="label" htmlFor="labour_total_pay">
-              Total pay (£, ex VAT) *
+              Total pay, ex VAT <span className="text-red-500">*</span>
             </label>
-            <input
-              id="labour_total_pay"
-              type="number"
-              inputMode="decimal"
-              min={0}
-              step="0.01"
-              className="input"
-              value={form.total_pay}
-              onChange={(e) => {
-                setTotalTouched(true);
-                set("total_pay", e.target.value);
-              }}
-            />
+            <div className="relative">
+              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-semibold text-gray-400">
+                £
+              </span>
+              <input
+                id="labour_total_pay"
+                type="number"
+                inputMode="decimal"
+                min={0}
+                step="0.01"
+                placeholder="0.00"
+                className={`input tnum pl-8 ${errors.total_pay ? "input-invalid" : ""}`}
+                value={form.total_pay}
+                onChange={(e) => {
+                  setTotalTouched(true);
+                  set("total_pay", e.target.value);
+                }}
+              />
+            </div>
             {errors.total_pay && <p className="field-error">{errors.total_pay}</p>}
             {totalMismatch && (
               <p className="field-warning">
@@ -328,7 +339,7 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
               </p>
             )}
             {!totalMismatch && (
-              <p className="mt-1 text-xs text-gray-400">
+              <p className="hint">
                 Prefilled from rate × hours. What you type here is what gets
                 saved.
               </p>
@@ -338,18 +349,16 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
             <label className="label" htmlFor="labour_vat_rate">
               VAT rate *
             </label>
-            <select
+            <Select
               id="labour_vat_rate"
-              className="input"
-              value={form.vat_rate}
-              onChange={(e) => set("vat_rate", e.target.value)}
-            >
-              {VAT_RATES.map((r) => (
-                <option key={r} value={r}>
-                  {r === 0 ? "0% — not VAT registered" : `${r}%`}
-                </option>
-              ))}
-            </select>
+              title="VAT rate"
+              value={String(form.vat_rate)}
+              onChange={(v) => set("vat_rate", v)}
+              options={VAT_RATES.map((r) => ({
+                value: String(r),
+                label: r === 0 ? "0% — not VAT registered" : `${r}%`,
+              }))}
+            />
             {errors.vat_rate && <p className="field-error">{errors.vat_rate}</p>}
           </div>
         </div>
@@ -358,22 +367,20 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
       {/* Only shown when the money has actually changed hands. Switching the
           status back hides it again and no payment row is written. */}
       {isPaid && (
-        <fieldset className="rounded-lg border border-gray-200 p-3">
-          <legend className="px-1 text-xs font-semibold uppercase text-gray-500">
-            Payment
-          </legend>
+        <fieldset className="card-sunken">
+          <legend className="eyebrow mb-2.5">Payment</legend>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
               <label className="label" htmlFor="labour_paid_on">
                 Date of payment *
               </label>
-              <input
+              <DatePicker
                 id="labour_paid_on"
-                type="date"
-                className="input"
-                max={todayISO()}
+                title="Date of payment"
+                clearable={false}
+                invalid={Boolean(errors.paid_on)}
                 value={form.paid_on}
-                onChange={(e) => set("paid_on", e.target.value)}
+                onChange={(v) => set("paid_on", v)}
               />
               {errors.paid_on && <p className="field-error">{errors.paid_on}</p>}
             </div>
@@ -381,45 +388,47 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
               <label className="label" htmlFor="labour_payment_method">
                 Payment method *
               </label>
-              <select
+              <Select
                 id="labour_payment_method"
-                className="input"
+                title="Payment method"
+                placeholder="Pick one"
+                invalid={Boolean(errors.payment_method)}
                 value={form.payment_method}
-                onChange={(e) => set("payment_method", e.target.value)}
-              >
-                <option value="">— Pick one —</option>
-                {PAYMENT_METHODS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => set("payment_method", v)}
+                options={PAYMENT_METHODS.map((m) => ({ value: m, label: m }))}
+              />
               {errors.payment_method && (
                 <p className="field-error">{errors.payment_method}</p>
               )}
             </div>
             <div>
               <label className="label" htmlFor="labour_paid_amount">
-                Amount (£, incl VAT) *
+                Amount paid, incl VAT <span className="text-red-500">*</span>
               </label>
-              <input
-                id="labour_paid_amount"
-                type="number"
-                inputMode="decimal"
-                min={0}
-                step="0.01"
-                className="input"
-                value={amountValue}
-                onChange={(e) => {
-                  setAmountTouched(true);
-                  set("paid_amount", e.target.value);
-                }}
-              />
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-base font-semibold text-gray-400">
+                  £
+                </span>
+                <input
+                  id="labour_paid_amount"
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  step="0.01"
+                  placeholder="0.00"
+                  className={`input tnum pl-8 ${errors.paid_amount ? "input-invalid" : ""}`}
+                  value={amountValue}
+                  onChange={(e) => {
+                    setAmountTouched(true);
+                    set("paid_amount", e.target.value);
+                  }}
+                />
+              </div>
               {errors.paid_amount && (
                 <p className="field-error">{errors.paid_amount}</p>
               )}
               {!amountTouched && !errors.paid_amount && (
-                <p className="mt-1 text-xs text-gray-400">
+                <p className="hint">
                   Filled from the total incl. VAT — change it if you paid a
                   different sum.
                 </p>
@@ -445,7 +454,7 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
         </label>
         <textarea
           id="labour_notes"
-          className="input"
+          className="textarea"
           rows={2}
           value={form.notes}
           onChange={(e) => set("notes", e.target.value)}
@@ -454,32 +463,40 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
       </div>
 
       {/* Live totals, in the same order the header will store them. */}
-      <div className="rounded-lg bg-brand-50 p-3 text-sm">
-        <div className="flex justify-between">
-          <span className="text-gray-600">Total pay (ex VAT)</span>
-          <span className="font-medium">{formatCurrency(money.net)}</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-gray-600">VAT ({form.vat_rate}%)</span>
-          <span className="font-medium">{formatCurrency(money.vat)}</span>
-        </div>
-        <div className="mt-1 flex justify-between border-t border-brand-100 pt-1 text-base font-bold text-brand">
-          <span>Total incl. VAT</span>
-          <span>{formatCurrency(money.gross)}</span>
+      <div className="overflow-hidden rounded-2xl bg-brand-50 ring-1 ring-inset ring-brand-600/10">
+        <dl className="space-y-1.5 px-4 pb-3 pt-3.5 text-[0.8125rem]">
+          <div className="flex justify-between gap-3">
+            <dt className="text-brand-900/60">Total pay (ex VAT)</dt>
+            <dd className="tnum font-semibold text-brand-900">
+              {formatCurrency(money.net)}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-brand-900/60">VAT ({form.vat_rate}%)</dt>
+            <dd className="tnum font-semibold text-brand-900">
+              {formatCurrency(money.vat)}
+            </dd>
+          </div>
+        </dl>
+        <div className="flex items-baseline justify-between gap-3 border-t border-brand-600/10 px-4 py-3">
+          <span className="text-sm font-bold text-brand-900">Total incl. VAT</span>
+          <span className="tnum text-xl font-bold tracking-[-0.02em] text-brand-800">
+            {formatCurrency(money.gross)}
+          </span>
         </div>
       </div>
 
-      <div className="sticky bottom-0 -mx-4 flex gap-2 border-t border-gray-200 bg-white px-4 py-3 sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pb-2 sm:pt-0">
-        <button type="submit" disabled={saving} className="btn-primary flex-1">
-          {saving && <Spinner />}
-          Log labour
-        </button>
+      <div className="sticky bottom-0 -mx-3 flex gap-2 border-t border-gray-200 bg-white/95 px-3 py-3 pb-safe backdrop-blur-xl sm:static sm:mx-0 sm:border-0 sm:bg-transparent sm:px-0 sm:pb-2 sm:pt-0 sm:backdrop-blur-none">
         <button
           type="button"
           className="btn-secondary"
           onClick={() => router.push(safeTarget ?? fallback)}
         >
           Cancel
+        </button>
+        <button type="submit" disabled={saving} className="btn-primary flex-1">
+          {saving ? <Spinner /> : null}
+          Log labour
         </button>
       </div>
     </form>

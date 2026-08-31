@@ -1,5 +1,7 @@
-// Project screens built from invoice data — the Trades, Labour, Materials,
-// Suppliers and Price Tracker tabs.
+// Project screens built from invoice data — the four pivots of the Analysis
+// tab (by trade, by supplier, by material, price history), which were five
+// separate tabs until 2026-08-28. The builders are unchanged by that collapse:
+// it grouped the same rows five ways then and four ways now.
 //
 // Why these do not live in lib/summary.ts
 // ---------------------------------------

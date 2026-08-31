@@ -4047,3 +4047,799 @@ notes below.
   They appear on `/invoices` under *"Waiting to be checked"*, and confirming one
   there is what starts the read. `queuedForExtraction: 0` follows from this, and
   means the backfill spent no Gemini quota at all.
+
+---
+
+### 2026-08-27 — One shared workspace: friends can now see and use the project
+
+**What changed (in plain English):**
+Until today the app gave every login its own private, empty copy of itself. Add
+a second user in the Supabase dashboard and they could sign in perfectly well
+and then see *nothing* — no projects, no expenses, no invoices. From now on,
+**anyone who can sign in sees and can edit everything**: the 46 Glenferrie Road
+project, all of its expenses, invoices, suppliers, items and the connected
+Gmail mailbox.
+
+**Why:**
+It is one renovation with one set of books, and the owner wants a couple of
+friends working on it with him. The database was set up multi-tenant — every
+table carried the rule "you may only see rows whose `user_id` is you" — which
+is the right rule for a product with many separate customers and the wrong one
+for a single shared job. Nothing was broken; the rule was doing exactly what it
+said.
+
+The owner was asked and confirmed two decisions before anything was written:
+
+1. **Full access, not view-only.** Friends can add and delete, not just look.
+   The consequence is stated plainly here because there is no undo: **a friend
+   can delete the project and everything in it.** See `about.md` §11.
+2. **The Gmail connection is shared too.** Friends see the connected mailbox on
+   `/settings`, see the drain health panel, and can disconnect it.
+
+**Where the information came from:**
+User request. No spreadsheet was read and no figure was recalculated.
+
+**Files used (read, not changed):**
+- `supabase/migrations/0001_init.sql`, `0008_transaction_core.sql`,
+  `0010_invoice_upload.sql`, `0013_gmail_ingest.sql`, `0014_service_role_grants.sql`
+  — to find every table, policy and storage rule that needed to move
+- `lib/purchaseWrite.ts` — checked that supplier/item matching tolerates the
+  duplicates sharing could introduce. It does: `findSupplierId` scans the list
+  with `.find()`, so a friend committing an invoice from "Selco" reuses the
+  owner's existing Selco row instead of creating a second one
+- `lib/data.ts`, `app/api/lookups/trades/route.ts`, `components/forms/TradeSelect.tsx`
+
+**Files changed:**
+- `supabase/migrations/0015_shared_workspace.sql` — **new.** See "Database"
+- `app/api/gmail/drain/route.ts` — the drain no longer reads
+  `supplier_domains` with `.eq("user_id", account.user_id)`. It reads all of
+  them. This was a real bug waiting to happen: `/api/invoices/[id]/triage`
+  stamps a newly trusted sender with whoever pressed the button, who is not
+  necessarily the person whose mailbox is connected — so without this, a
+  friend trusting a supplier would have had no effect and that supplier's
+  invoices would have landed in triage for ever
+- `app/api/invoices/[id]/triage/route.ts` — comment only: the uniqueness it
+  relies on is now the global index, not the per-user one
+- `components/settings/GmailSection.tsx`, `components/invoices/DrainHealth.tsx`
+  — comments only, which said "scopes this to the signed-in user" and named the
+  old `own gmail events` policy. Both were about to become false
+- `about.md` — §2 rule 3 rewritten, new **§9.1 "One shared workspace"**, §11
+  step 3 corrected, `0015` added to the §12 table. §13 is untouched: it records
+  spreadsheet expense figures and none of them moved
+- `updates.md` — this entry
+
+**Database:**
+`supabase/migrations/0015_shared_workspace.sql` — **written, NOT yet run.**
+Paste it into the Supabase SQL editor and run it there; nothing changes until
+you do. It is re-runnable, and it raises rather than commits if any table is
+left on the old policy.
+
+What it does, in four parts:
+
+1. **Sixteen tables** — `projects`, `expense_entries`, `trade_lookups`,
+   `project_weeks`, `suppliers`, `supplier_aliases`, `items`, `item_aliases`,
+   `purchases`, `purchase_lines`, `payments`, `receipts`, `invoice_uploads`,
+   `gmail_accounts`, `gmail_events`, `supplier_domains` — each loses its
+   `own …` policy and gains one named `shared workspace`:
+   `for all to authenticated using (true) with check (true)`. Done as a loop,
+   not sixteen copy-pasted blocks, because a table quietly left behind would
+   show a friend an empty tab, which is the exact bug being fixed.
+   `to authenticated` is what keeps this from being a *public* database: a
+   signed-out browser uses the `anon` role and still matches no rows.
+2. **Storage.** Both private buckets (`receipts`, `invoices`) were laid out as
+   `{user.id}/…` with policies keyed on the folder name. Sharing the rows
+   without the files would have been the worst of both worlds — a friend sees
+   an invoice in the list, clicks it, and the signed URL is refused, because
+   `createSignedUrl` runs under *their* session. SELECT and DELETE are now
+   shared. DELETE had to move with SELECT or a friend deleting a receipt would
+   clear `expense_entries.receipt_url` and orphan the file. **INSERT stays
+   own-folder** on purpose: nothing in the app writes anywhere else, so the
+   layout stays predictable.
+3. **Trade lookups.** `trg_seed_trades` seeds 13 default trades for every new
+   account. Shared, the second person to sign in would have turned the Trade
+   dropdown into 26 entries — Plumber, Plumber, Electrician, Electrician — and
+   the third into 39. The trigger now seeds **only when the table is empty**,
+   existing duplicates are collapsed (oldest name wins, which is the owner's
+   original seed), and a global unique index on `lower(btrim(name))` keeps it
+   one list. Safe to delete rows: `expense_entries.trade` is a plain name
+   string with no foreign key, so nothing is orphaned.
+4. **Supplier domains.** Same treatment for the same reason, plus one that
+   matters more: the triage route reads the table back with `.maybeSingle()`,
+   and two rows for one domain would have turned a harmless re-trust into a
+   500. Global unique index on `norm_key(domain)`.
+
+**`user_id` is deliberately left alone** — every column, index, foreign key,
+unique constraint and every insert in the app. It is now *provenance* (who
+added this expense) rather than *permission*. Two consequences worth writing
+down: the `on delete cascade` hazard is unchanged and in fact sharper, because
+deleting a **friend's** auth user now destroys the work that friend did; and
+the Gmail routes, which run as `service_role` where there is no `auth.uid()` at
+all, still read `user_id` off the account row and are untouched.
+
+**No expense data is read, written or deleted** by the migration. The only rows
+it deletes are duplicate trade lookups and duplicate supplier domains, of which
+there are currently none — the owner is still the only user.
+
+`npm run build` passes.
+
+**Result / numbers after:**
+Tables a second signed-in user can see rows in: **0 of 16 → 16 of 16**.
+Projects visible to a new user: **0 → 1** (46 Glenferrie Road).
+Policies on `public` tables named `own …`: **16 → 0**.
+Default trades a second user adds to the shared dropdown: **13 → 0**.
+Expense figures in `about.md` §13: **unchanged**.
+
+---
+
+### 2026-08-28 — Reviewed email invoices leave the queue; the invoice number opens the PDF
+
+**What changed (in plain English):**
+Two things, both about where an invoice is once you have dealt with it.
+
+1. **An emailed invoice disappears from "Invoices from email" once it has been
+   reviewed and logged.** Before, a saved invoice stayed on that list for ever
+   with a "Paid" badge, so the list only ever grew and every entry on it looked
+   like something still needing attention. It now shows only what is
+   outstanding: still reading, ready to review, or couldn't be read. The saved
+   invoice is on its project's **Invoices & purchases** page from that point on.
+2. **On the Invoices & purchases page (the "View all invoices" link on a
+   project), the invoice number is now a link that opens the original uploaded
+   photo or PDF.** It is a link only on invoices that actually came from an
+   upload and still have their file; hand-typed and imported rows stay plain
+   text, because a link that opens nothing looks like a fault. Both the desktop
+   table and the mobile card link it.
+3. **The same link has been removed from the Expenses tab**, where it used to
+   sit on an invoice row's description. Opening the document is now the job of
+   one screen instead of two.
+
+**Why:**
+User request. The email list was being used as a to-do list, and finished items
+were never leaving it. And the natural place to check a scan against the record
+is the invoices list, on the number you are reading off the paper — not on a
+description in the week-by-week diary.
+
+**Where the information came from:**
+User request.
+
+**Files used (read, not changed):**
+- `app/api/projects/[id]/purchases/[pid]/document/route.ts` — the existing route
+  that signs a 60-second URL and redirects. Unchanged and reused as-is.
+- `app/api/invoices/[id]/commit/route.ts` — confirmed that accepting a review is
+  what sets `invoice_uploads.status` to `committed`.
+
+**Files changed:**
+- `components/invoices/EmailInvoices.tsx` — the query now excludes `committed`
+  as well as `needs_triage`; the "nothing here" line reworded (it no longer
+  means "no email has ever arrived"); the now-unreachable `committed` branches
+  removed from the status badge and the row action.
+- `lib/data.ts` — `getProjectPurchases` now also loads `invoice_uploads` and
+  sets `has_document` per row. `getProjectBundle` no longer computes
+  `documentPurchaseIds` (one fewer query on the project page).
+- `types/index.ts` — `ProjectPurchaseRow` gains `has_document: boolean`.
+- `app/(app)/projects/[id]/purchases/page.tsx` — new `InvoiceNumber` component;
+  used in the desktop Invoice column and in the mobile card's meta line.
+- `components/project/ExpensesTab.tsx` — the description is plain text again;
+  the `documentPurchaseIds` prop is gone.
+- `components/project/ProjectDetail.tsx`, `app/(app)/projects/[id]/page.tsx` —
+  the `documentPurchaseIds` prop removed from the chain.
+- `about.md` — the "invoice number opens the original document" passage rewritten
+  for its new home; the Gmail status table's `committed` row and the "Seeing what
+  arrived by email" section updated.
+
+**Database:**
+None. No migration written and none run. Nothing about the data changed — only
+which rows a screen chooses to show, and which screen carries the link.
+
+**Result / numbers after:**
+Rows on "Invoices from email" after an invoice is reviewed and logged:
+**stays on the list for ever → removed immediately**.
+Screens that open the stored invoice document: **2 (Expenses tab, review screen)
+→ 2 (Invoices & purchases, review screen)** — moved, not added.
+Supabase queries in `getProjectBundle`: **3 in the second pass → 2**.
+Expense figures in `about.md` §13: **unchanged**.
+
+`npm run build` passes.
+
+---
+
+### 2026-08-28 — One set of words for money, and the invoice banner removed
+
+**What changed (in plain English):**
+Every screen now uses the same four words for money — **Committed** (the price
+agreed), **Cost** (what it actually came to, including VAT), **Paid** (money
+handed over) and **Owed** (Cost minus Paid). Before this the same figure was
+called something different on nearly every screen: what the Expenses tab called
+"Actual", the Overview called "Actual Total", the invoice list called "Gross",
+the Trades tab called "Total", the Suppliers list called "Total spend" and the
+Dashboard called "Spent" — all one number, with nothing to say so. The same
+went for money still owed, which appeared as "Remaining", "Balance",
+"Outstanding" and "Owed" depending on where you looked.
+
+The blue **"Invoice Summary" banner** that sat above all seven project tabs has
+been deleted. What it said now appears as a single sentence on the Overview tab:
+*"£X of that cost came in on N invoices, of which £Y is still owed."*
+
+Nothing about the arithmetic changed. Every figure on every screen is the same
+number it was yesterday — only the label above it is different.
+
+**Why:**
+Two problems, one cause.
+
+First, the banner was showing a **part of a figure next to the whole of it**,
+in different words. Invoices are already counted in the Overview's Cost card
+(they arrive tagged `source: "invoice"`, which the diary filter keeps), so a
+reader saw "Cost £151,644" on the cards and "Invoiced £28,410" in the banner
+above and had no way to know one contained the other. The natural conclusion
+was that the app disagreed with itself. On top of that it was repeated on six
+tabs that were not about invoices at all.
+
+Second, the vocabulary drift meant a user could not carry a mental model from
+one screen to the next. Every new screen looked like a new set of figures to
+reconcile by hand.
+
+The Dashboard project card had the same fault in miniature — an "Invoices"
+block headed "Invoiced" sitting beside "Spent" — and now says "Of that, on N
+invoices".
+
+**Where the information came from:**
+User request — a review of the whole app for duplicated information and
+confusing flow, with the Expenses screen called out as the worst of it. This is
+phase 1 of that review (the shared vocabulary and the duplicate summary); the
+Expenses screen rebuild and the tab consolidation are phases 2 and 3, not yet
+started.
+
+**Files used (read, not changed):**
+- `lib/summary.ts` — confirmed no formula needed to change, only labels
+- `lib/data.ts` — confirmed invoice rows carry `source: "invoice"`, which is
+  why the banner was double-reporting rather than reporting something new
+- `lib/calculations.ts`, `lib/purchases.ts`, `lib/validation.ts`
+- `components/purchases/totals.ts`
+
+**Files changed:**
+- `lib/vocabulary.ts` — **new.** Defines the four words and their one-line
+  definitions in one place, with a note explaining the rule: a screen showing
+  one of these quantities uses this label, and nothing else uses these labels.
+  Display labels only — no column or field was renamed.
+- `components/project/InvoiceBanner.tsx` — **deleted**
+- `components/project/ProjectDetail.tsx` — banner removed; header now reads
+  "Week N · Cost £X · Owed £Y" instead of "Week N · Spent £X"
+- `components/project/OverviewTab.tsx` — cards relabelled, each now carrying
+  its definition underneath; the invoice sentence added below them
+- `components/project/ExpensesTab.tsx` — column headers and both totals blocks
+  (mobile card and desktop footer) relabelled
+- `components/project/TradesTab.tsx`, `SuppliersTab.tsx`, `MaterialsTab.tsx`,
+  `LabourTab.tsx`, `PricesTab.tsx` — table headers and totals rows relabelled
+- `components/forms/ExpenseForm.tsx` — the Quoted / Actual / Paid fields, the
+  helper line under them, the overpayment and qty-mismatch warnings, and the
+  live totals panel all moved to the same four words
+- `app/(app)/dashboard/page.tsx` — "Spent" → "Cost"; invoice block re-headed
+- `app/(app)/projects/[id]/purchases/page.tsx` — stat cards and table headers
+- `app/(app)/suppliers/page.tsx`, `app/(app)/suppliers/[id]/page.tsx` — same
+- `about.md` — §6.2 card table now lists both the new and the old label for
+  each card; new §6.2.1 documents the vocabulary and why the banner went; §5
+  and §7 cross-references updated
+- `KNOWLEDGE_BASE.md` — component map no longer lists `InvoiceBanner`
+
+**Database:**
+None. No migration was written and none was run. Nothing about the schema, the
+stored columns or the computed totals was touched — this change is entirely in
+what the screens print.
+
+**Result / numbers after:**
+No figure moved. Every §13 figure is unchanged, by construction: no formula was
+edited.
+
+What changed is countable in labels and surfaces:
+
+- Distinct words used for `total_incl_vat` across the app: **7 → 1** (Actual,
+  Actual Total, Gross, Total, Invoiced, Total spend, Spent → **Cost**)
+- Distinct words used for `total − paid`: **4 → 1** (Remaining, Balance,
+  Outstanding, Owed → **Owed**)
+- Places showing an unlabelled subset of another figure on the same screen:
+  **2 → 0** (the project invoice banner, the dashboard invoice block)
+- Screens rendering the invoice summary: **7 tabs + the purchases page → the
+  Overview tab + the purchases page**
+
+`npm run build` passes and `npm run lint` reports no warnings or errors.
+Not yet checked in a browser — the app requires a sign-in, so the signed-in
+screens have not been looked at.
+
+---
+
+### 2026-08-28 — UX phase 2: the Expenses tab rebuilt, and renamed "Costs"
+
+**What changed (in plain English):**
+The project screen's busiest tab was rebuilt. It is now called **Costs** instead
+of Expenses — it has always listed invoices as well as expenses, and nobody
+calls an invoice an expense. On the tab itself:
+
+- **Six columns instead of twelve.** Description · Category · Cost · Paid ·
+  Status · row menu. The description carries a second line saying
+  `supplier · trade · week N`. Notes, the paid date and the payment method moved
+  into a row expander you open by clicking the description. **Owed** lost its
+  column because it is simply Cost minus Paid — it is in the expander, in each
+  week's subtotal and in the totals row. **Committed** appears only when you
+  tick "Compare to committed", which turns the Cost column into
+  `Committed → Cost` with a per-row over/under chip.
+- **One control for status, one dialog, always.** Every row used to have a
+  dropdown that behaved three different ways: picking "Paid" opened a payment
+  dialog, picking "Planned" on a paid row opened a *different* dialog, and
+  anything else saved silently with no warning. It is now a status **chip** that
+  always opens the same "Update status" panel, holding the status, the amount,
+  the date and the payment method together.
+- **The chip shows what has actually been paid**, not the stored label:
+  "Unpaid", "Part-paid £400 of £1,200", "Paid". The stored Planned / In Progress
+  label is now a small grey flag beside it.
+- **One obvious button per row** — a green **Pay** when anything is owed. It
+  opens that *same* "Update status" panel, with Paid already chosen and the
+  outstanding amount filled in — deliberately, so there is exactly one place
+  money is recorded. Keeping a second, separate payment dialog would have
+  rebuilt the problem above in a new shape: two controls doing one write.
+  Repeat, Edit, View receipt and Delete moved into a "⋯" menu, with Delete on
+  its own at the bottom in red instead of looking exactly like Edit.
+- **Invoice rows look different before you click them** — a violet document tile
+  down the left — because they behave differently: Edit leaves for the invoice
+  form, there is no Repeat, and deleting one takes its lines and payments too.
+- **A search box replaced the six dropdowns.** You now get a search (description,
+  supplier or trade), an **All · Owed · Paid** switch, and "+ Add filter" for the
+  original six, each shown as a removable pill with a result count and
+  "Clear all".
+- **Rows are grouped by week**, newest first, under a sticky header reading
+  `Week 12 · Cost £3,410 · Owed £900`.
+- **Two missing messages were added.** A project with no diary rows now shows an
+  empty state (the old check looked at the wrong list, so it could show a table
+  with nothing in it), and a filter that matches nothing now says "Nothing
+  matches" instead of showing an empty table above a totals row of £0.00, which
+  read as a project that had spent nothing.
+- **Mobile no longer repeats every table cell.** A card shows the description,
+  the amount and the status chip; tap it to expand; "⋯" opens a bottom sheet
+  with the same actions the desktop menu has.
+
+**Why:**
+This was the screen people found most confusing. Twelve columns on a phone-first
+app, a control that looked like a dropdown but sometimes opened a modal, two
+different status systems shown at once, Delete styled exactly like Edit, six
+filter dropdowns filling a card before any data appeared, and two situations
+where the screen showed nothing and said nothing. It follows UX phase 1 (the
+money vocabulary, about.md §6.2.1) and uses the same four words.
+
+**Where the information came from:**
+User request — a list of nine verified problems with the tab.
+
+**Files used (read, not changed):**
+- `lib/vocabulary.ts` — the four money words
+- `lib/calculations.ts` — `paidState`, `PAID_TOLERANCE`, `formatCurrency`
+- `lib/purchases.ts` — `round2`
+- `components/project/MaterialsTab.tsx` — the search box and "Nothing matches"
+  patterns this tab was matched to
+- `components/ui/ConfirmDialog.tsx`, `Drawer.tsx`, `States.tsx`, `Badge.tsx`
+- `components/project/format.tsx`, `types/index.ts`, `about.md`, `CLAUDE.md`
+
+**Files changed:**
+- `components/project/ExpensesTab.tsx` — rebuilt. Presentation only: no
+  calculation, column, type or API route was touched. The payment rules were
+  moved, not altered — payment amounts are still sent as the cumulative figure,
+  the clear-payment question still distinguishes an invoice from an expense, and
+  an invoice's payments are still left alone by a status change, because they
+  are separate records removed on the invoice form.
+- `components/project/ProjectDetail.tsx` — tab label "Expenses" → "Costs". The
+  tab **key stays `expenses`**, so the existing `?tab=expenses` deep links from
+  the invoice edit form keep working.
+- `about.md` — §5 and §6.9 renamed and rewritten, and the §8 tab narrative
+  updated: the status-dropdown description it carried is no longer true.
+- `updates.md` — this entry.
+
+**Database:**
+None. No migration was written and none was run.
+
+**Result / numbers after:**
+No figure moved. Every total, subtotal and per-row amount is computed by the
+same code as before — `computeEntry`, `paidState`, and the same footer reducer
+over the filtered set. Cancelled rows are still listed but never counted, which
+the expander now says out loud. The visible changes are counts of things on the
+screen: desktop columns 12 → 6, always-visible filter controls 6 → 2 (search
+plus the All/Owed/Paid switch), bare row-action links up to 4 → 1 button plus a
+menu, status controls per row 1 dropdown with 3 behaviours → 1 chip with 1
+dialog.
+
+`npm run build` passes — no type errors, no lint warnings. **Not checked in a
+browser: the app requires a sign-in, so the signed-in screens have not been
+looked at.**
+
+---
+
+### 2026-08-28 — UX phase 3: seven project tabs collapsed to four, and one Directory
+
+**What changed (in plain English):**
+The project screen had seven tabs. Five of them — Trades, Labour, Materials,
+Suppliers and Price Tracker — were showing the *same* information grouped by a
+different column, and a sixth thing, the invoice list, was not a tab at all but
+a separate page you had to leave the project screen to reach. There are now
+four tabs: **Overview · Costs · Invoices · Analysis**.
+
+- **Analysis** is one screen with a switch across the top reading
+  `By trade · By supplier · By material · Price history`. It shows exactly what
+  the five tabs showed, one at a time, from one table. **Labour is now a filter**
+  on the "By material" view (`All lines · Materials · Labour`) rather than a
+  destination of its own, because labour lines come off the same invoices as
+  everything else.
+- **Invoices** is the old "Invoices & purchases" page, brought in as a tab. The
+  old web address still works and shows the same thing, because other screens
+  link to it.
+- **The explanatory paragraph above each of those five tables is gone.** A
+  paragraph explaining a table is a sign the table is in a place the reader did
+  not expect. Now the reader picks the grouping themselves, so the label on the
+  switch is the explanation.
+- **The menu lost "Add Project"** — it was an action sitting in a list of
+  places, and the Dashboard already has a "+ Create project" button. The page
+  itself still exists.
+- **The menu's "Suppliers" and "Items" became one "Directory"** with a switch
+  between them, and a scope control that links through to a single project's
+  Analysis view. The old `/suppliers` and `/items` addresses still work.
+
+**Why:**
+Seven tab stops for what is really four questions. Five of the seven answered
+one question — "where did the money go?" — asked with a different `group by`,
+which is a pivot, not five destinations; and the one genuinely separate screen
+(the invoices) was the one that had been pushed out to its own page. Suppliers
+and Items had the same fault a level up: two menu entries for one cross-project
+register, with no link to the per-project view of the same data in either
+direction.
+
+**Where the information came from:**
+User request — UX phase 3, following phase 1 (the money vocabulary, about.md
+§6.2.1) and phase 2 (the Costs screen).
+
+**Files used (read, not changed):**
+- `lib/invoiceViews.ts` — every builder behind the pivots, deliberately untouched
+- `lib/summary.ts`, `lib/calculations.ts`, `lib/purchases.ts` — no formula changed
+- `lib/data.ts` — `getProjectBundle`, `getProjectPurchases`, `getSuppliers`, `getItems`
+- `lib/vocabulary.ts`, `components/purchases/totals.ts`, `components/project/format.ts`
+- `types/index.ts`, `CLAUDE.md`
+
+**Files changed:**
+- `components/project/PivotTable.tsx` — **new.** The one table shell behind
+  every pivot: a segment supplies its column set, its mobile card and its totals
+  cells, and nothing else. Keeps the "every table renders twice" rule in one
+  place instead of five.
+- `components/ui/SegmentedControl.tsx` — **new.** The pivot switch.
+- `components/project/AnalysisTab.tsx` — **new.** The four pivots plus the
+  Labour filter and a shared search box.
+- `components/project/InvoicesTab.tsx` — **new.** The invoice list, lifted out of
+  `purchases/page.tsx` unchanged except for a `chrome` prop, so the tab does not
+  repeat the heading the project header already shows.
+- `components/directory/Directory.tsx`, `components/directory/DirectoryScreen.tsx`
+  — **new.** Suppliers and Items as one screen.
+- `components/project/TradesTab.tsx`, `LabourTab.tsx`, `MaterialsTab.tsx`,
+  `SuppliersTab.tsx`, `PricesTab.tsx` — **deleted**, all five.
+- `components/project/ProjectDetail.tsx` — seven tabs → four; `?view=` added;
+  the five retired `?tab=` keys kept as aliases; the header's "Invoices" button
+  removed (it is a tab now).
+- `components/project/OverviewTab.tsx` — "See the invoices" and "View price
+  history" switch tab instead of navigating away.
+- `app/(app)/projects/[id]/page.tsx` — now loads the invoice rows too, in
+  parallel with the project bundle.
+- `app/(app)/projects/[id]/purchases/page.tsx` — reduced to a loader that renders
+  `InvoicesTab`.
+- `app/(app)/directory/page.tsx` — **new.**
+- `app/(app)/suppliers/page.tsx`, `app/(app)/items/page.tsx` — reduced to loaders
+  that render the Directory on their half.
+- `components/ui/AppNav.tsx` — "Add Project" removed; Suppliers + Items → Directory.
+- `components/forms/LabourForm.tsx`, `app/(app)/projects/[id]/labour/new/page.tsx`
+  — `?tab=labour` → `?tab=analysis&view=labour`.
+- `components/project/ExpensesTab.tsx`, `components/purchases/SourceNote.tsx`,
+  `lib/data.ts`, `lib/invoiceViews.ts` — comments and one delete-dialog sentence
+  that named the retired tabs.
+- `about.md` — §6.6–§6.8 headings, the §7 builder table, the §8 pages table, the
+  Navigation section, the seven-tab section (now "The four tabs"), and §8.1
+  (now "The Directory").
+- `updates.md` — this entry.
+
+**Database:**
+None. No migration was written and none was run. No schema, no query result and
+no calculation changed — this is a presentation change end to end.
+
+**One thing worth knowing for later.** The project page now calls
+`getProjectPurchases` alongside `getProjectBundle`, which re-reads purchases,
+lines, payments and suppliers the bundle has already fetched — on every project
+page load, whether or not the Invoices tab is opened. That was chosen on
+purpose over fetching when the tab is clicked: one row builder means the tab and
+the standalone `/purchases` page can never show different figures, and the tab
+refreshes after a change with no extra wiring. If the cost ever matters, the
+alternative is a `GET /api/projects/[id]/purchases` and a loading state.
+
+**Deep links.** `?tab=expenses` is unchanged. `?tab=labour`, `?tab=trades`,
+`?tab=materials`, `?tab=suppliers` and `?tab=prices` all still work — they land
+on Analysis with the matching view selected — so no bookmark or half-finished
+form breaks. New links use `?tab=analysis&view=…`.
+
+**Result / numbers after:**
+No figure moved. Every total on every pivot is produced by the same builder in
+`lib/invoiceViews.ts` as before, over the same rows. What changed is counts of
+things on the screen: project tabs 7 → 4, components behind those tabs 7 → 4
+(five deleted, two added, plus a shared table shell), menu items 6 → 4,
+explanatory paragraphs above tables 5 → 0.
+
+One figure is *newly shown* rather than changed: the price-history table now
+carries a totals row (buys, and net cost across the listed items) where it
+previously had none. It is a plain sum of the same `total_net` already printed
+on each row.
+
+`npm run build` passes — no type errors — and `npm run lint` is clean.
+**Not checked in a browser: the app requires a sign-in, so none of these
+signed-in screens has been looked at.**
+
+---
+
+### 2026-08-28 — One "+ Add" for the whole project (UX phase 4)
+
+**What changed (in plain English):**
+There used to be four different ways to add something to a project, each
+looking and behaving differently and each living somewhere else: an
+"+ Add Expense" button inside the Costs tab, a "+ Log invoice" button inside
+the Invoices tab, a "Log labour" link inside the Analysis tab, and an
+"Add Project" nav item (already removed in phase 3). They are now one
+**"+ Add" button in the project header** — a round floating **+** button in the
+bottom-right corner on a phone — offering three things: **Cost**, **Invoice**,
+**Labour**.
+
+The important part is the Labour one. "Log labour" was only ever shown in the
+Labour view's **empty state**, so it disappeared the moment the project had any
+labour recorded against it: after logging one day's work there was no way to log
+a second without deleting the first. That was a bug wearing the clothes of a
+design decision. Labour is now in the same menu as everything else, always
+there, whether the project has one labour entry or a hundred.
+
+Nothing about the invoice flow itself changed. Upload → check what was read →
+save is still three screens, because an invoice genuinely needs them. Only the
+door into it moved: instead of going to the Invoices menu in the top bar, you
+open the project and choose "+ Add → Invoice".
+
+**Why:**
+Four patterns for one idea. Someone standing on site with a receipt had to know
+in advance which kind of thing they were holding *and* which tab that kind of
+thing lived on, before they could write it down. And one of the four routes
+silently closed itself once it had been used.
+
+**Where the information came from:**
+User request (UX rework, phase 4). No spreadsheet, no database reading involved.
+
+**Files used (read, not changed):**
+- `CLAUDE.md`, `about.md`
+- `components/forms/LabourForm.tsx` — to confirm the labour route's `returnTo`
+  behaviour is unchanged
+- `app/(app)/projects/[id]/labour/new/page.tsx`
+- `app/(app)/invoices/page.tsx` — the invoice chooser, left exactly as it is
+- `tailwind.config.ts` — to confirm the floating button's colour exists
+
+**Files changed:**
+- `components/project/AddMenu.tsx` — **new.** The one add control: a dropdown in
+  the project header on a computer, a floating **+** button and a bottom sheet on
+  a phone. Both are built from the same list of three items so they cannot drift
+  apart. It decides nothing itself — it only reports which item was chosen.
+- `components/project/ProjectDetail.tsx` — renders the new control in the header
+  action row and holds what each item does. Cost switches to the Costs tab and
+  opens its drawer; Invoice goes to `/invoices`; Labour goes to
+  `/projects/[id]/labour/new` with the same "come back here afterwards" link the
+  Analysis tab already used.
+- `components/project/ExpensesTab.tsx` — its own "+ Add Expense" button removed
+  from the top of the tab. It now accepts a request from the header to open the
+  Add-expense drawer, and clears that request as soon as it has. The drawer
+  itself, and every figure and dialog in the tab, is untouched.
+- `components/project/InvoicesTab.tsx` — the "+ Log invoice" button shown inside
+  the tab removed. The **standalone** `/projects/[id]/purchases` page keeps its
+  copy, because that page has no project header above it and would otherwise
+  have no way to add an invoice at all.
+- `components/project/AnalysisTab.tsx` — the "Log labour" button beside the
+  Materials/Labour switch removed.
+- The empty states — "no costs yet", "no purchases yet", "no labour yet" — all
+  keep their buttons. An empty screen is the one place the action still belongs
+  in the body of the page.
+- `about.md` — §8.2, whose closing paragraph described each project's own
+  "+ Log invoice" button. It now describes the single header control instead,
+  and names the two places that still keep an add button of their own. (This
+  went into §8.2 rather than a new numbered section: §8.3 and §8.4 are already
+  the Gmail sections.)
+- `updates.md` — this entry.
+
+**Database:**
+None. No migration was written and none was run. No query, no calculation and no
+schema was touched — this is presentation and routing only. No route was added
+or removed either: `/invoices`, `/invoices/upload`, `/invoices/new`,
+`/invoices/[uploadId]/review` and `/projects/[id]/labour/new` are all exactly as
+they were, and every existing link to them still works.
+
+**Result / numbers after:**
+No money figure moved anywhere. What changed is counts of controls: ways to
+start adding something 4 → 1; "add" buttons scattered through the tab bodies
+3 → 0 (the three empty-state buttons stay); ways to reach the labour form once a
+project has labour on it **0 → 1** — that is the whole point of the change.
+
+`npm run build` passes with no type errors and no lint warnings.
+**Not checked in a browser: the app requires a sign-in, so none of these screens
+has actually been looked at.**
+
+---
+
+### 2026-08-28 — The whole app redesigned for phones
+
+**What changed (in plain English):**
+Every screen in RenovaTrack has been redesigned around the phone. The biggest
+visible change is the menu: the hamburger button and the slide-out drawer are
+gone, and the four destinations — Home, Invoices, Directory, Settings — now sit
+in a bar along the bottom of the screen, the way they do in a phone app. Beyond
+that, every screen got a consistent header with a back arrow, every list and
+card was rebuilt to the same pattern, and the fiddly grey dropdowns and date
+boxes that the phone's operating system used to draw have been replaced with the
+app's own, which slide up from the bottom of the screen with room to read.
+
+Nothing about what any number means, or where any number comes from, has
+changed. No calculation, query, API route or database column was touched.
+
+**Why:**
+Everyone who uses this app uses it on a phone, and it did not look or behave
+like a phone app. Concretely, these were the problems:
+
+- Every destination was two taps away behind a hamburger in the top-left — the
+  hardest corner of a phone screen to reach with one thumb.
+- There was **no way to sign out on a phone at all** once that drawer went; the
+  only sign-out lived in the desktop bar. There is one on Settings now.
+- Tapping "Category", "VAT rate" or a date opened a grey wheel drawn by iOS or a
+  grey list drawn by Android — a different look on every phone, and no room for
+  the second line of context most of these choices need.
+- Icons were emoji, which look different on every device and cannot take a
+  colour.
+- The three money boxes on the expense form shared one row on a 375px screen —
+  about 100px each, which cannot display "£12,450.00". They are stacked now.
+- The trade-rates settings screen was a table of tiny boxes that saved when you
+  tapped away, scrolling sideways off the screen. It is a normal list now, and
+  each trade opens a panel with a Save button.
+- The invoice preview took up half the review screen on a phone, pushing the
+  form you actually came to fill in below the fold. It is collapsible now.
+- The charts drew their three series in three shades of the same green — which
+  is a scale meant for showing *more and less*, not for telling three different
+  things apart — and the palest of the three was nearly invisible against the
+  white card.
+
+**Where the information came from:**
+User request: "redesign the entire application mobile view… bring the menu items
+to a bottom navbar… use custom dropdowns, buttons, date pickers, don't use the
+default ones."
+
+**Files used (read, not changed):**
+- `lib/vocabulary.ts`, `lib/calculations.ts`, `lib/summary.ts`,
+  `lib/invoiceViews.ts`, `lib/purchases.ts`, `lib/data.ts`, `types/index.ts` —
+  read to be sure no figure, label or type moved.
+- `package.json`, `tsconfig.json` — to confirm `next/font` was available.
+
+**Files changed:**
+
+*Foundation*
+- `tailwind.config.ts` — the design tokens. `gray` is **overridden** with a warm,
+  faintly green neutral, which re-skins every existing `text-gray-500` at once;
+  the brand green gained a full 50–950 scale built around the original
+  `#0f5d4a`, which is unchanged and still `brand-700`. Also: Inter as the sans
+  font, softer shadows, larger radii, and the animations the sheets use.
+- `app/globals.css` — the component classes every screen already used
+  (`.btn-*`, `.input`, `.card`, `.label`) rewritten, plus new ones
+  (`.card-flush`, `.card-sunken`, `.row`, `.eyebrow`, `.hint`, `.tnum`) and the
+  `pb-nav` / `pb-safe` utilities that keep content clear of the new bottom bar.
+- `app/layout.tsx` — Inter loaded through `next/font` (self-hosted, no external
+  request), `viewportFit: "cover"` so the safe-area insets mean something, and
+  the home-screen web-app metadata.
+- `app/(app)/layout.tsx` — renders the bottom bar and reserves its height.
+
+*New components*
+- `components/ui/Icon.tsx` — **new.** One stroke-based icon set, replacing the
+  emoji.
+- `components/ui/Sheet.tsx` — **new.** The one overlay primitive: bottom sheet on
+  a phone, centred dialog on a desktop. Portals into `document.body`, and only
+  the topmost sheet reacts to Escape — both needed because sheets nest.
+- `components/ui/Select.tsx` — **new.** Replaces every native `<select>`.
+- `components/ui/DatePicker.tsx` — **new.** Replaces every
+  `<input type="date">`. Values are still ISO `yyyy-mm-dd` in and out.
+- `components/ui/PageHeader.tsx` — **new.** The sticky header every screen opens
+  with, plus `SectionHeader` for groups inside a page.
+- `components/ui/List.tsx` — **new.** `ListCard` / `ListRow` / `IconTile` /
+  `DataRow`, the list vocabulary the whole app shares.
+- `components/ui/Fab.tsx` — **new.** The floating action button, positioned above
+  the bottom bar.
+- `components/charts/theme.ts` — **new.** The chart palette, validated rather
+  than eyeballed.
+
+*Rewritten or restyled*
+- `components/ui/AppNav.tsx` — `BottomNav` replaces the hamburger and drawer.
+  `MobileNav` kept as a deprecated alias so no import breaks.
+- `components/ui/Badge.tsx`, `StatCard.tsx`, `States.tsx`, `SegmentedControl.tsx`,
+  `Toast.tsx`, `ConfirmDialog.tsx`, `Drawer.tsx` — restyled; `ConfirmDialog` and
+  `Drawer` now sit on `Sheet`, and `ConfirmDialog` gained a `form` variant for
+  the Costs tab's status dialog.
+- `app/page.tsx`, `components/forms/LoginForm.tsx`, `app/reset-password/page.tsx`
+  — the sign-in screens, with a show/hide control on the password field.
+- `app/(app)/dashboard/page.tsx` — a portfolio total at the top, then project
+  cards led by the cost figure.
+- `components/project/ProjectDetail.tsx` — the header is now identity + tab strip
+  and nothing else. Export, Edit and **Delete** moved into a "…" sheet: three
+  rare actions were occupying the most valuable strip of a phone screen, and one
+  of them destroys the project. The type-the-project-name confirmation is
+  unchanged.
+- `components/project/OverviewTab.tsx`, `ExpensesTab.tsx`, `InvoicesTab.tsx`,
+  `AnalysisTab.tsx`, `PivotTable.tsx`, `AddMenu.tsx` — restyled. In `ExpensesTab`
+  every guard in `submitStatus` (cumulative payment amounts, the clear-payment
+  question, the over-payment rejection) is unchanged; only the controls around
+  them are new.
+- `components/charts/WeeklySpendChart.tsx`, `CategoryDonut.tsx` — new palette,
+  recessive grid, compact axis money, and the total placed in the donut's hole.
+- `components/forms/ProjectForm.tsx`, `ExpenseForm.tsx`, `LabourForm.tsx`,
+  `PurchaseForm.tsx`, `TradeSelect.tsx` — every `<select>` and date input
+  swapped for the new controls, money fields given an inline `£`, sticky footers
+  that clear the home indicator.
+- `components/settings/TradeLookups.tsx` — the sideways-scrolling table of
+  save-on-blur inputs replaced with a list and an edit sheet. Same POST, PATCH
+  and DELETE calls.
+- `components/settings/GmailSection.tsx`, `RenewWatchButton.tsx`,
+  `RescanMailboxButton.tsx`, `app/(app)/settings/page.tsx` — restyled; the
+  Settings page gained the **sign-out button**.
+- `components/invoices/DrainHealth.tsx`, `TriageSection.tsx`, `TriageActions.tsx`,
+  `EmailInvoices.tsx` — restyled.
+- `components/purchases/PriceMoveBadge.tsx` — now a pill with an arrow as well as
+  a colour, so a rise and a fall are not told apart by colour alone.
+- `components/purchases/PurchaseExpander.tsx` — its seven-column line table gained
+  a card render for phones. `SourceNote.tsx`, `SupplierFields.tsx`,
+  `UploadInvoicePanel.tsx` — restyled; the upload panel now leads with "Take a
+  photo".
+- `components/directory/DirectoryScreen.tsx` — restyled; the project scope
+  control is now clearly a link to somewhere, not a filter.
+- `app/(app)/` pages: `invoices/page.tsx` (the two add choices now come first,
+  above the email sections), `invoices/new`, `invoices/upload`,
+  `invoices/[uploadId]/review`, `items/[id]`, `suppliers/[id]`, `projects/new`,
+  `projects/[id]/edit`, `projects/[id]/expenses/new`, `projects/[id]/labour/new`,
+  `projects/[id]/purchases/[pid]/edit`, `projects/[id]/not-found`,
+  `app/not-found.tsx` — breadcrumbs replaced with the header's back arrow, which
+  on a phone is where people already look and does not wrap onto two lines.
+- All ten `loading.tsx` files — rewritten to mirror the new layouts, so the page
+  does not jump when the data lands.
+- `.claude/launch.json` — a second dev-server entry on port 3100, used to preview
+  without disturbing the one already running on 3000.
+- `about.md` — §8's navigation section rewritten for the bottom bar, and a new
+  "The design system" section added before the responsive-tables rule.
+- `updates.md` — this entry.
+
+**Database:**
+None. No migration was written and none was run. No query, calculation, API
+route, validation rule or schema was touched. Every route that existed still
+exists and every link to it still works.
+
+**Result / numbers after:**
+No money figure moved anywhere — this is presentation only.
+
+What did move, in counts:
+- Taps to reach any destination on a phone: **2 → 1**.
+- Ways to sign out on a phone: **0 → 1**.
+- Native OS-drawn dropdowns (`<select>`): **22 removed, 0 remain** anywhere
+  in `app/` or `components/`.
+- Native OS-drawn date fields (`<input type="date">`): **5 removed, 0
+  remain**.
+- Emoji and text glyphs used as icons or controls (`▦ 🧾 ⚙ 📎 📤 📝 📄 ☰ ▸ ▾ ▴
+  ▲ ▼ ⋯ ⚠️ ×`): **26 removed, 0 remain** — the only one left in the codebase
+  is inside a comment in `Icon.tsx` explaining what it replaced.
+- Chart palette checks passed (lightness band, chroma floor, colour-blind
+  separation, normal-vision separation, contrast): **2 of 5 → 5 of 5**. Worst
+  adjacent-pair separation under protanopia **ΔE 5.8 → 9.6**; palest series
+  contrast against the card **1.6:1 → above 3:1**.
+
+`npm run build` compiles successfully, `npx tsc --noEmit` reports no type errors
+and `npx next lint` reports no warnings.
+
+**Not checked in a browser beyond the sign-in screen.** The app requires a login
+and I do not enter passwords, so the design system was verified live on `/`
+(Inter loading, the brand button, the new radii, and the `pb-nav`, `text-2xs`,
+`card-flush` and `tnum` utilities all resolving correctly) and everything behind
+the login was verified by build, typecheck and lint only. **The signed-in
+screens have not been looked at.**
+
+**One thing to do before this looks right locally:** the dev server has to be
+restarted. Next.js does not reload `tailwind.config.ts` while it is running, so
+a server started before this change keeps serving the old theme and errors on
+the new colour names.
+

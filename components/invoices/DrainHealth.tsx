@@ -22,6 +22,7 @@
 // nothing at all.
 
 import { createClient } from "@/lib/supabase/server";
+import { Icon } from "@/components/ui/Icon";
 
 /**
  * Past this, the schedule is not merely late — it has stopped.
@@ -54,9 +55,11 @@ function ageLabel(minutes: number): string {
 export default async function DrainHealth() {
   const supabase = createClient();
 
-  // No .eq("user_id", …) — RLS scopes this (R3). The "own gmail events" policy
-  // in 0013 is what makes this readable through the ordinary server client,
+  // No .eq("user_id", …) — RLS scopes this (R3). The "shared workspace" policy
+  // from 0015 is what makes this readable through the ordinary server client,
   // which is why this does not need the service role the drain itself uses.
+  // Since 0015 that scope is "everyone signed in", so this panel shows the
+  // health of the whole workspace's queue, not one person's.
   //
   // One query does both jobs: `count` is every pending row, and the single
   // returned row is the oldest of them. idx_gmail_events_status_created covers
@@ -86,30 +89,38 @@ export default async function DrainHealth() {
   return (
     <div
       role="status"
-      className={`mb-4 rounded-lg border p-3 text-sm ${
-        stale
-          ? "border-amber-300 bg-amber-50 text-amber-900"
-          : "border-gray-200 bg-gray-50 text-gray-600"
-      }`}
+      className={`mb-4 flex items-start gap-2.5 rounded-2xl px-4 py-3 text-[0.8125rem]
+        leading-relaxed ring-1 ring-inset ${
+          stale
+            ? "bg-amber-50 text-amber-900 ring-amber-600/15"
+            : "bg-gray-100 text-gray-600 ring-gray-500/10"
+        }`}
     >
-      {stale ? (
-        <>
-          <span className="mr-1" aria-hidden>
-            ⚠️
-          </span>
-          <span className="font-medium">
-            {pending} unprocessed {emails}, oldest {ageLabel(minutes)} ago
-          </span>{" "}
-          — the drain scheduler may have stopped. Check the scheduled job that
-          calls <code className="text-xs">/api/gmail/drain</code> is still
-          enabled.
-        </>
-      ) : (
-        <>
-          {pending} {emails} waiting to be read, oldest {ageLabel(minutes)} ago.
-          These are picked up automatically within a few minutes.
-        </>
-      )}
+      <Icon
+        name={stale ? "alert" : "clock"}
+        size={17}
+        className="mt-0.5 shrink-0"
+      />
+      <div className="min-w-0 flex-1">
+        {stale ? (
+          <>
+            <span className="font-bold">
+              {pending} unprocessed {emails}, oldest {ageLabel(minutes)} ago
+            </span>{" "}
+            — the drain scheduler may have stopped. Check the scheduled job that
+            calls{" "}
+            <code className="rounded bg-amber-100 px-1 py-0.5 text-xs">
+              /api/gmail/drain
+            </code>{" "}
+            is still enabled.
+          </>
+        ) : (
+          <>
+            {pending} {emails} waiting to be read, oldest {ageLabel(minutes)}{" "}
+            ago. These are picked up automatically within a few minutes.
+          </>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,18 +1,16 @@
-import { Skeleton, CardSkeletonGrid } from "@/components/ui/States";
+import {
+  CardSkeletonGrid,
+  HeaderSkeleton,
+  ListSkeleton,
+} from "@/components/ui/States";
 
 export default function Loading() {
   return (
-    <div className="space-y-4">
-      <div>
-        <Skeleton className="h-4 w-24" />
-        <Skeleton className="mt-2 h-8 w-56" />
-        <Skeleton className="mt-2 h-4 w-72" />
-      </div>
-      <CardSkeletonGrid count={4} />
-      <div className="card space-y-3">
-        {Array.from({ length: 8 }).map((_, i) => (
-          <Skeleton key={i} className="h-5 w-full" />
-        ))}
+    <div>
+      <HeaderSkeleton />
+      <div className="space-y-5">
+        <CardSkeletonGrid count={4} />
+        <ListSkeleton count={6} />
       </div>
     </div>
   );

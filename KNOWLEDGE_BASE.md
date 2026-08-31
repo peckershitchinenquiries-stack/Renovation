@@ -27,8 +27,9 @@ Road, St Albans, AL1 4JU* — and answers four questions:
 4. Where did each number come from — which document, which line?
 
 It is **single-user in practice** (`admin@pk.com`). Public sign-up is disabled;
-users are created by hand in the Supabase dashboard. It is nevertheless built
-multi-tenant: every table is row-level-security scoped by `user_id`.
+users are created by hand in the Supabase dashboard. It was originally built
+multi-tenant, but since migration `0015` it is **one shared workspace**: every
+table is readable and writable by anyone signed in. See §4 and about.md §9.1.
 
 ### Product evolution in one paragraph
 
@@ -114,7 +115,8 @@ app/
   page.tsx                   login
   reset-password/
 components/
-  project/                   the seven tabs + InvoiceBanner + format.ts
+  project/                   the seven tabs + format.ts
+                             (InvoiceBanner deleted 2026-08-28 — about.md §6.2.1)
   forms/                     ExpenseForm, PurchaseForm (1,658 lines), ProjectForm, LoginForm
   purchases/                 UploadInvoicePanel, PriceMoveBadge, PurchaseExpander,
                              SourceNote, SupplierFields
@@ -179,14 +181,22 @@ client, never the browser client. `createServiceClient()` (service-role key)
 exists only for storage MIME validation and signed URLs.
 
 **Scoping is implicit: no query anywhere filters by `user_id`.** Every table has
-exactly one RLS policy — `for all using (auth.uid() = user_id) with check
-(auth.uid() = user_id)` — and that is the only thing separating tenants. Two
-consequences worth stating in bold:
+exactly one RLS policy. Since migration `0015` that policy is
+`for all to authenticated using (true) with check (true)`, named
+`shared workspace` — so **signing in is the whole of the authorisation model**,
+and `user_id` records who created a row rather than who may see it. Before
+`0015` it was `for all using (auth.uid() = user_id)`, which gave each account a
+private, empty copy of the app; that is why a newly added friend could sign in
+and see nothing. Three consequences worth stating in bold:
 
 - **A new table without an RLS policy returns nothing** (or leaks everything, if
-  RLS is left disabled).
-- **An empty result is ambiguous**: "no rows" and "rows owned by a different
-  user" look identical. This ambiguity caused a real data-loss incident (§12).
+  RLS is left disabled). It needs the `shared workspace` policy, not an
+  owner-scoped one.
+- **`to authenticated` is load-bearing.** It is the only thing keeping a
+  signed-out `anon` browser out of the database.
+- **An empty result is ambiguous**: "no rows" and "a table still on a
+  pre-`0015` owner-scoped policy" look identical. This ambiguity caused a real
+  data-loss incident (§12).
 
 ---
 
@@ -194,8 +204,8 @@ consequences worth stating in bold:
 
 Twelve application tables in schema `public`, plus one view, plus a storage
 bucket. Every table: `id uuid` PK, `user_id uuid references auth.users(id) on
-delete cascade`, RLS enabled, one `auth.uid() = user_id` policy, `created_at` /
-`updated_at` with an `updated_at` trigger.
+delete cascade`, RLS enabled, one `shared workspace` policy (see §4),
+`created_at` / `updated_at` with an `updated_at` trigger.
 
 ### 5.1 The original four (migrations 0001–0003)
 
@@ -349,6 +359,9 @@ splits on it. See §7 for the full story.
 
 RLS does the scoping. Adding the filter is not "belt and braces" — it hides the
 case where RLS is misconfigured, which is the failure you most want to see.
+Since `0015` it would also be wrong on its own terms: the workspace is shared,
+so filtering to the signed-in user hides a colleague's rows. The drain's read of
+`supplier_domains` was exactly this bug and was fixed with the migration.
 
 ### R4. CHECK constraints reject, they do not coerce
 
@@ -358,6 +371,9 @@ database and the constants in `types/index.ts` (`EXPENSE_CATEGORIES`,
 changed together.
 
 ### R5. Every `user_id` is `on delete cascade` to `auth.users`
+
+Sharper since `0015`: deleting a *friend's* account destroys the rows that
+friend created, and everyone loses them, not just that friend.
 
 Deleting an auth user silently destroys all of that user's projects, expenses,
 weeks and trade lookups. **This has already happened once** (§12). The cascade is

@@ -13,6 +13,8 @@
 import { createClient } from "@/lib/supabase/server";
 import TriageActions from "./TriageActions";
 import { Badge } from "@/components/ui/Badge";
+import { SectionHeader } from "@/components/ui/PageHeader";
+import { IconTile } from "@/components/ui/List";
 import type { InvoiceUpload } from "@/types";
 
 // The user-facing name for invoice_uploads.status = 'needs_triage'. The
@@ -65,41 +67,58 @@ export default async function TriageSection() {
 
   return (
     <section className="mb-6">
-      <h2 className="mb-1 text-lg font-semibold text-gray-900">
-        {TRIAGE_LABEL}{" "}
-        <span className="text-sm font-normal text-gray-500">({rows.length})</span>
-      </h2>
-      <p className="mb-3 text-sm text-gray-500">
-        These arrived by email from senders that are not yet known suppliers, so
-        they have not been read. Trust the sender to have their invoices read
-        automatically from now on, or read this one on its own.
-      </p>
+      <SectionHeader
+        title={
+          <span className="flex items-center gap-2">
+            {TRIAGE_LABEL}
+            <span className="inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-amber-100 px-1.5 text-2xs font-bold text-amber-800">
+              {rows.length}
+            </span>
+          </span>
+        }
+        hint="From senders that are not yet known suppliers, so they have not been read."
+      />
 
       {/* Mobile: one card per upload. */}
-      <div className="space-y-2 sm:hidden">
+      <div className="space-y-2.5 sm:hidden">
         {rows.map((row) => (
-          <div key={row.id} className="card p-3">
-            <div className="flex items-start justify-between gap-2">
-              <p className="min-w-0 break-words font-medium text-gray-900">
-                {row.original_name ?? "Untitled attachment"}
-              </p>
+          <div key={row.id} className="card">
+            <div className="flex items-start gap-3">
+              <IconTile name="mail" tone="warn" />
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-[0.9375rem] font-bold leading-snug text-gray-900">
+                  {row.original_name ?? "Untitled attachment"}
+                </p>
+                {row.subject ? (
+                  <p className="mt-0.5 break-words text-xs text-gray-500">
+                    {row.subject}
+                  </p>
+                ) : null}
+              </div>
               <span className="shrink-0">
                 <Badge label={TRIAGE_LABEL} />
               </span>
             </div>
-            {row.subject && (
-              <p className="break-words text-xs text-gray-500">{row.subject}</p>
-            )}
-            <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-gray-100 pt-2 text-xs">
-              <dt className="text-gray-500">From</dt>
-              <dd className="break-all text-right">
-                {senderLabel(row.from_address)}
-              </dd>
-              <dt className="text-gray-500">Received</dt>
-              <dd className="text-right">{whenLabel(row)}</dd>
-              <dt className="text-gray-500">Size</dt>
-              <dd className="text-right">{sizeLabel(row.size_bytes)}</dd>
+
+            <dl className="mt-3 space-y-1.5 border-t border-gray-200/70 pt-2.5 text-xs">
+              <div className="flex justify-between gap-3">
+                <dt className="shrink-0 text-gray-500">From</dt>
+                <dd className="min-w-0 break-all text-right font-medium text-gray-800">
+                  {senderLabel(row.from_address)}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-gray-500">Received</dt>
+                <dd className="font-medium text-gray-800">{whenLabel(row)}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-gray-500">Size</dt>
+                <dd className="tnum font-medium text-gray-800">
+                  {sizeLabel(row.size_bytes)}
+                </dd>
+              </div>
             </dl>
+
             <div className="mt-3">
               <TriageActions uploadId={row.id} />
             </div>
@@ -113,37 +132,39 @@ export default async function TriageSection() {
       <div className="card hidden overflow-x-auto sm:block">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left text-xs uppercase text-gray-500">
-              <th className="py-2 pr-2">File</th>
-              <th className="py-2 pr-2">From</th>
-              <th className="py-2 pr-2">Received</th>
-              <th className="py-2 pr-2 text-right">Size</th>
-              <th className="py-2 pr-2">Status</th>
-              <th className="py-2 pr-2" />
+            <tr className="text-left text-2xs font-bold uppercase tracking-wider text-gray-500">
+              <th className="pb-2.5 pr-3">File</th>
+              <th className="pb-2.5 pr-3">From</th>
+              <th className="pb-2.5 pr-3">Received</th>
+              <th className="pb-2.5 pr-3 text-right">Size</th>
+              <th className="pb-2.5 pr-3">Status</th>
+              <th className="pb-2.5" />
             </tr>
           </thead>
-          <tbody className="divide-y divide-gray-100">
+          <tbody className="divide-y divide-gray-200/70">
             {rows.map((row) => (
-              <tr key={row.id}>
-                <td className="py-2 pr-2 font-medium">
+              <tr key={row.id} className="align-top">
+                <td className="py-2.5 pr-3 font-semibold text-gray-900">
                   {row.original_name ?? "Untitled attachment"}
-                  {row.subject && (
+                  {row.subject ? (
                     <span className="block text-xs font-normal text-gray-500">
                       {row.subject}
                     </span>
-                  )}
+                  ) : null}
                 </td>
-                <td className="break-all py-2 pr-2">
+                <td className="break-all py-2.5 pr-3 text-gray-600">
                   {senderLabel(row.from_address)}
                 </td>
-                <td className="py-2 pr-2">{whenLabel(row)}</td>
-                <td className="py-2 pr-2 text-right">
+                <td className="whitespace-nowrap py-2.5 pr-3 text-gray-600">
+                  {whenLabel(row)}
+                </td>
+                <td className="tnum py-2.5 pr-3 text-right text-gray-600">
                   {sizeLabel(row.size_bytes)}
                 </td>
-                <td className="py-2 pr-2">
+                <td className="py-2.5 pr-3">
                   <Badge label={TRIAGE_LABEL} />
                 </td>
-                <td className="py-2 pr-2">
+                <td className="py-2.5">
                   <TriageActions uploadId={row.id} />
                 </td>
               </tr>
