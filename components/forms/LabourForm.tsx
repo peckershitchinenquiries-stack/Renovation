@@ -258,7 +258,12 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
 
       <fieldset className="card-sunken">
         <legend className="eyebrow mb-2.5">The work</legend>
-        <div className="grid grid-cols-2 gap-3">
+        {/* Cells are top-aligned and the labels are short enough to stay on one
+            line at 320px, which is what keeps the two inputs on the same line.
+            "Total hours worked" wrapped on a phone and pushed its input half a
+            line below the rate box beside it; the word "Total" was carrying no
+            meaning the field's own units did not already carry. */}
+        <div className="grid grid-cols-2 items-start gap-3">
           <div>
             <label className="label" htmlFor="labour_rate">
               Rate per hour <span className="text-red-500">*</span>
@@ -283,7 +288,7 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
           </div>
           <div>
             <label className="label" htmlFor="labour_hours">
-              Total hours worked *
+              Hours worked <span className="text-red-500">*</span>
             </label>
             <input
               id="labour_hours"
@@ -300,7 +305,7 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
           </div>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-3">
+        <div className="mt-3 grid grid-cols-2 items-start gap-3">
           <div>
             <label className="label" htmlFor="labour_total_pay">
               Total pay, ex VAT <span className="text-red-500">*</span>

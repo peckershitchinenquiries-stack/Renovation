@@ -21,10 +21,17 @@ import { IconTile } from "@/components/ui/List";
  * ProjectDetail.tsx). This component owns only the affordance.
  *
  * Two renders, one list. Desktop gets a dropdown in the header's action row;
- * mobile gets a floating button and a bottom sheet, because the header scrolls
- * away and an add control you have to scroll up to find is the reachability
- * problem again in a different costume. Both map over ITEMS, so they cannot
- * drift apart — the same discipline ExpensesTab uses for its row menu/sheet.
+ * mobile gets a bottom sheet off the same button. Both map over ITEMS, so they
+ * cannot drift apart — the same discipline ExpensesTab uses for its row
+ * menu/sheet.
+ *
+ * The mobile trigger used to be a `fixed` FAB pinned above the tab bar, and it
+ * did not work: PageHeader is `backdrop-blur-xl`, and an ancestor with a
+ * backdrop-filter becomes the containing block for `position: fixed`
+ * descendants. So `bottom: calc(var(--nav-h) …)` was measured from the header,
+ * not the viewport, and the button landed on top of the project title at
+ * full 56px FAB size. It is now an ordinary small button in the header's
+ * action row, sized to match the desktop one and the `⋯` beside it.
  */
 
 export type AddItem = "cost" | "invoice" | "labour";
@@ -129,23 +136,17 @@ export default function AddMenu({ onSelect }: { onSelect: (item: AddItem) => voi
         ) : null}
       </div>
 
-      {/* ---------------- Mobile: FAB + bottom sheet ----------------
-          The button sits above the bottom tab bar (and the iOS home indicator)
-          rather than in the corner it used to occupy, which the new navigation
-          now covers. */}
+      {/* ---------------- Mobile: header button + bottom sheet ----------------
+          Same `btn-primary btn-sm` as the desktop trigger, so it lines up with
+          the title and the `⋯` button on the same row. */}
       <button
         type="button"
         aria-label="Add to this project"
         aria-expanded={sheetOpen}
         onClick={() => setSheetOpen(true)}
-        style={{
-          bottom: "calc(var(--nav-h) + env(safe-area-inset-bottom) + 0.75rem)",
-        }}
-        className="fixed right-4 z-30 flex h-14 items-center gap-2 rounded-2xl bg-brand px-4
-          text-sm font-bold text-white shadow-fab transition active:scale-95
-          active:bg-brand-800 sm:hidden"
+        className="btn-primary btn-sm sm:hidden"
       >
-        <Icon name="plus" size={20} strokeWidth={2.25} />
+        <Icon name="plus" size={16} strokeWidth={2.25} />
         Add
       </button>
 

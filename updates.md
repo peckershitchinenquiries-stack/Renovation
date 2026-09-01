@@ -4843,3 +4843,78 @@ restarted. Next.js does not reload `tailwind.config.ts` while it is running, so
 a server started before this change keeps serving the old theme and errors on
 the new colour names.
 
+
+---
+
+### 2026-09-01 — Mobile: the project "Add" button, and the labour form's field alignment
+
+**What changed (in plain English):**
+Two small mobile layout fixes, reported from a phone.
+
+1. On a project screen the green **+ Add** button was a large floating pill that
+   sat on top of the project's name in the header instead of above the bottom
+   tab bar. It is now an ordinary small button in the header's action row, the
+   same size as the "Add" button already used on a desktop screen and lined up
+   with the `⋯` button beside it. Tapping it still opens the same "Add to this
+   project" sheet with Cost / Invoice / Labour.
+2. On **Log labour**, inside the grey "The work" box, the *Rate per hour* and
+   *Total hours worked* boxes did not sit on the same line — the second label
+   was too long for half the width of a phone, wrapped onto two lines, and
+   pushed its box down. The label is now **"Hours worked"**, which fits on one
+   line even on a 320px-wide phone, so the two boxes line up.
+
+**Why:**
+The Add button was not just ugly, it was in the wrong place entirely, and the
+reason is worth writing down: it was positioned with CSS `position: fixed`,
+which normally means "relative to the screen". But the page header it lives in
+uses a frosted-glass blur (`backdrop-blur-xl`), and a blurred element makes any
+`fixed` child position itself against **that element** rather than the screen.
+So "sit 0.75rem above the bottom tab bar" was measured from the bottom of the
+header, which put a 56px-tall pill straight across the project title. Rather
+than fight that, the button now simply sits in the header where the desktop one
+already did.
+
+The labour fields were a plain two-column grid with no protection against a
+label wrapping. Shortening the label is the fix that cannot come undone by a
+different phone width; "Total" was not telling the reader anything the field
+did not already say.
+
+**Where the information came from:**
+User request, with two screenshots from a phone (project Overview, and the
+Log labour form).
+
+**Files used (read, not changed):**
+- `components/ui/PageHeader.tsx` — where the `backdrop-blur-xl` that caused the
+  misplacement lives
+- `app/globals.css` — `.btn-sm`, `.btn-icon`, `.label`, `--nav-h`
+- `components/ui/Fab.tsx` — same floating-button pattern; **left alone**, its
+  only use (`app/(app)/dashboard/page.tsx`) is in the page body, not inside a
+  blurred header, so it is not affected
+- `app/(app)/dashboard/page.tsx`
+
+**Files changed:**
+- `components/project/AddMenu.tsx` — mobile trigger changed from a fixed
+  floating pill to `btn-primary btn-sm` in the header row; the comment at the
+  top now records the blur/`fixed` trap so nobody re-introduces it
+- `components/forms/LabourForm.tsx` — "The work" grid is now top-aligned
+  (`items-start`); "Total hours worked *" relabelled "Hours worked *" and its
+  asterisk made red to match the fields around it
+- `updates.md` — this entry
+
+**Database:**
+None. No migration written, none run. No query, calculation, validation rule or
+API route was touched — the labour payload and everything it saves are
+unchanged.
+
+**Result / numbers after:**
+No money figure moved; this is presentation only.
+- Add button on a phone: **56px floating pill overlapping the project title →
+  36px button in the header action row**.
+- Rate per hour / Hours worked on a 375px phone: **inputs 20px apart
+  vertically → on the same line**.
+
+`npm run build` compiles successfully.
+
+**Not checked in a browser.** Both screens are behind the login and I do not
+enter passwords, so this was verified by build/typecheck and by reading the CSS
+only. Worth a 10-second look on a phone.

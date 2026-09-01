@@ -774,7 +774,7 @@ is special; that is the point.
 | Name (worker/subcontractor) | `purchase_lines.description_raw` |
 | Trade | `purchases.trade` (free text, no FK, same as everywhere) |
 | Rate (£/hr) | `purchase_lines.unit_price`, with `unit = 'hr'` |
-| Total hours worked | `purchase_lines.qty` |
+| Hours worked | `purchase_lines.qty` |
 | Total pay (ex VAT) | `purchase_lines.line_net` |
 | VAT rate | `purchase_lines.vat_rate` — 0, 5 or 20 |
 | Status | `purchases.entry_status` |
@@ -1073,9 +1073,15 @@ land after saving — and everything that starts this flow points at `/invoices`
 There is one add flow, not one per project.
 
 **Where you start it from, since 2026-08-28 (UX phase 4).** The project header
-carries a single **"+ Add"** control — a dropdown on a computer, a floating
-**+** button bottom-right on a phone — offering **Cost**, **Invoice** and
+carries a single **"+ Add"** control — a dropdown on a computer, a bottom sheet
+on a phone — offering **Cost**, **Invoice** and
 **Labour** (`components/project/AddMenu.tsx`, wired in `ProjectDetail.tsx`).
+On a phone the trigger was a floating **+** pill above the tab bar until
+2026-09-01, when it turned out `position: fixed` cannot escape the header's
+`backdrop-blur-xl` — the pill was being positioned against the header and sat
+on the project's title. It is now a small button in the header action row, next
+to `⋯`, opening the same sheet. See "Navigation" below for the rule this
+broke.
 Invoice is this flow, unchanged: `/invoices` → upload or manual → review →
 commit. It is the one multi-step flow in the app that earns its steps, so only
 the door into it moved.
@@ -1218,9 +1224,18 @@ the other's breakpoint (`sm` = 640px).
 **Pages reserve room for the bar themselves.** `app/(app)/layout.tsx` puts
 `pb-nav` on `<main>` — a utility in `globals.css` that resolves to the bar's
 height plus `env(safe-area-inset-bottom)` plus a little air. Anything else fixed
-near the bottom edge (the FAB in `AddMenu`/`Fab`, the toast stack) offsets itself
+near the bottom edge (the FAB in `Fab`, the toast stack) offsets itself
 by `var(--nav-h)` the same way. **A new fixed-bottom element that does not do
 this will sit underneath the navigation.**
+
+**And it only works if no ancestor is blurred.** `position: fixed` is measured
+from the viewport *unless* some ancestor has a `transform`, `filter`,
+`backdrop-filter`, `contain` or `will-change` — any of those makes that ancestor
+the frame of reference instead. `PageHeader` is `backdrop-blur-xl`, so a fixed
+element rendered inside the header's action slot is positioned against the
+header, not the screen. That is exactly what happened to `AddMenu`'s phone
+button (2026-09-01): "0.75rem above the tab bar" put it across the project
+title. **Put fixed-bottom chrome in the page body, not in the header.**
 
 `PageHeader` (`components/ui/PageHeader.tsx`) is the sticky bar at the top of
 every screen: back arrow, title, subtitle, actions, and an optional full-width
