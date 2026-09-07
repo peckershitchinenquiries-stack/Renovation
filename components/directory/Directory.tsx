@@ -1,4 +1,4 @@
-import { getItems, getSuppliers } from "@/lib/data";
+import { getContacts, getItems, getSuppliers } from "@/lib/data";
 import { createClient } from "@/lib/supabase/server";
 import DirectoryScreen, { type DirectoryView } from "./DirectoryScreen";
 import type { Project } from "@/types";
@@ -13,16 +13,23 @@ import type { Project } from "@/types";
  * and in component state on the project screen's Analysis tab: there, all four
  * pivots come out of one bundle that has already been fetched.
  *
- * Rendered by `/directory`, and by `/suppliers` and `/items`, which still exist
- * because a great many links point at them.
+ * Rendered by `/directory`, and by `/suppliers`, `/items` and `/contacts`,
+ * which still exist because a great many links point at them.
+ *
+ * **People is the third half** (migration 0020). It belongs here rather than in
+ * a nav item of its own for the same reason Suppliers and Items were merged:
+ * all three are cross-project registers of one dimension of the job — who you
+ * buy from, what you buy, and who does the work — and the nav went from six
+ * destinations to four on purpose (about.md, the 2026-08-28 rewrite).
  */
 export default async function Directory({ view }: { view: DirectoryView }) {
   const supabase = createClient();
   // Just the names, for the scope control. No user_id filter anywhere: RLS
   // does the scoping (CLAUDE.md, "Queries never filter by user").
-  const [suppliers, items, { data: projects }] = await Promise.all([
+  const [suppliers, items, contacts, { data: projects }] = await Promise.all([
     view === "suppliers" ? getSuppliers() : Promise.resolve(null),
     view === "items" ? getItems() : Promise.resolve(null),
+    view === "people" ? getContacts() : Promise.resolve(null),
     supabase.from("projects").select("id, name").order("name"),
   ]);
 
@@ -31,6 +38,7 @@ export default async function Directory({ view }: { view: DirectoryView }) {
       view={view}
       suppliers={suppliers}
       items={items}
+      contacts={contacts}
       projects={(projects ?? []) as Pick<Project, "id" | "name">[]}
     />
   );

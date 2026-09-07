@@ -21,6 +21,10 @@ export function buildExpensePayload(body: Record<string, unknown>) {
     paid_date: body.paid_date || null,
     payment_method: body.payment_method || null,
     status: body.status || "Planned",
+    // Which piece of work this cost paid for (migration 0017). Blank is a
+    // legitimate answer — an untagged cost shows in the untagged total rather
+    // than being hidden — so "" becomes null rather than being rejected.
+    task_id: body.task_id || null,
   };
   for (const k of NUMERIC) out[k] = Number(body[k] ?? 0);
   return out;

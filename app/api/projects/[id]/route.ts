@@ -27,7 +27,14 @@ export async function PATCH(
   const errors = validateProject(body);
   if (hasErrors(errors)) return error("Validation failed", 422, errors);
 
-  const fields = ["name", "target_budget", "status", "notes"] as const;
+  const fields = [
+    "name",
+    "target_budget",
+    "status",
+    "notes",
+    "start_date",
+    "planned_end_date",
+  ] as const;
   const update: Record<string, unknown> = {};
   for (const f of fields) if (f in body) update[f] = body[f] === "" ? null : body[f];
 

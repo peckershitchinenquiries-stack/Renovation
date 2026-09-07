@@ -19,6 +19,8 @@ export default function ProjectForm({ project }: { project?: Project }) {
     target_budget: project?.target_budget?.toString() ?? "",
     status: project?.status ?? "active",
     notes: project?.notes ?? "",
+    start_date: project?.start_date ?? "",
+    planned_end_date: project?.planned_end_date ?? "",
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -94,6 +96,43 @@ export default function ProjectForm({ project }: { project?: Project }) {
           ) : (
             <p className="hint">Your spend ceiling, if you have one.</p>
           )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label" htmlFor="start_date">
+              Start date{" "}
+              <span className="font-normal text-gray-400">— optional</span>
+            </label>
+            <input
+              id="start_date"
+              type="date"
+              className={`input ${errors.start_date ? "input-invalid" : ""}`}
+              value={form.start_date}
+              onChange={(e) => set("start_date", e.target.value)}
+            />
+            {errors.start_date ? (
+              <p className="field-error">{errors.start_date}</p>
+            ) : null}
+          </div>
+          <div>
+            <label className="label" htmlFor="planned_end_date">
+              Finish date{" "}
+              <span className="font-normal text-gray-400">— optional</span>
+            </label>
+            <input
+              id="planned_end_date"
+              type="date"
+              className={`input ${errors.planned_end_date ? "input-invalid" : ""}`}
+              value={form.planned_end_date}
+              onChange={(e) => set("planned_end_date", e.target.value)}
+            />
+            {errors.planned_end_date ? (
+              <p className="field-error">{errors.planned_end_date}</p>
+            ) : (
+              <p className="hint">Used for days behind/ahead until a baseline is set.</p>
+            )}
+          </div>
         </div>
 
         <div>

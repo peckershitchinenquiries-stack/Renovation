@@ -106,6 +106,10 @@ export function buildInvoiceLines(
           ? supplierNames.get(purchase.supplier_id) ?? NO_SUPPLIER
           : NO_SUPPLIER,
         item_id: line.item_id,
+        // Nullable and untouched by everything above: tagging a line to a task
+        // changes nothing about what the line cost, only which piece of work
+        // it is reported under (migration 0017).
+        task_id: line.task_id ?? null,
         item_name:
           (line.item_id ? itemNames.get(line.item_id) : null) ?? description,
         description,

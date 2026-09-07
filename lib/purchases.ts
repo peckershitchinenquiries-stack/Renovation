@@ -37,18 +37,87 @@ export function purchaseStatus(gross: number, paid: number): PurchaseStatus {
   return "Pending";
 }
 
-// Attach the computed payment fields to a purchase.
+// ============================================================
+// Retention (migration 0019)
+// ============================================================
+// A retention is a percentage of an invoice held back from a contractor until
+// the defects period is up. It is money you agreed to owe and deliberately
+// have not paid — which is NOT the same thing as an overdue bill, and the
+// entire point of the feature is that the app stops treating it as one.
+//
+// Both figures below are derived on every read and neither is stored, exactly
+// like `balance` and `status` above.
+
+/** gross × pct ÷ 100. Zero whenever no retention was agreed. */
+export function retentionAmount(purchase: {
+  gross_total: number | string;
+  retention_pct?: number | null;
+}): number {
+  const pct = Number(purchase.retention_pct ?? 0);
+  if (!Number.isFinite(pct) || pct <= 0) return 0;
+  return round2((Number(purchase.gross_total) * pct) / 100);
+}
+
+/**
+ * What is STILL held — the retention until it is released, then nothing.
+ *
+ * `retention_released_on` is what flips it: on the day the retention is
+ * released the money moves out of "held" and into Owed, where it now genuinely
+ * belongs, without anything being recalculated by hand.
+ */
+export function retentionHeld(purchase: {
+  gross_total: number | string;
+  retention_pct?: number | null;
+  retention_released_on?: string | null;
+}): number {
+  if (purchase.retention_released_on) return 0;
+  return retentionAmount(purchase);
+}
+
+/** Is this retention past its release date and still unreleased? */
+export function retentionIsDue(
+  purchase: {
+    retention_pct?: number | null;
+    retention_release_due?: string | null;
+    retention_released_on?: string | null;
+  },
+  today: string
+): boolean {
+  if (purchase.retention_pct == null || Number(purchase.retention_pct) <= 0)
+    return false;
+  if (purchase.retention_released_on) return false;
+  if (!purchase.retention_release_due) return false;
+  return purchase.retention_release_due <= today;
+}
+
+// Attach the computed payment and retention fields to a purchase.
+//
+// The one formula this changed: `balance` is now payable_now − paid rather
+// than gross − paid. With `retention_pct` null — every row that predates 0019
+// — `held` is 0, `payable_now` is `gross`, and the arithmetic is identical to
+// the penny. No figure moves until somebody types a percentage.
+//
+// `status` deliberately still measures against PAYABLE, not gross: an invoice
+// with 5% held and 95% handed over is settled as far as anyone is owed
+// anything, and calling it "Partial" for the length of the defects period
+// would put it on every chase list for a year.
 export function computePurchase(
   purchase: Purchase,
   payments: Payment[] = []
 ): PurchaseComputed {
   const gross = Number(purchase.gross_total);
   const paid = paymentTotal(payments);
+  const retention_amount = retentionAmount(purchase);
+  const retention_held = retentionHeld(purchase);
+  const payable_now = round2(gross - retention_held);
   return {
     ...purchase,
     paid,
-    balance: gross - paid,
-    status: purchaseStatus(gross, paid),
+    retention_amount,
+    retention_held,
+    payable_now,
+    balance: payable_now - paid,
+    status: purchaseStatus(payable_now, paid),
   };
 }
 
@@ -306,12 +375,17 @@ export function totalsBySource(purchases: PurchaseComputed[]): PurchaseTotals[] 
       purchase_count: 0,
       gross: 0,
       paid: 0,
+      retention_held: 0,
       balance: 0,
     };
     row.purchase_count += 1;
     row.gross += Number(p.gross_total);
     row.paid += p.paid;
-    row.balance = row.gross - row.paid;
+    // Retention is carried BESIDE the balance, not inside it. Adding it back
+    // in would undo the whole of migration 0019 in the one place every
+    // supplier statement reads from.
+    row.retention_held += p.retention_held;
+    row.balance = row.gross - row.retention_held - row.paid;
     map.set(p.entry_source, row);
   }
   const order: PurchaseEntrySource[] = ["diary", "ledger"];
@@ -475,6 +549,13 @@ export function purchasesToSyntheticEntries(
         // Lifecycle
         status: p.entry_status,
         receipt_url: null,
+        // Always null, deliberately. A purchase's task tags live on its LINES
+        // (migration 0017) and a document can carry several, so there is no
+        // single task_id to put here. Every per-task figure is built from the
+        // lines themselves in lib/scheduleCosts.ts, which is also why that
+        // function skips `source: "invoice"` entries — counting them here as
+        // well would double every invoiced total.
+        task_id: null,
         source: "invoice",
         created_at: p.created_at,
         updated_at: p.updated_at,

@@ -6,12 +6,57 @@ import {
   buildItemTimeline,
   computePurchases,
   lastPurchaseDate,
+  normaliseName,
   purchaseOrderKey,
   purchasesToSyntheticEntries,
+  retentionIsDue,
   totalsBySource,
 } from "@/lib/purchases";
 import { buildInvoiceLines } from "@/lib/invoiceViews";
+import { projectHealth } from "@/lib/portfolio";
+// ---- Track B (migrations 0019–0024) ----
+import {
+  certificationViews,
+  expiryStatus,
+  todayISO,
+  worstState,
+} from "@/lib/certifications";
+import { documentViews } from "@/lib/documents";
+import { computeOrder } from "@/lib/purchaseOrders";
+import { variationRollup, variationViews } from "@/lib/variations";
+import { scheduleProject } from "@/lib/schedule";
+import { taskCostRows } from "@/lib/scheduleCosts";
 import type {
+  ActivityEntry,
+  CertificationView,
+  CommunicationBundle,
+  Contact,
+  ContactBundle,
+  ContactCertification,
+  ContactListRow,
+  DocumentBundle,
+  ProjectDocument,
+  PurchaseOrder,
+  PurchaseOrderLine,
+  PurchaseOrderRef,
+  PurchaseOrderView,
+  Snag,
+  TaskSignoff,
+  Variation,
+  VariationRollup,
+  VariationView,
+} from "@/types";
+import type {
+  ProjectHealth,
+  ProjectHoliday,
+  ProjectPhase,
+  ScheduleBundle,
+  Task,
+  TaskBaseline,
+  TaskDependency,
+  TaskRef,
+  TaskRevision,
+  TaskStatus,
   Project,
   ProjectRef,
   ExpenseEntry,
@@ -501,6 +546,27 @@ export async function getPurchaseFormBundle(
     supabase.from("expense_entries").select("project_id, week_number"),
   ]);
 
+  // Tasks for the line-level task picker (migration 0017). Read separately and
+  // tolerantly: on a database where 0016 has not been pasted in yet this is a
+  // missing relation, and an invoice form that 500s because the SCHEDULE is
+  // not installed would be an absurd coupling. The picker simply does not
+  // appear until the tables exist.
+  const { data: taskRows } = await supabase
+    .from("tasks")
+    .select("id, name, status, project_id, phase_id, sort_order")
+    .order("sort_order");
+  const { data: phaseRows } = await supabase
+    .from("project_phases")
+    .select("id, name");
+
+  // Open purchase orders, for the "which order is this?" picker (0023). Read
+  // just as tolerantly as the tasks above: a database without 0023 gets no
+  // picker rather than a 500 on the invoice form.
+  const { data: orderRows } = await supabase
+    .from("purchase_orders")
+    .select("id, po_number, supplier_id, raised_on, status, project_id")
+    .order("raised_on", { ascending: false });
+
   // A named project that doesn't exist (or isn't the caller's) is still a 404;
   // no project asked for is not.
   if (projectId && !project) return null;
@@ -606,6 +672,47 @@ export async function getPurchaseFormBundle(
   for (const p of projectRefs)
     nextWeekByProject[p.id] = (highestWeek.get(p.id) ?? 0) + 1;
 
+  const phaseNames = new Map(
+    ((phaseRows ?? []) as { id: string; name: string }[]).map((p) => [p.id, p.name])
+  );
+  const tasksByProject: Record<string, TaskRef[]> = {};
+  for (const row of (taskRows ?? []) as {
+    id: string;
+    name: string;
+    status: TaskStatus;
+    project_id: string;
+    phase_id: string | null;
+  }[]) {
+    // Cancelled work is not something a new invoice should be filed against.
+    if (row.status === "Cancelled") continue;
+    (tasksByProject[row.project_id] ||= []).push({
+      id: row.id,
+      name: row.name,
+      phase_name: row.phase_id ? phaseNames.get(row.phase_id) ?? null : null,
+      status: row.status,
+    });
+  }
+
+  // Draft and cancelled orders are left out: an invoice cannot answer an order
+  // that was never sent or that was called off, and offering them would let a
+  // price variance be computed against a document nobody acted on.
+  const ordersByProject: Record<string, PurchaseOrderRef[]> = {};
+  for (const row of (orderRows ?? []) as (PurchaseOrderRef & {
+    project_id: string;
+  })[]) {
+    if (row.status === "draft" || row.status === "cancelled") continue;
+    (ordersByProject[row.project_id] ||= []).push({
+      id: row.id,
+      po_number: row.po_number,
+      supplier_id: row.supplier_id,
+      supplier_name: row.supplier_id
+        ? supplierNames.get(row.supplier_id) ?? null
+        : null,
+      raised_on: row.raised_on,
+      status: row.status,
+    });
+  }
+
   return {
     project: (project as Project) ?? null,
     projects: projectRefs,
@@ -618,6 +725,8 @@ export async function getPurchaseFormBundle(
     next_week: projectId ? nextWeekByProject[projectId] ?? 1 : 1,
     next_week_by_project: nextWeekByProject,
     invoices,
+    tasks_by_project: tasksByProject,
+    orders_by_project: ordersByProject,
   };
 }
 
@@ -743,6 +852,230 @@ export async function getPurchaseEditBundle(
   };
 }
 
+// ============================================================
+// The schedule (migrations 0016–0018)
+// ============================================================
+// Same rules as everything above: a fixed handful of queries per page, never
+// one per row, and never a .eq("user_id", …) — RLS scopes the data.
+
+/**
+ * Everything the Schedule tab and the Gantt read, in one pass.
+ *
+ * Deliberately does NOT fetch invoice lines or purchases. The project page has
+ * already loaded those for the Costs and Analysis tabs, and per-task cost is
+ * derived from them in the browser by lib/scheduleCosts.ts — fetching them a
+ * second time here would be the same waste getProjectPurchases already pays
+ * for the Invoices tab, without its justification.
+ *
+ * The baseline returned is the CURRENT one only: the most recently captured
+ * `baseline_name`. Earlier baselines stay in the table (a re-baseline after a
+ * major variation must not destroy what came before) but nothing reads them —
+ * drift is always measured against the latest.
+ */
+export async function getScheduleBundle(
+  projectId: string
+): Promise<ScheduleBundle | null> {
+  const supabase = createClient();
+  const { data: project } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+  if (!project) return null;
+
+  const [
+    { data: phases },
+    { data: tasks },
+    { data: dependencies },
+    { data: baselines },
+    { data: revisions },
+    { data: holidays },
+    { data: signoffs },
+  ] = await Promise.all([
+    supabase
+      .from("project_phases")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("sort_order"),
+    supabase.from("tasks").select("*").eq("project_id", projectId).order("sort_order"),
+    supabase.from("task_dependencies").select("*").eq("project_id", projectId),
+    supabase
+      .from("task_baselines")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("captured_at", { ascending: false }),
+    // The history panel shows the most recent changes, not all of them. A
+    // year of a busy schedule is thousands of rows and nobody scrolls them.
+    supabase
+      .from("task_revisions")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("changed_at", { ascending: false })
+      .limit(200),
+    supabase
+      .from("project_holidays")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("holiday_date"),
+    // Sign-offs (migration 0020). The engine needs them to answer
+    // `requires_signoff` links; the tab needs them to say who signed what.
+    supabase
+      .from("task_signoffs")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("signed_at", { ascending: false }),
+  ]);
+
+  const allBaselines = (baselines ?? []) as TaskBaseline[];
+  // Newest first from the query, so the first row names the current set.
+  const currentName = allBaselines[0]?.baseline_name ?? null;
+
+  return {
+    project: project as Project,
+    phases: (phases ?? []) as ProjectPhase[],
+    tasks: (tasks ?? []) as Task[],
+    dependencies: (dependencies ?? []) as TaskDependency[],
+    baseline: currentName
+      ? allBaselines.filter((b) => b.baseline_name === currentName)
+      : [],
+    baseline_name: currentName,
+    revisions: (revisions ?? []) as TaskRevision[],
+    signoffs: (signoffs ?? []) as TaskSignoff[],
+    calendar: {
+      working_weekdays: ((project as Project).working_weekdays ?? [1, 2, 3, 4, 5]).map(
+        Number
+      ),
+      holidays: ((holidays ?? []) as ProjectHoliday[]).map((h) => h.holiday_date),
+    },
+  };
+}
+
+export interface PortfolioData {
+  healths: ProjectHealth[];
+  // The same bundles the health figures were computed from, so the rolled-up
+  // multi-project Gantt can be drawn without a second pass over the database.
+  bundles: ScheduleBundle[];
+}
+
+/**
+ * Every project's health, for the portfolio dashboard (Phase 8).
+ *
+ * Eight whole-table reads rather than a per-project loop. This is a
+ * single-workspace app tracking one renovation and possibly a second — tens of
+ * tasks, not thousands — so the cost of reading everything once and grouping in
+ * memory is lower than the cost of N round trips, and very much simpler than a
+ * view. Do not build this for a scale that will not arrive.
+ */
+export async function getPortfolio(): Promise<PortfolioData> {
+  const supabase = createClient();
+  const [
+    { data: projects },
+    { data: phases },
+    { data: tasks },
+    { data: dependencies },
+    { data: baselines },
+    { data: holidays },
+    { data: signoffs },
+    { data: rawPurchases },
+    { data: rawPayments },
+    { data: rawLines },
+    { data: rawEntries },
+    { data: suppliers },
+    { data: items },
+  ] = await Promise.all([
+    supabase.from("projects").select("*").order("created_at", { ascending: false }),
+    supabase.from("project_phases").select("*"),
+    supabase.from("tasks").select("*"),
+    supabase.from("task_dependencies").select("*"),
+    supabase.from("task_baselines").select("*").order("captured_at", { ascending: false }),
+    supabase.from("project_holidays").select("*"),
+    supabase.from("task_signoffs").select("*"),
+    supabase.from("purchases").select("*"),
+    supabase.from("payments").select("*"),
+    supabase.from("purchase_lines").select("*"),
+    supabase.from("expense_entries").select("*"),
+    supabase.from("suppliers").select("id, name"),
+    supabase.from("items").select("id, canonical_name"),
+  ]);
+
+  const supplierNames = new Map(
+    ((suppliers ?? []) as { id: string; name: string }[]).map((s) => [s.id, s.name])
+  );
+  const itemNames = new Map(
+    ((items ?? []) as { id: string; canonical_name: string }[]).map((i) => [
+      i.id,
+      i.canonical_name,
+    ])
+  );
+
+  const computedPurchases = computePurchases(
+    (rawPurchases ?? []) as Purchase[],
+    (rawPayments ?? []) as Payment[]
+  );
+  const allLines = buildInvoiceLines(
+    computedPurchases,
+    (rawLines ?? []) as PurchaseLine[],
+    supplierNames,
+    itemNames
+  );
+  // 'ledger' rows overlap the diary and summing both double-counts (about.md
+  // §5) — the same filter the dashboard and ProjectDetail already apply.
+  const allEntries = computeEntries((rawEntries ?? []) as ExpenseEntry[]).filter(
+    (e) => e.source !== "ledger"
+  );
+
+  const group = <T extends { project_id: string }>(rows: T[]) => {
+    const map = new Map<string, T[]>();
+    for (const row of rows) {
+      const list = map.get(row.project_id) ?? [];
+      list.push(row);
+      map.set(row.project_id, list);
+    }
+    return map;
+  };
+
+  const phasesBy = group((phases ?? []) as ProjectPhase[]);
+  const tasksBy = group((tasks ?? []) as Task[]);
+  const depsBy = group((dependencies ?? []) as TaskDependency[]);
+  const baselinesBy = group((baselines ?? []) as TaskBaseline[]);
+  const holidaysBy = group((holidays ?? []) as ProjectHoliday[]);
+  const signoffsBy = group((signoffs ?? []) as TaskSignoff[]);
+  const linesBy = group(allLines);
+  const entriesBy = group(allEntries);
+  const purchasesBy = group(computedPurchases);
+
+  const bundles: ScheduleBundle[] = [];
+  const healths = ((projects ?? []) as Project[]).map((project) => {
+    const projectBaselines = baselinesBy.get(project.id) ?? [];
+    const currentName = projectBaselines[0]?.baseline_name ?? null;
+    const bundle: ScheduleBundle = {
+      project,
+      phases: phasesBy.get(project.id) ?? [],
+      tasks: tasksBy.get(project.id) ?? [],
+      dependencies: depsBy.get(project.id) ?? [],
+      baseline: currentName
+        ? projectBaselines.filter((b) => b.baseline_name === currentName)
+        : [],
+      baseline_name: currentName,
+      revisions: [],
+      signoffs: signoffsBy.get(project.id) ?? [],
+      calendar: {
+        working_weekdays: (project.working_weekdays ?? [1, 2, 3, 4, 5]).map(Number),
+        holidays: (holidaysBy.get(project.id) ?? []).map((h) => h.holiday_date),
+      },
+    };
+    bundles.push(bundle);
+    return projectHealth({
+      bundle,
+      lines: linesBy.get(project.id) ?? [],
+      purchases: purchasesBy.get(project.id) ?? [],
+      entries: entriesBy.get(project.id) ?? [],
+    });
+  });
+
+  return { healths, bundles };
+}
+
 /** One item's price timeline across every supplier and every project. */
 export async function getItemBundle(id: string): Promise<ItemBundle | null> {
   const supabase = createClient();
@@ -811,5 +1144,573 @@ export async function getItemBundle(id: string): Promise<ItemBundle | null> {
     aliases: (aliases ?? []) as ItemAlias[],
     points,
     totals: order.filter((s) => totalsMap.has(s)).map((s) => totalsMap.get(s)!),
+  };
+}
+
+// ============================================================
+// Track B — people, documents, communication, orders, variations
+// (migrations 0019–0024)
+// ============================================================
+// Same rules as everything above: a fixed handful of queries per page, never
+// one per row, and never a .eq("user_id", …) — RLS scopes the data.
+//
+// Every loader here TOLERATES its tables not existing. Migrations in this
+// project are pasted into the SQL editor by hand (CLAUDE.md), so on a database
+// where 0020 has not been run `contacts` is a missing relation rather than an
+// empty table. These treat that as "not installed yet" and return null, so the
+// screen can say so — instead of the whole page 500ing, and instead of an
+// empty list that is indistinguishable from "nobody has been added". That
+// ambiguity is exactly what about.md §2 rule 3 warns about, and it has caused
+// a real incident here before.
+
+/** Did that query fail because the table is not there yet? */
+function missingRelation(
+  err: { code?: string; message?: string } | null
+): boolean {
+  if (!err) return false;
+  // 42P01 undefined_table; PostgREST answers PGRST205 for a relation missing
+  // from its schema cache, which is what a freshly-created table looks like
+  // until the cache reloads.
+  return (
+    err.code === "42P01" ||
+    err.code === "PGRST205" ||
+    /does not exist|schema cache/i.test(err.message ?? "")
+  );
+}
+
+/** Every person in the register, with the state of their certificates. */
+export async function getContacts(): Promise<ContactListRow[] | null> {
+  const supabase = createClient();
+  const { data: contacts, error: contactsError } = await supabase
+    .from("contacts")
+    .select("*")
+    .order("name");
+  if (missingRelation(contactsError)) return null;
+
+  const rows = (contacts ?? []) as Contact[];
+  const [{ data: certs }, { data: tasks }] = await Promise.all([
+    supabase.from("contact_certifications").select("*"),
+    supabase.from("tasks").select("id, assignee_contact_id, status"),
+  ]);
+
+  const certsBy = indexBy(
+    (certs ?? []) as ContactCertification[],
+    (c) => c.contact_id
+  );
+  const taskCount = new Map<string, number>();
+  for (const t of (tasks ?? []) as {
+    assignee_contact_id: string | null;
+    status: TaskStatus;
+  }[]) {
+    if (!t.assignee_contact_id || t.status === "Cancelled") continue;
+    taskCount.set(
+      t.assignee_contact_id,
+      (taskCount.get(t.assignee_contact_id) ?? 0) + 1
+    );
+  }
+
+  const today = todayISO();
+  return rows
+    .map((contact): ContactListRow => {
+      const own = certsBy.get(contact.id) ?? [];
+      const states = own.map((c) => expiryStatus(c.expires_on, today).state);
+      return {
+        contact,
+        task_count: taskCount.get(contact.id) ?? 0,
+        // No certificates on file is 'unknown', never 'valid'. "We have not
+        // checked" and "we checked and it is fine" are different answers, and
+        // a register that conflates them is worse than no register.
+        worst_state: states.length === 0 ? "unknown" : worstState(states),
+        expiring_count: states.filter((s) => s === "expiring_soon").length,
+        expired_count: states.filter((s) => s === "expired").length,
+      };
+    })
+    .sort(
+      // Inactive people last; otherwise alphabetical. Deliberately NOT sorted
+      // by expiry — a directory that reorders itself as certificates age
+      // cannot be navigated from memory.
+      (a, b) =>
+        Number(a.contact.status === "inactive") -
+          Number(b.contact.status === "inactive") ||
+        a.contact.name.localeCompare(b.contact.name)
+    );
+}
+
+/** One person: details, certificates, assigned work and labour paid. */
+export async function getContactBundle(
+  id: string
+): Promise<ContactBundle | null> {
+  const supabase = createClient();
+  const { data: contact } = await supabase
+    .from("contacts")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (!contact) return null;
+  const person = contact as Contact;
+
+  const [{ data: certs }, { data: tasks }, { data: projects }, { data: allLines }] =
+    await Promise.all([
+      supabase.from("contact_certifications").select("*").eq("contact_id", id),
+      supabase.from("tasks").select("*").eq("assignee_contact_id", id),
+      supabase.from("projects").select("id, name"),
+      supabase
+        .from("purchase_lines")
+        .select("line_net, description_raw, purchase_id"),
+    ]);
+
+  let supplier_name: string | null = null;
+  if (person.supplier_id) {
+    const { data: supplier } = await supabase
+      .from("suppliers")
+      .select("name")
+      .eq("id", person.supplier_id)
+      .single();
+    supplier_name = (supplier as { name: string } | null)?.name ?? null;
+  }
+
+  // Labour paid to this person, matched on the NAME written on the invoice
+  // line. That is how labour has always been recorded — the person's name goes
+  // on `purchase_lines.description_raw` and no supplier row is created
+  // (about.md §6.6.1) — and nothing retro-tags the history when a contact is
+  // added. So this is a text match, it is approximate, and the screen says so
+  // rather than presenting it as an authoritative total.
+  const key = normaliseName(person.name);
+  const matching = key
+    ? ((allLines ?? []) as {
+        line_net: number;
+        description_raw: string;
+        purchase_id: string;
+      }[]).filter((l) => normaliseName(l.description_raw).includes(key))
+    : [];
+
+  const labourPurchases = await selectIn<Purchase>(
+    supabase,
+    "purchases",
+    "id",
+    distinct(matching.map((l) => l.purchase_id))
+  );
+  const activeIds = new Set(
+    labourPurchases.filter(ACTIVE_PURCHASE).map((p) => p.id)
+  );
+  const counted = matching.filter((l) => activeIds.has(l.purchase_id));
+
+  const projectNames = new Map(
+    ((projects ?? []) as { id: string; name: string }[]).map((p) => [p.id, p.name])
+  );
+
+  return {
+    contact: person,
+    certifications: certificationViews(
+      (certs ?? []) as ContactCertification[],
+      new Map([[person.id, person.name]])
+    ),
+    supplier_name,
+    tasks: ((tasks ?? []) as Task[])
+      .filter((t) => t.status !== "Cancelled")
+      .map((task) => ({
+        task,
+        project_id: task.project_id,
+        project_name: projectNames.get(task.project_id) ?? null,
+      })),
+    labour_net: counted.reduce((s, l) => s + Number(l.line_net), 0),
+    labour_line_count: counted.length,
+  };
+}
+
+/**
+ * Certificates that have lapsed or are about to, for the Dashboard warning.
+ *
+ * This query is what makes the certification table worth having at all. A
+ * compliance date buried on a detail page is a compliance date nobody reads.
+ */
+export async function getExpiringCertifications(): Promise<CertificationView[]> {
+  const supabase = createClient();
+  const { data: certs, error } = await supabase
+    .from("contact_certifications")
+    .select("*")
+    .not("expires_on", "is", null);
+  if (missingRelation(error)) return [];
+
+  const rows = (certs ?? []) as ContactCertification[];
+  if (rows.length === 0) return [];
+
+  const contacts = await selectIn<Contact>(
+    supabase,
+    "contacts",
+    "id",
+    distinct(rows.map((c) => c.contact_id))
+  );
+  // Active people only. Chasing a lapsed certificate for somebody who left the
+  // job is noise, and noise is what makes a warning ignorable.
+  const active = new Map(
+    contacts.filter((c) => c.status === "active").map((c) => [c.id, c.name])
+  );
+
+  return certificationViews(
+    rows.filter((c) => active.has(c.contact_id)),
+    active
+  ).filter((v) => v.state === "expired" || v.state === "expiring_soon");
+}
+
+export interface RetentionDueRow {
+  purchase: PurchaseComputed;
+  project_name: string | null;
+  supplier_name: string | null;
+}
+
+/**
+ * Retentions past their release date and still held (migration 0019).
+ *
+ * A retention nobody reclaims is a discount you gave away without meaning to,
+ * and nothing else in the app will ever remind you — it is deliberately kept
+ * out of Owed, so it will never appear on a chase list.
+ */
+export async function getRetentionsDue(): Promise<RetentionDueRow[]> {
+  const supabase = createClient();
+  const { data: purchases, error } = await supabase
+    .from("purchases")
+    .select("*")
+    .not("retention_pct", "is", null)
+    .is("retention_released_on", null);
+  // 0019 not run: the column does not exist, so there are no retentions.
+  if (missingRelation(error)) return [];
+
+  const rows = ((purchases ?? []) as Purchase[]).filter(ACTIVE_PURCHASE);
+  if (rows.length === 0) return [];
+
+  const [payments, suppliers, { data: projects }] = await Promise.all([
+    selectIn<Payment>(
+      supabase,
+      "payments",
+      "purchase_id",
+      rows.map((p) => p.id)
+    ),
+    selectIn<Supplier>(
+      supabase,
+      "suppliers",
+      "id",
+      distinct(rows.map((p) => p.supplier_id))
+    ),
+    supabase.from("projects").select("id, name"),
+  ]);
+
+  const today = todayISO();
+  const projectNames = new Map(
+    ((projects ?? []) as { id: string; name: string }[]).map((p) => [p.id, p.name])
+  );
+  const supplierNames = new Map(suppliers.map((s) => [s.id, s.name]));
+
+  return computePurchases(rows, payments)
+    .filter((p) => retentionIsDue(p, today))
+    .sort((a, b) =>
+      (a.retention_release_due ?? "").localeCompare(
+        b.retention_release_due ?? ""
+      )
+    )
+    .map((purchase) => ({
+      purchase,
+      project_name: projectNames.get(purchase.project_id) ?? null,
+      supplier_name: purchase.supplier_id
+        ? supplierNames.get(purchase.supplier_id) ?? null
+        : null,
+    }));
+}
+
+/** Everything the Documents screen reads, in one pass (migration 0021). */
+export async function getDocumentBundle(
+  projectId: string
+): Promise<DocumentBundle | null> {
+  const supabase = createClient();
+  const { data: project } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+  if (!project) return null;
+
+  const { data: documents, error } = await supabase
+    .from("documents")
+    .select("*")
+    // Project-less documents — a company insurance certificate, say — are
+    // shown alongside this project's. They are genuinely relevant to every
+    // job, and hiding one is how a certificate goes unnoticed.
+    .or(`project_id.eq.${projectId},project_id.is.null`)
+    .order("created_at", { ascending: false });
+  if (missingRelation(error)) return null;
+
+  const [{ data: phases }, { data: tasks }, { data: contacts }] =
+    await Promise.all([
+      supabase
+        .from("project_phases")
+        .select("id, name")
+        .eq("project_id", projectId)
+        .order("sort_order"),
+      supabase
+        .from("tasks")
+        .select("id, name")
+        .eq("project_id", projectId)
+        .order("sort_order"),
+      supabase.from("contacts").select("id, name").order("name"),
+    ]);
+
+  const phaseList = (phases ?? []) as { id: string; name: string }[];
+  const taskList = (tasks ?? []) as { id: string; name: string }[];
+  const contactList = (contacts ?? []) as { id: string; name: string }[];
+
+  return {
+    project: project as Project,
+    documents: documentViews((documents ?? []) as ProjectDocument[], {
+      phases: new Map(phaseList.map((p) => [p.id, p.name])),
+      tasks: new Map(taskList.map((t) => [t.id, t.name])),
+      contacts: new Map(contactList.map((c) => [c.id, c.name])),
+    }),
+    phases: phaseList,
+    tasks: taskList,
+    contacts: contactList,
+  };
+}
+
+/** The activity log and the snagging list, in one pass (migration 0022). */
+export async function getCommunicationBundle(
+  projectId: string
+): Promise<CommunicationBundle | null> {
+  const supabase = createClient();
+  const { data: project } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+  if (!project) return null;
+
+  const [{ data: activity, error: activityError }, { data: snags }] =
+    await Promise.all([
+      supabase
+        .from("activity_log")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("occurred_at", { ascending: false })
+        // Read, not audited: a year of a busy job is thousands of rows and
+        // nobody scrolls them. Same reasoning as the revision log's limit.
+        .limit(300),
+      supabase
+        .from("snags")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("raised_on", { ascending: false }),
+    ]);
+  if (missingRelation(activityError)) return null;
+
+  const snagRows = (snags ?? []) as Snag[];
+
+  const [{ data: phases }, { data: tasks }, { data: contacts }, photos] =
+    await Promise.all([
+      supabase
+        .from("project_phases")
+        .select("id, name")
+        .eq("project_id", projectId)
+        .order("sort_order"),
+      supabase
+        .from("tasks")
+        .select("id, name")
+        .eq("project_id", projectId)
+        .order("sort_order"),
+      supabase.from("contacts").select("id, name").order("name"),
+      // Snag photos are `documents` rows with a snag_id, not a second file
+      // store (0022). One document table means one upload route, one bucket
+      // and one delete path.
+      selectIn<ProjectDocument>(
+        supabase,
+        "documents",
+        "snag_id",
+        snagRows.map((s) => s.id)
+      ),
+    ]);
+
+  const phaseList = (phases ?? []) as { id: string; name: string }[];
+  const taskList = (tasks ?? []) as { id: string; name: string }[];
+  const contactList = (contacts ?? []) as { id: string; name: string }[];
+  const phaseNames = new Map(phaseList.map((p) => [p.id, p.name]));
+  const taskNames = new Map(taskList.map((t) => [t.id, t.name]));
+  const contactNames = new Map(contactList.map((c) => [c.id, c.name]));
+  const photosBySnag = indexBy(
+    photos.filter((d) => d.snag_id),
+    (d) => d.snag_id as string
+  );
+
+  const nameOf = (map: Map<string, string>, id: string | null) =>
+    id ? map.get(id) ?? null : null;
+
+  return {
+    project: project as Project,
+    activity: ((activity ?? []) as ActivityEntry[]).map((entry) => ({
+      ...entry,
+      contact_name: nameOf(contactNames, entry.contact_id),
+      task_name: nameOf(taskNames, entry.task_id),
+      phase_name: nameOf(phaseNames, entry.phase_id),
+    })),
+    snags: snagRows.map((snag) => ({
+      ...snag,
+      contact_name: nameOf(contactNames, snag.contact_id),
+      task_name: nameOf(taskNames, snag.task_id),
+      phase_name: nameOf(phaseNames, snag.phase_id),
+      photos: photosBySnag.get(snag.id) ?? [],
+    })),
+    phases: phaseList,
+    tasks: taskList,
+    contacts: contactList,
+  };
+}
+
+export interface PurchaseOrderList {
+  project: Project;
+  orders: PurchaseOrderView[];
+  suppliers: SupplierRef[];
+  tasks: { id: string; name: string }[];
+}
+
+/** Every order on one project, with its match back to invoices (0023). */
+export async function getPurchaseOrders(
+  projectId: string
+): Promise<PurchaseOrderList | null> {
+  const supabase = createClient();
+  const { data: project } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+  if (!project) return null;
+
+  const { data: orders, error } = await supabase
+    .from("purchase_orders")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("raised_on", { ascending: false });
+  if (missingRelation(error)) return null;
+
+  const orderRows = (orders ?? []) as PurchaseOrder[];
+  const orderIds = orderRows.map((o) => o.id);
+
+  const [lines, { data: suppliers }, { data: tasks }, { data: matched }] =
+    await Promise.all([
+      selectIn<PurchaseOrderLine>(
+        supabase,
+        "purchase_order_lines",
+        "po_id",
+        orderIds
+      ),
+      supabase.from("suppliers").select("id, name").order("name"),
+      supabase
+        .from("tasks")
+        .select("id, name")
+        .eq("project_id", projectId)
+        .order("sort_order"),
+      // Invoices filed against these orders, cancelled ones excluded here
+      // rather than downstream: a cancelled invoice is not evidence of a price
+      // and must never enter the variance.
+      orderIds.length === 0
+        ? Promise.resolve({ data: [] as Purchase[] })
+        : supabase
+            .from("purchases")
+            .select("*")
+            .in("purchase_order_id", orderIds)
+            .neq("entry_status", "Cancelled"),
+    ]);
+
+  const supplierList = (suppliers ?? []) as { id: string; name: string }[];
+  const taskList = (tasks ?? []) as { id: string; name: string }[];
+  const linesByOrder = indexBy(lines, (l) => l.po_id);
+  const invoicesByOrder = indexBy(
+    ((matched ?? []) as Purchase[]).filter((p) => p.purchase_order_id),
+    (p) => p.purchase_order_id as string
+  );
+  const names = {
+    suppliers: new Map(supplierList.map((s) => [s.id, s.name])),
+    tasks: new Map(taskList.map((t) => [t.id, t.name])),
+  };
+
+  return {
+    project: project as Project,
+    orders: orderRows.map((order) =>
+      computeOrder(
+        order,
+        linesByOrder.get(order.id) ?? [],
+        invoicesByOrder.get(order.id) ?? [],
+        names
+      )
+    ),
+    suppliers: supplierList.map((s) => ({ id: s.id, name: s.name, aliases: [] })),
+    tasks: taskList,
+  };
+}
+
+export interface VariationList {
+  project: Project;
+  variations: VariationView[];
+  rollup: VariationRollup;
+  phases: { id: string; name: string }[];
+  tasks: { id: string; name: string }[];
+}
+
+/**
+ * Every variation on one project, each shown against what its task has
+ * actually cost and how far it has actually drifted (migration 0024).
+ *
+ * This re-reads the schedule and the invoice lines rather than taking them
+ * from the project page's bundle, deliberately: variations are their own
+ * route, reached directly, and a loader that only works once another screen
+ * has run is a loader waiting to break.
+ */
+export async function getVariations(
+  projectId: string
+): Promise<VariationList | null> {
+  const supabase = createClient();
+  const { data: project } = await supabase
+    .from("projects")
+    .select("*")
+    .eq("id", projectId)
+    .single();
+  if (!project) return null;
+
+  const { data: variations, error } = await supabase
+    .from("variations")
+    .select("*")
+    .eq("project_id", projectId);
+  if (missingRelation(error)) return null;
+
+  // Both tolerated: a variation is worth recording even on a project whose
+  // schedule has not been built. It simply shows no task figures beside it.
+  const [bundle, projectBundle] = await Promise.all([
+    getScheduleBundle(projectId).catch(() => null),
+    getProjectBundle(projectId).catch(() => null),
+  ]);
+
+  const scheduled = bundle ? scheduleProject(bundle).tasks : [];
+  const costs =
+    bundle && projectBundle
+      ? taskCostRows(
+          bundle.tasks,
+          projectBundle.invoiceLines,
+          projectBundle.purchases,
+          projectBundle.entries
+        )
+      : [];
+
+  const phaseList = (bundle?.phases ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+  }));
+
+  return {
+    project: project as Project,
+    variations: variationViews(
+      (variations ?? []) as Variation[],
+      costs,
+      scheduled,
+      new Map(phaseList.map((p) => [p.id, p.name]))
+    ),
+    rollup: variationRollup((variations ?? []) as Variation[]),
+    phases: phaseList,
+    tasks: (bundle?.tasks ?? []).map((t) => ({ id: t.id, name: t.name })),
   };
 }

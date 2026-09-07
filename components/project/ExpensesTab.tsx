@@ -31,6 +31,7 @@ import {
   type Project,
   type ExpenseEntryComputed,
   type InvoiceLineView,
+  type TaskRef,
   type TradeLookup,
 } from "@/types";
 
@@ -269,6 +270,7 @@ export default function ExpensesTab({
   entries,
   trades,
   invoiceLines,
+  tasks = [],
   addRequested = false,
   onAddConsumed,
   onChanged,
@@ -277,6 +279,9 @@ export default function ExpensesTab({
   entries: ExpenseEntryComputed[];
   trades: TradeLookup[];
   invoiceLines: InvoiceLineView[];
+  // The project's tasks, for the cost form's task tag. Empty until migration
+  // 0016 has been run.
+  tasks?: TaskRef[];
   // Set by the project header's "+ Add → Cost". The drawer stays here rather
   // than in the header because everything it needs — trades, the next week
   // number, the prior entries it prefills from — is here; the header just asks
@@ -1444,6 +1449,7 @@ export default function ExpensesTab({
             template={template ?? undefined}
             priorEntries={entries}
             invoiceLines={invoiceLines}
+            tasks={tasks}
             onSaved={async () => {
               setDrawerOpen(false);
               await onChanged();

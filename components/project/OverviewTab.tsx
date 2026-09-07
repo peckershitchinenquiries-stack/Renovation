@@ -9,6 +9,7 @@ import { WeeklySpendChart } from "@/components/charts/WeeklySpendChart";
 import { CategoryDonut } from "@/components/charts/CategoryDonut";
 import { combineTotals } from "@/components/purchases/totals";
 import type {
+  ProjectCostRollup,
   ProjectSummary,
   WeekTotal,
   CategoryTotal,
@@ -24,6 +25,11 @@ export default function OverviewTab({
   onViewPrices,
   invoiceTotals,
   onViewInvoices,
+  costRollup,
+  onViewTasks,
+  retentionHeld = 0,
+  retentionDueCount = 0,
+  onViewInvoicesForRetention,
 }: {
   summary: ProjectSummary;
   byWeek: WeekTotal[];
@@ -39,8 +45,27 @@ export default function OverviewTab({
   // The invoice list is a tab now, not a route, so this switches tab rather
   // than navigating away from the project screen.
   onViewInvoices: () => void;
+  // Budget vs cost across the project's tasks, plus the untagged total.
+  // Null until migration 0016 has been run and some tasks exist.
+  costRollup?: ProjectCostRollup | null;
+  onViewTasks?: () => void;
+  /**
+   * Σ retention still held on this project's invoices (migration 0019).
+   *
+   * Reported BESIDE Owed and subtracted from it, never folded in. A retention
+   * is money you agreed to hold back, not a bill you are late paying, and
+   * telling the two apart is the entire feature.
+   */
+  retentionHeld?: number;
+  /** How many of those are past their agreed release date. */
+  retentionDueCount?: number;
+  onViewInvoicesForRetention?: () => void;
 }) {
   const invoiced = combineTotals(invoiceTotals);
+  // `summary.remaining_to_pay` is built from the cost totals and knows nothing
+  // about retention, so it is corrected here rather than in buildSummary —
+  // which also serves hand-entered diary rows, where retention does not exist.
+  const owed = Math.max(0, summary.remaining_to_pay - retentionHeld);
 
   return (
     <div className="space-y-6">
@@ -145,19 +170,57 @@ export default function OverviewTab({
             value={formatCurrency(summary.paid_to_date)}
             hint={MONEY.paid.hint}
           />
+          {/* Owed, with retention taken out of it (migration 0019). With no
+              retention anywhere — every project before 0019 was run — `owed`
+              below is `summary.remaining_to_pay` unchanged, to the penny. */}
           <StatCard
             icon="clock"
             label={MONEY.owed.label}
-            value={formatCurrency(summary.remaining_to_pay)}
-            tone={summary.remaining_to_pay > 0.001 ? "bad" : "good"}
-            hint={MONEY.owed.hint}
+            value={formatCurrency(owed)}
+            tone={owed > 0.001 ? "bad" : "good"}
+            hint={
+              retentionHeld > 0.001
+                ? `${MONEY.owed.hint}, retention excluded`
+                : MONEY.owed.hint
+            }
           />
+          {retentionHeld > 0.001 ? (
+            <StatCard
+              icon="wallet"
+              label="Retention held"
+              value={formatCurrency(retentionHeld)}
+              hint="Held back, not overdue"
+            />
+          ) : null}
           <StatCard
             icon="calendar"
             label="Weeks tracked"
             value={String(summary.weeks_tracked)}
           />
         </div>
+
+        {/* Retention past its release date, in the same one-sentence shape as
+            the invoice and task sentences above. It needs saying somewhere,
+            because retention is deliberately kept out of Owed — so nothing
+            else on any screen will ever chase it. */}
+        {retentionDueCount > 0 ? (
+          <button
+            type="button"
+            onClick={onViewInvoicesForRetention}
+            className="mt-2.5 flex w-full items-center gap-3 rounded-2xl bg-amber-50 px-4 py-3 text-left ring-1 ring-inset ring-amber-600/20 transition active:bg-amber-100"
+          >
+            <Icon name="clock" size={18} className="shrink-0 text-amber-600" />
+            <span className="min-w-0 flex-1 text-[0.8125rem] leading-relaxed text-amber-900">
+              <span className="font-bold">
+                {retentionDueCount}{" "}
+                {retentionDueCount === 1 ? "retention is" : "retentions are"}
+              </span>{" "}
+              past the agreed release date. Nothing else will chase them — they
+              are deliberately not counted as {MONEY.owed.label.toLowerCase()}.
+            </span>
+            <Icon name="chevronRight" size={18} className="shrink-0 text-amber-400" />
+          </button>
+        ) : null}
 
         {/* Where the Cost figure came from.
             This replaces the "Invoice Summary" banner that used to sit above all
@@ -192,6 +255,48 @@ export default function OverviewTab({
                 </>
               ) : (
                 ", all paid."
+              )}
+            </span>
+            <Icon name="chevronRight" size={18} className="shrink-0 text-gray-400" />
+          </button>
+        ) : null}
+
+        {/* The schedule half of the same question, in the same shape: one
+            sentence saying how much of the Cost above is accounted for by a
+            piece of work, and how much is not.
+
+            The untagged half is the point. Without it a project reads as
+            perfectly on budget while half its spend sits against no task at
+            all — which is exactly how per-task reporting produces a
+            comforting, wrong answer. Ex VAT throughout, because a task budget
+            is ex VAT and the two have to be comparable. */}
+        {costRollup && (costRollup.budget > 0 || costRollup.tagged_line_count > 0) ? (
+          <button
+            type="button"
+            onClick={onViewTasks}
+            className="mt-2.5 flex w-full items-center gap-3 rounded-2xl bg-gray-100 px-4 py-3 text-left transition active:bg-gray-200"
+          >
+            <span className="min-w-0 flex-1 text-[0.8125rem] leading-relaxed text-gray-600">
+              <span className="tnum font-bold text-gray-900">
+                {formatCurrency(costRollup.net)}
+              </span>{" "}
+              of{" "}
+              <span className="tnum font-bold text-gray-900">
+                {formatCurrency(costRollup.budget)}
+              </span>{" "}
+              task {BUDGET.label.toLowerCase()} spent, ex VAT
+              {costRollup.untagged_line_count > 0 ? (
+                <>
+                  {" "}&mdash;{" "}
+                  <span className="tnum font-bold text-amber-700">
+                    {formatCurrency(costRollup.untagged_net)}
+                  </span>{" "}
+                  on {costRollup.untagged_line_count}{" "}
+                  {costRollup.untagged_line_count === 1 ? "line" : "lines"} is
+                  tagged to no task.
+                </>
+              ) : (
+                ". Every line is tagged to a task."
               )}
             </span>
             <Icon name="chevronRight" size={18} className="shrink-0 text-gray-400" />

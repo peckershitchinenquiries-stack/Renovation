@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch } from "@/lib/fetcher";
 import { formatCurrency } from "@/lib/calculations";
+import { ACTIVE_PURCHASE, retentionIsDue } from "@/lib/purchases";
 import { MONEY } from "@/lib/vocabulary";
 import {
   buildSummary,
@@ -36,7 +37,10 @@ import AnalysisTab, {
   type AnalysisView,
   type LineCategory,
 } from "./AnalysisTab";
+import ScheduleTab from "@/components/schedule/ScheduleTab";
+import { projectCostRollup, taskCostRows } from "@/lib/scheduleCosts";
 import type {
+  Contact,
   Project,
   ExpenseEntryComputed,
   InvoiceLineView,
@@ -45,9 +49,10 @@ import type {
   TradeLookup,
   ProjectWeek,
   PurchaseTotals,
+  ScheduleBundle,
 } from "@/types";
 
-type Tab = "overview" | "expenses" | "invoices" | "analysis";
+type Tab = "overview" | "expenses" | "invoices" | "analysis" | "schedule";
 
 // Seven tabs, four destinations.
 //
@@ -65,6 +70,13 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "expenses", label: "Costs" },
   { key: "invoices", label: "Invoices" },
   { key: "analysis", label: "Analysis" },
+  // The fifth tab. Five is one more than the four the 2026-08-28 collapse
+  // settled on, and it is justified in the way the five retired ones were not:
+  // those were one dataset (invoice lines) grouped five ways, which is a pivot
+  // wearing a tab strip. This is a genuinely different dataset — work and time,
+  // with its own tables and its own write path — and no screen sums it with
+  // the others.
+  { key: "schedule", label: "Schedule" },
 ];
 const TAB_KEYS = new Set<string>(TABS.map((t) => t.key));
 
@@ -95,7 +107,13 @@ function initialTabFrom(value: string | null): Tab {
 function initialViewFrom(tab: string | null, view: string | null): AnalysisView {
   const named = RETIRED[view ?? ""] ?? RETIRED[tab ?? ""];
   if (named) return named.view;
-  if (view === "trade" || view === "supplier" || view === "material" || view === "price")
+  if (
+    view === "trade" ||
+    view === "supplier" ||
+    view === "material" ||
+    view === "price" ||
+    view === "task"
+  )
     return view;
   return "trade";
 }
@@ -115,6 +133,10 @@ export default function ProjectDetail({
   purchases,
   supplierNames,
   purchaseRows,
+  scheduleBundle,
+  openSnagCount = 0,
+  openSafetySnagCount = 0,
+  contacts = [],
 }: {
   project: Project;
   initialEntries: ExpenseEntryComputed[];
@@ -130,6 +152,22 @@ export default function ProjectDetail({
   // router.refresh() (which reloadEntries already calls) brings it up to date
   // after any change, exactly as it does for every other tab.
   purchaseRows: ProjectPurchaseRow[];
+  // Phases, tasks, dependencies, the current baseline and the recent revision
+  // log. Null only when migration 0016 has not been run yet — the Schedule tab
+  // then says so rather than rendering an empty list that looks like "no tasks".
+  scheduleBundle: ScheduleBundle | null;
+  /**
+   * Open snags on this project (migration 0022). A count only — the list is
+   * its own route. It is carried this far up because an open safety snag
+   * should never need looking for, and zero when 0022 has not been run.
+   */
+  openSnagCount?: number;
+  openSafetySnagCount?: number;
+  /**
+   * The people register (migration 0020), for the Schedule tab's assignee
+   * picker. Empty when 0020 has not been run — the picker does not appear.
+   */
+  contacts?: Contact[];
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -187,6 +225,22 @@ export default function ProjectDetail({
   );
   const byCategory = useMemo(() => buildByCategory(diaryEntries), [diaryEntries]);
 
+  // Retention (migration 0019). Derived from the purchase rows the page has
+  // already loaded, so there is no extra query, and computed here rather than
+  // inside buildSummary — that function also serves hand-entered diary rows,
+  // where retention does not exist as a concept.
+  //
+  // Both figures are zero on every project until somebody types a percentage
+  // onto an invoice, which is exactly when they mean to.
+  const retention = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    const active = purchases.filter(ACTIVE_PURCHASE);
+    return {
+      held: active.reduce((sum, p) => sum + p.retention_held, 0),
+      dueCount: active.filter((p) => retentionIsDue(p, today)).length,
+    };
+  }, [purchases]);
+
   // The four Analysis pivots. All of them read purchase lines rather than
   // expense entries — see the header of lib/invoiceViews.ts for why. They are
   // computed here rather than in the tab so switching pivot costs nothing.
@@ -209,6 +263,53 @@ export default function ProjectDetail({
     [invoiceLines]
   );
   const priceAlerts = useMemo(() => buildItemPriceAlerts(priceRows), [priceRows]);
+
+  // The fifth pivot: the same invoice lines, grouped by the task they were
+  // tagged to. Computed here beside the other four so switching pivot costs
+  // nothing, and empty until migration 0016 has been run.
+  // The same task list the invoice form gets, for the cost form's task tag.
+  // Cancelled work is left out: a new cost should not be filed against a job
+  // that was called off.
+  const taskRefs = useMemo(() => {
+    if (!scheduleBundle) return [];
+    const phaseNames = new Map(
+      scheduleBundle.phases.map((p) => [p.id, p.name])
+    );
+    return scheduleBundle.tasks
+      .filter((t) => t.status !== "Cancelled")
+      .map((t) => ({
+        id: t.id,
+        name: t.name,
+        phase_name: t.phase_id ? phaseNames.get(t.phase_id) ?? null : null,
+        status: t.status,
+      }));
+  }, [scheduleBundle]);
+
+  const costRollup = useMemo(
+    () =>
+      scheduleBundle
+        ? projectCostRollup(
+            scheduleBundle.tasks,
+            invoiceLines,
+            purchases,
+            diaryEntries
+          )
+        : null,
+    [scheduleBundle, invoiceLines, purchases, diaryEntries]
+  );
+
+  const taskRows = useMemo(
+    () =>
+      scheduleBundle
+        ? taskCostRows(
+            scheduleBundle.tasks,
+            invoiceLines,
+            purchases,
+            diaryEntries
+          )
+        : [],
+    [scheduleBundle, invoiceLines, purchases, diaryEntries]
+  );
 
   const budgetPct =
     summary.target_budget > 0
@@ -349,6 +450,35 @@ export default function ProjectDetail({
         ) : null}
       </HeroStat>
 
+      {/* An open safety snag sits above the tabs, not inside one, because the
+          person who needs to see it is whichever one they happened to open.
+          Non-safety snags get a quieter line so the loud treatment keeps
+          meaning something. */}
+      {openSafetySnagCount > 0 ? (
+        <Link
+          href={`/projects/${project.id}/log?view=snags`}
+          className="mt-4 flex items-center gap-3 rounded-2xl bg-red-50 p-4 ring-1 ring-inset ring-red-600/15"
+        >
+          <Icon name="alert" size={19} className="shrink-0 text-red-600" />
+          <span className="min-w-0 flex-1 text-sm font-bold text-red-800">
+            {openSafetySnagCount} open safety{" "}
+            {openSafetySnagCount === 1 ? "snag" : "snags"}
+          </span>
+          <Icon name="chevronRight" size={18} className="shrink-0 text-red-400" />
+        </Link>
+      ) : openSnagCount > 0 ? (
+        <Link
+          href={`/projects/${project.id}/log?view=snags`}
+          className="mt-4 flex items-center gap-3 rounded-2xl bg-gray-100 px-4 py-3 transition active:bg-gray-200"
+        >
+          <Icon name="hammer" size={18} className="shrink-0 text-gray-500" />
+          <span className="min-w-0 flex-1 text-[0.8125rem] font-semibold text-gray-700">
+            {openSnagCount} open {openSnagCount === 1 ? "snag" : "snags"}
+          </span>
+          <Icon name="chevronRight" size={18} className="shrink-0 text-gray-400" />
+        </Link>
+      ) : null}
+
       <div className="mt-5">
 
       {tab === "overview" && (
@@ -363,6 +493,14 @@ export default function ProjectDetail({
           }}
           invoiceTotals={invoiceTotals}
           onViewInvoices={() => setTab("invoices")}
+          costRollup={costRollup}
+          onViewTasks={() => {
+            setView("task");
+            setTab("analysis");
+          }}
+          retentionHeld={retention.held}
+          retentionDueCount={retention.dueCount}
+          onViewInvoicesForRetention={() => setTab("invoices")}
         />
       )}
       {tab === "expenses" && (
@@ -371,6 +509,7 @@ export default function ProjectDetail({
           entries={entries}
           trades={trades}
           invoiceLines={invoiceLines}
+          tasks={taskRefs}
           addRequested={addCostPending}
           onAddConsumed={() => setAddCostPending(false)}
           onChanged={reloadEntries}
@@ -382,6 +521,36 @@ export default function ProjectDetail({
           rows={purchaseRows}
           totals={invoiceTotals}
         />
+      )}
+      {tab === "schedule" && (
+        scheduleBundle ? (
+          <ScheduleTab
+            projectId={project.id}
+            bundle={scheduleBundle}
+            invoiceLines={invoiceLines}
+            purchases={purchases}
+            entries={diaryEntries}
+            trades={trades}
+            contacts={contacts}
+            onShowUntagged={() => {
+              setView("task");
+              setTab("analysis");
+            }}
+          />
+        ) : (
+          <div className="rounded-2xl bg-amber-50 p-4 ring-1 ring-inset ring-amber-600/20">
+            <p className="text-sm font-bold text-amber-900">
+              The schedule tables are not there yet
+            </p>
+            <p className="mt-1 text-[0.8125rem] leading-relaxed text-amber-800">
+              Run <code>0016_schedule_core.sql</code>,{" "}
+              <code>0017_task_cost_link.sql</code> and{" "}
+              <code>0018_work_calendar.sql</code> in the Supabase SQL editor, in
+              that order, and this tab will fill itself in. Migrations in this
+              project are applied by hand — writing the file does not run it.
+            </p>
+          </div>
+        )
       )}
       {tab === "analysis" && (
         <AnalysisTab
@@ -396,6 +565,7 @@ export default function ProjectDetail({
           materials={materials}
           labour={labour}
           priceRows={priceRows}
+          taskRows={taskRows}
         />
       )}
       </div>
@@ -411,8 +581,38 @@ export default function ProjectDetail({
         size="sm"
       >
         <div className="-mx-2">
+          {/* The four Track B screens. They are routes rather than tabs on
+              purpose: five tabs is already one more than the 2026-08-28
+              collapse settled on, and none of these is another way of looking
+              at the spend — which is what earns a tab. They are browsed
+              occasionally, so one tap away is the right distance. */}
+          <SheetAction
+            icon="list"
+            label="Log & snags"
+            hint="Calls, site visits, decisions — and what needs putting right"
+            href={`/projects/${project.id}/log`}
+          />
+          <SheetAction
+            icon="receipt"
+            label="Documents & photos"
+            hint="Planning, certificates, drawings, the site timeline"
+            href={`/projects/${project.id}/documents`}
+          />
+          <SheetAction
+            icon="truck"
+            label="Orders"
+            hint="What you have ordered, and whether it arrived as billed"
+            href={`/projects/${project.id}/orders`}
+          />
           <SheetAction
             icon="edit"
+            label="Variations"
+            hint="What changed, why, and what it cost"
+            href={`/projects/${project.id}/variations`}
+          />
+          <div className="my-1.5 mx-3 divider" />
+          <SheetAction
+            icon="settings"
             label="Edit project"
             hint="Name, status, budget and dates"
             href={`/projects/${project.id}/edit`}

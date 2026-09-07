@@ -11,6 +11,7 @@ import {
   normaliseName,
   purchaseStatus,
   purchaseTotalsFromLines,
+  retentionHeld,
   round2,
 } from "@/lib/purchases";
 import { validatePurchase, hasErrors } from "@/lib/validation";
@@ -31,6 +32,7 @@ import {
   EXPENSE_CATEGORIES,
   EXPENSE_STATUSES,
   PAYMENT_METHODS,
+  PO_STATUS_LABELS,
   VAT_RATES,
   type InvoiceRef,
   type ItemRef,
@@ -75,6 +77,10 @@ interface LineState {
   unit_price: string;
   line_net: string;
   vat_rate: string;
+  // Which piece of work this line paid for (migration 0017). Blank = untagged,
+  // which is a legitimate state: it shows in the untagged total on the Schedule
+  // and Analysis tabs rather than being hidden.
+  task_id: string;
   // Carried with the line, not looked up by index, so removing an earlier
   // line can never point this at the wrong suggestion.
   itemResolution: ItemResolution | null;
@@ -102,6 +108,15 @@ interface HeaderState {
   location_room: string;
   notes: string;
   entry_status: string;
+  // ---- retention (migration 0019) ----
+  // Blank means no retention, which is what almost every invoice says. Blank
+  // and "0" are different answers and the validator says so.
+  retention_pct: string;
+  retention_release_due: string;
+  retention_released_on: string;
+  // Which order this invoice answers (migration 0023). Blank means unmatched,
+  // which is a legitimate state and what every existing invoice says.
+  purchase_order_id: string;
 }
 
 let sequence = 0;
@@ -117,6 +132,7 @@ const blankLine = (vatRate: string): LineState => ({
   unit_price: "",
   line_net: "",
   vat_rate: vatRate,
+  task_id: "",
   itemResolution: null,
 });
 
@@ -263,6 +279,10 @@ export default function PurchaseForm({
     location_room: purchase?.purchase.location_room ?? prefill?.location_room ?? "",
     notes: purchase?.purchase.notes ?? prefill?.notes ?? "",
     entry_status: purchase?.purchase.entry_status ?? "Planned",
+    retention_pct: purchase?.purchase.retention_pct?.toString() ?? "",
+    retention_release_due: purchase?.purchase.retention_release_due ?? "",
+    retention_released_on: purchase?.purchase.retention_released_on ?? "",
+    purchase_order_id: purchase?.purchase.purchase_order_id ?? "",
   }));
 
   const [lines, setLines] = useState<LineState[]>(() => {
@@ -278,6 +298,7 @@ export default function PurchaseForm({
           Number(l.unit_price) > 0 ? String(Number(l.unit_price)) : "",
         line_net: String(Number(l.line_net)),
         vat_rate: String(Number(l.vat_rate)),
+        task_id: l.task_id ?? "",
         itemResolution: null,
       }));
     if (prefill && prefill.lines.length > 0)
@@ -291,10 +312,63 @@ export default function PurchaseForm({
         unit_price: l.unit_price,
         line_net: l.line_net,
         vat_rate: l.vat_rate,
+        // Never pre-tagged from an extraction: the reader cannot know which
+        // piece of work an invoice belongs to, and a wrong tag is worse than
+        // an untagged line, which at least shows up in the untagged total.
+        task_id: "",
         itemResolution: lineResolutions?.[i] ?? null,
       }));
     return [blankLine("0")];
   });
+
+  // The document-level "apply to all" value. Held separately from the lines
+  // because it is a control, not a fact: after using it a single line can be
+  // re-tagged without this having to be cleared.
+  const [tagAll, setTagAll] = useState("");
+
+  // The tasks on whichever project is currently selected. Scoped the same way
+  // `next_week_by_project` is, and for the same reason: this form can change
+  // project, and offering another job's task list would let a line be filed
+  // against work it has nothing to do with. Empty — so the picker does not
+  // appear at all — until migration 0016 has been run and tasks exist.
+  const taskOptions = useMemo(() => {
+    const tasks = bundle.tasks_by_project?.[projectId] ?? [];
+    return tasks.map((t) => ({
+      value: t.id,
+      label: t.name,
+      hint: [t.phase_name, t.status === "Complete" ? "complete" : null]
+        .filter(Boolean)
+        .join(" · "),
+    }));
+  }, [bundle.tasks_by_project, projectId]);
+
+  // Open orders on the chosen project, this supplier's first (migration 0023).
+  //
+  // Ordered but never auto-selected. Sorting by supplier makes the right one
+  // easy to find; picking it automatically would tie an invoice to an order on
+  // a name match and then report a price variance that never happened. The
+  // reviewer chooses, and leaving it unmatched is a visible gap rather than a
+  // wrong answer. Empty — so the picker does not appear — until 0023 has been
+  // run and an order has been sent.
+  const orderOptions = useMemo(() => {
+    const orders = bundle.orders_by_project?.[projectId] ?? [];
+    const typed = normaliseName(header.supplier_name);
+    return orders
+      .slice()
+      .sort((a, b) => {
+        const mine = (o: (typeof orders)[number]) =>
+          typed !== "" && normaliseName(o.supplier_name ?? "") === typed ? 0 : 1;
+        return mine(a) - mine(b) || b.raised_on.localeCompare(a.raised_on);
+      })
+      .map((o) => ({
+        value: o.id,
+        label: o.po_number ?? `Order raised ${o.raised_on}`,
+        hint:
+          [o.supplier_name, PO_STATUS_LABELS[o.status]]
+            .filter(Boolean)
+            .join(" · ") || undefined,
+      }));
+  }, [bundle.orders_by_project, projectId, header.supplier_name]);
 
   const [payments, setPayments] = useState<PaymentState[]>(() => {
     if (purchase)
@@ -406,8 +480,28 @@ export default function PurchaseForm({
     () => round2(payments.reduce((sum, p) => sum + asNumber(p.amount), 0)),
     [payments]
   );
-  const balance = round2(totals.gross_total - paid);
-  const status = purchaseStatus(totals.gross_total, paid);
+  // Retention (migration 0019), derived exactly as lib/purchases.ts derives it
+  // on read — same formula, same rounding — so the figure shown while typing
+  // is the figure the invoice will report once saved.
+  //
+  // The balance and the status both measure against PAYABLE, not gross. An
+  // invoice with 5% held and 95% handed over is settled as far as anybody is
+  // owed anything; calling it "Partial" for the length of the defects period
+  // would put it on every chase list for a year. With no retention typed, all
+  // of this collapses to gross − paid, exactly as before.
+  const retention = useMemo(
+    () =>
+      retentionHeld({
+        gross_total: totals.gross_total,
+        retention_pct:
+          header.retention_pct === "" ? null : Number(header.retention_pct),
+        retention_released_on: header.retention_released_on || null,
+      }),
+    [totals.gross_total, header.retention_pct, header.retention_released_on]
+  );
+  const payableNow = round2(totals.gross_total - retention);
+  const balance = round2(payableNow - paid);
+  const status = purchaseStatus(payableNow, paid);
 
   const grossMismatch = useMemo(() => {
     const stated = asNumber(statedGross);
@@ -517,6 +611,12 @@ export default function PurchaseForm({
   function chooseProject(id: string) {
     setProjectId(id);
     setErrors((e) => ({ ...e, project_id: "" }));
+    // Task tags belong to a project and do not survive a change of one. Unlike
+    // the week number this is cleared unconditionally, typed or not: a task id
+    // from the previous project is not a stale default, it is a foreign key
+    // pointing at another job's work, and the server would refuse it anyway.
+    setTagAll("");
+    setLines((current) => current.map((l) => ({ ...l, task_id: "" })));
     if (weekTouched.current) return;
     setHeader((h) => ({
       ...h,
@@ -606,6 +706,13 @@ export default function PurchaseForm({
       location_room: header.location_room || null,
       notes: header.notes || null,
       entry_status: header.entry_status as PurchaseInput["entry_status"],
+      // Retention (0019). Blank stays blank all the way to the column, where
+      // NULL means "no retention on this invoice" — a different statement from
+      // "0% was held", and what keeps every pre-0019 figure identical.
+      retention_pct: header.retention_pct || null,
+      retention_release_due: header.retention_release_due || null,
+      retention_released_on: header.retention_released_on || null,
+      purchase_order_id: header.purchase_order_id || null,
       lines: lines.map((line) => ({
         id: line.id,
         // Null unless a review-screen item suggestion was confirmed (see
@@ -621,6 +728,7 @@ export default function PurchaseForm({
         unit_price: line.unit_price || 0,
         line_net: line.line_net || 0,
         vat_rate: line.vat_rate,
+        task_id: line.task_id || null,
       })),
       // A blank payment row is not a payment. Dropping them here means adding
       // a row and changing your mind cannot fail the save.
@@ -1024,6 +1132,36 @@ export default function PurchaseForm({
           </div>
         </div>
 
+        {/* Match this invoice back to the order it answers (migration 0023).
+            Only rendered when there are open orders on the chosen project.
+
+            Deliberately a SUGGESTION and never automatic: orders from this
+            supplier are listed first, but nothing is picked for you. Guessing
+            here would tie an invoice to the wrong order and then report a
+            price variance that never happened — worse than leaving it
+            unmatched, which is a visible gap. */}
+        {orderOptions.length > 0 ? (
+          <div className="mt-3">
+            <label className="label" htmlFor="purchase_order_id">
+              Against which order
+            </label>
+            <Select
+              id="purchase_order_id"
+              title="Purchase order"
+              placeholder="Not against an order"
+              clearable
+              value={header.purchase_order_id}
+              onChange={(v) => setField("purchase_order_id", v)}
+              options={orderOptions}
+            />
+            <p className="hint">
+              Matching it is what makes over-delivery and price creep visible —
+              the Orders screen then compares what was invoiced against what was
+              ordered.
+            </p>
+          </div>
+        ) : null}
+
         {duplicateInvoice && (
           <p className="field-warning">
             Invoice {duplicateInvoice.invoice_no} from this supplier is already
@@ -1112,7 +1250,14 @@ export default function PurchaseForm({
           className="mt-3 flex min-h-touch w-full items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 text-left text-sm font-semibold text-gray-700 transition active:bg-gray-50"
           aria-expanded={showMore}
         >
-          <span>Room and notes</span>
+          <span>
+            Room, notes and retention
+            {header.retention_pct ? (
+              <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-2xs font-bold text-amber-800">
+                {header.retention_pct}% held
+              </span>
+            ) : null}
+          </span>
           <Icon
             name={showMore ? "chevronUp" : "chevronDown"}
             size={18}
@@ -1120,32 +1265,130 @@ export default function PurchaseForm({
           />
         </button>
         {showMore && (
-          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label className="label" htmlFor="location_room">
-                Location / Room
-              </label>
-              <input
-                id="location_room"
-                className="input"
-                value={header.location_room}
-                onChange={(e) => setField("location_room", e.target.value)}
-                placeholder="e.g. Kitchen"
-              />
+          <>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="location_room">
+                  Location / Room
+                </label>
+                <input
+                  id="location_room"
+                  className="input"
+                  value={header.location_room}
+                  onChange={(e) => setField("location_room", e.target.value)}
+                  placeholder="e.g. Kitchen"
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="notes">
+                  Notes
+                </label>
+                <textarea
+                  id="notes"
+                  className="textarea"
+                  rows={2}
+                  value={header.notes}
+                  onChange={(e) => setField("notes", e.target.value)}
+                />
+              </div>
             </div>
-            <div>
-              <label className="label" htmlFor="notes">
-                Notes
+
+            {/* Retention (migration 0019).
+                Behind the collapsible because almost no invoice carries one —
+                a field on the main form that is blank 99 times out of 100 is
+                noise on a phone. The two dates only appear once a percentage
+                has been typed, because a release date with no percentage
+                describes nothing and the database refuses it. */}
+            <div className="mt-4 border-t border-gray-200/70 pt-4">
+              <label className="label" htmlFor="retention_pct">
+                Retention held back
               </label>
-              <textarea
-                id="notes"
-                className="textarea"
-                rows={2}
-                value={header.notes}
-                onChange={(e) => setField("notes", e.target.value)}
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  id="retention_pct"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  className={`input flex-1 ${
+                    errors.retention_pct ? "input-invalid" : ""
+                  }`}
+                  value={header.retention_pct}
+                  onChange={(e) => setField("retention_pct", e.target.value)}
+                  placeholder="None"
+                />
+                <span className="text-sm font-semibold text-gray-500">%</span>
+              </div>
+              {errors.retention_pct && (
+                <p className="field-error">{errors.retention_pct}</p>
+              )}
+              <p className="hint">
+                A percentage held back from a contractor until the defects
+                period is up. It is kept <strong>out of Owed</strong> — it is
+                money you agreed to hold, not a bill you are late paying.
+              </p>
+
+              {header.retention_pct ? (
+                <>
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="label" htmlFor="retention_due">
+                        Release due
+                      </label>
+                      <DatePicker
+                        id="retention_due"
+                        title="Retention release due"
+                        placeholder="Not agreed"
+                        value={header.retention_release_due}
+                        onChange={(v) => setField("retention_release_due", v)}
+                        invalid={Boolean(errors.retention_release_due)}
+                      />
+                      <p className="hint">
+                        The dashboard lists retentions past this date. One
+                        nobody reclaims is a discount you gave away.
+                      </p>
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="retention_released">
+                        Released on
+                      </label>
+                      <DatePicker
+                        id="retention_released"
+                        title="Retention released on"
+                        placeholder="Still held"
+                        value={header.retention_released_on}
+                        onChange={(v) => setField("retention_released_on", v)}
+                        invalid={Boolean(errors.retention_released_on)}
+                      />
+                      <p className="hint">
+                        Filling this in moves the money back into Owed, where it
+                        then genuinely belongs.
+                      </p>
+                    </div>
+                  </div>
+
+                  {retention > 0 ? (
+                    <div className="mt-3 rounded-2xl bg-amber-50 px-4 py-3 text-[0.8125rem] leading-relaxed text-amber-900 ring-1 ring-inset ring-amber-600/20">
+                      <span className="tnum font-bold">
+                        {formatCurrency(retention)}
+                      </span>{" "}
+                      held back of {formatCurrency(totals.gross_total)}.{" "}
+                      <span className="tnum font-bold">
+                        {formatCurrency(payableNow)}
+                      </span>{" "}
+                      is payable now.
+                    </div>
+                  ) : header.retention_released_on ? (
+                    <p className="mt-3 text-[0.8125rem] text-gray-500">
+                      Released — the full {formatCurrency(totals.gross_total)} is
+                      payable.
+                    </p>
+                  ) : null}
+                </>
+              ) : null}
             </div>
-          </div>
+          </>
         )}
       </fieldset>
 
@@ -1153,6 +1396,35 @@ export default function PurchaseForm({
       <fieldset className="card">
         <legend className="eyebrow mb-2.5">What was on it</legend>
         {errors.lines && <p className="field-error">{errors.lines}</p>}
+
+        {/* Convenience, not a second source of truth: this writes the SAME
+            per-line task_id onto every line. The document itself is never
+            tagged, so there is exactly one level a per-task total is summed
+            from and it cannot double-count. Most invoices are one job's worth
+            of materials, so this is one tap for the common case. */}
+        {taskOptions.length > 1 || (taskOptions.length === 1 && lines.length > 1) ? (
+          <div className="mb-3 flex flex-wrap items-end gap-2 rounded-xl bg-gray-100 p-3">
+            <div className="min-w-0 flex-1">
+              <label className="label" htmlFor="tag-all-lines">
+                Tag the whole invoice to one task
+              </label>
+              <Select
+                id="tag-all-lines"
+                title="Task for every line"
+                placeholder="Pick a task"
+                clearable
+                value={tagAll}
+                onChange={(v) => {
+                  setTagAll(v);
+                  setLines((current) =>
+                    current.map((l) => ({ ...l, task_id: v }))
+                  );
+                }}
+                options={taskOptions}
+              />
+            </div>
+          </div>
+        ) : null}
 
         <div className="space-y-3">
           {lines.map((line, index) => {
@@ -1299,6 +1571,27 @@ export default function PurchaseForm({
                       </p>
                     )}
                   </div>
+
+                  {/* The task tag. Deliberately here, on the line, beside the
+                      figures — not in a separate step. A tag that is optional
+                      and buried gets skipped, and then every task reports a
+                      budget against a cost of nothing. */}
+                  {taskOptions.length > 0 ? (
+                    <div className="col-span-2 sm:col-span-12">
+                      <label className="label" htmlFor={`${line.key}-task`}>
+                        Part of which task?
+                      </label>
+                      <Select
+                        id={`${line.key}-task`}
+                        title="Task"
+                        placeholder="Not tagged"
+                        clearable
+                        value={line.task_id}
+                        onChange={(v) => updateLine(line.key, { task_id: v })}
+                        options={taskOptions}
+                      />
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* What this line will be filed under. */}
@@ -1612,6 +1905,19 @@ export default function PurchaseForm({
             {formatCurrency(paid)}
           </span>
         </div>
+        {/* Its own line, above the total and never inside it (0019). A
+            retention that is added back into "still owed" is exactly the
+            situation this feature exists to end. */}
+        {retention > 0 ? (
+          <div className="mt-1.5 flex justify-between gap-3">
+            <span className="text-brand-900/60">
+              Retention held ({header.retention_pct}%)
+            </span>
+            <span className="tnum font-semibold text-brand-900">
+              −{formatCurrency(retention)}
+            </span>
+          </div>
+        ) : null}
         <div className="mt-3 flex items-center justify-between gap-3 border-t border-brand-600/10 pt-3">
           <span className="flex items-center gap-2 text-sm font-bold text-brand-900">
             Still owed

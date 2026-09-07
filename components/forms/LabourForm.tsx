@@ -16,6 +16,8 @@ import {
   EXPENSE_STATUSES,
   PAYMENT_METHODS,
   VAT_RATES,
+  type Contact,
+  type TaskRef,
   type TradeLookup,
 } from "@/types";
 
@@ -42,6 +44,14 @@ import {
 interface Props {
   projectId: string;
   trades: TradeLookup[];
+  // The project's tasks, for the task tag. Empty until migration 0016 has been
+  // run, in which case the field does not appear.
+  tasks?: TaskRef[];
+  /**
+   * The people register (migration 0020), for the "pick somebody" shortcut.
+   * Empty when 0020 has not been run — the picker simply does not appear.
+   */
+  contacts?: Contact[];
   // Where Save and Cancel should land. Validated by the page before it gets
   // here, and validated again on the way to router.push() — a redirect target
   // is the kind of thing that should fail closed twice.
@@ -59,6 +69,7 @@ const blank = () => ({
   // unanswered field looking answered.
   vat_rate: "0",
   status: "Planned" as (typeof EXPENSE_STATUSES)[number],
+  task_id: "",
   notes: "",
   paid_on: todayISO(),
   payment_method: "",
@@ -70,7 +81,13 @@ const asNumber = (value: string): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
-export default function LabourForm({ projectId, trades, returnTo }: Props) {
+export default function LabourForm({
+  projectId,
+  trades,
+  tasks = [],
+  contacts = [],
+  returnTo,
+}: Props) {
   const router = useRouter();
   const toast = useToast();
 
@@ -84,6 +101,33 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
   // The formula is a convenience, not a constraint.
   const [totalTouched, setTotalTouched] = useState(false);
   const [amountTouched, setAmountTouched] = useState(false);
+  // Which person was picked from the register, if any (migration 0020). Held
+  // separately because it is not saved anywhere — labour carries a NAME, not a
+  // contact id, and changing that would rewrite how every existing labour row
+  // is read (about.md §6.6.1).
+  const [contactId, setContactId] = useState("");
+
+  /**
+   * Fill the name, trade and rate from somebody in the register.
+   *
+   * The hourly rate is preferred over the day rate because this form is
+   * rate × HOURS. Dividing a day rate by eight to fill the field would be
+   * inventing a number: an eight-hour day is an assumption, and the figure
+   * would then be stored as though it had been agreed.
+   */
+  function pickContact(id: string) {
+    setContactId(id);
+    if (!id) return;
+    const person = contacts.find((c) => c.id === id);
+    if (!person) return;
+    setForm((f) => ({
+      ...f,
+      name: person.name,
+      trade: f.trade || person.trades[0] || "",
+      rate:
+        person.hourly_rate !== null ? String(person.hourly_rate) : f.rate,
+    }));
+  }
 
   const safeTarget = safeReturnTo(returnTo);
   // Labour is a filter of the Analysis tab's line view, not a tab of its own.
@@ -167,6 +211,7 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
       total_pay: form.total_pay,
       vat_rate: form.vat_rate,
       status: form.status,
+      task_id: form.task_id || null,
       notes: form.notes.trim() || null,
       // Only sent when Paid. The other three statuses write no payment row at
       // all, so sending a date and a method would be describing something that
@@ -207,6 +252,50 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      {/* Pick somebody from the register, or keep typing (migration 0020).
+          This fills the name, the trade and the rate — it does NOT change how
+          any of it is stored. The name still goes on
+          `purchase_lines.description_raw` and no supplier row is created, so
+          typing a name freehand works exactly as it always has (about.md
+          §6.6.1). It is a shortcut, not a new requirement. */}
+      {contacts.length > 0 ? (
+        <div>
+          <label className="label" htmlFor="labour_contact">
+            Someone from the register
+          </label>
+          <Select
+            id="labour_contact"
+            title="Pick a person"
+            placeholder="Or just type a name below"
+            clearable
+            value={contactId}
+            onChange={pickContact}
+            options={contacts
+              .filter((c) => c.status === "active")
+              .map((c) => ({
+                value: c.id,
+                label: c.name,
+                hint:
+                  [
+                    c.trades.join(", ") || null,
+                    c.hourly_rate !== null
+                      ? `£${c.hourly_rate}/hr`
+                      : c.day_rate !== null
+                        ? `£${c.day_rate}/day`
+                        : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || undefined,
+              }))}
+          />
+          <p className="hint">
+            Fills the name, trade and rate. Nothing about how this is saved
+            changes — labour is still recorded against the job, not as a
+            supplier account.
+          </p>
+        </div>
+      ) : null}
+
       <div>
         <label className="label" htmlFor="labour_name">
           Name *
@@ -255,6 +344,30 @@ export default function LabourForm({ projectId, trades, returnTo }: Props) {
           {errors.status && <p className="field-error">{errors.status}</p>}
         </div>
       </div>
+
+      {/* Directly under the trade and status, which are the two fields already
+          filled in habitually — a tag placed anywhere further down is a tag
+          that gets skipped. */}
+      {tasks.length > 0 ? (
+        <div>
+          <label className="label" htmlFor="labour_task">
+            Part of which task?
+          </label>
+          <Select
+            id="labour_task"
+            title="Task"
+            placeholder="Not tagged"
+            clearable
+            value={form.task_id}
+            onChange={(v) => set("task_id", v)}
+            options={tasks.map((t) => ({
+              value: t.id,
+              label: t.name,
+              hint: t.phase_name ?? undefined,
+            }))}
+          />
+        </div>
+      ) : null}
 
       <fieldset className="card-sunken">
         <legend className="eyebrow mb-2.5">The work</legend>

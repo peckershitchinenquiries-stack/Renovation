@@ -12,6 +12,16 @@ export interface Project {
   target_budget: number;
   status: ProjectStatus;
   notes: string | null;
+  // ---- the schedule's calendar anchor (migrations 0016 and 0018) ----
+  // Both were in 0001, dropped by 0002 because nobody tracked them, and came
+  // back with the schedule. Nullable: an unanchored project simply shows no
+  // dates against its weeks, exactly as it did before.
+  start_date: string | null;
+  planned_end_date: string | null;
+  // ISO weekday numbers — 1 = Monday … 7 = Sunday. Defaults to Mon–Fri. The
+  // scheduling engine counts working days, so this is what makes a task that
+  // starts on a Friday and lasts three days finish on the Tuesday.
+  working_weekdays: number[];
   created_at: string;
   updated_at: string;
 }
@@ -40,6 +50,9 @@ export interface ExpenseEntry {
   vat_rate: number;
   status: ExpenseStatus;
   receipt_url: string | null;
+  // The hand-entered half of the money↔work join (migration 0017). A flat
+  // expense row is its own line, so the same line-level rule applies.
+  task_id: string | null;
   // 'diary'   = week-by-week Expenses entries (File 1 + anything added in-app).
   // 'ledger'  = imported reference rows (File 2) shown only in the Trades /
   //             Materials & Suppliers tabs, not in the week-by-week Expenses list.
@@ -260,6 +273,18 @@ export interface Purchase {
   quoted_gross: number | null;
   origin: PurchaseOrigin;
   entry_source: PurchaseEntrySource;
+  // ---- retention (migration 0019) ----
+  // The percentage held back from a contractor until the defects period is
+  // up. NULL, not 0, on every row that predates the feature — "no retention
+  // on this invoice" is a different statement from "0% was held", and it is
+  // what keeps every existing figure identical to the penny.
+  retention_pct: number | null;
+  retention_release_due: string | null;
+  // Non-null means it is no longer held, so the money goes back into Owed.
+  retention_released_on: string | null;
+  // Which order this invoice answers (migration 0023). Null on everything
+  // that was not raised as a PO first, which today is everything.
+  purchase_order_id: string | null;
   // The lifecycle flag copied from expense_entries.status — NOT a payment
   // state. 'Cancelled' rows are excluded from every summary.
   entry_status: ExpenseStatus;
@@ -282,6 +307,11 @@ export interface PurchaseLine {
   unit_price: number;
   line_net: number; // ex-VAT
   vat_rate: number; // one of VAT_RATES — 0, 5 or 20 (migration 0011)
+  // The join between the money half of the app and the schedule half
+  // (migration 0017). Line level is authoritative: a task's actual cost is the
+  // sum of the LINES tagged to it, never of whole documents, so there is one
+  // place to sum from and it cannot double-count.
+  task_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -309,7 +339,23 @@ export interface Receipt {
 // exactly like ExpenseEntryComputed).
 export interface PurchaseComputed extends Purchase {
   paid: number; // Σ payments.amount
-  balance: number; // gross_total − paid
+  // ---- retention (migration 0019), all derived and none of it stored ----
+  /** gross_total × retention_pct ÷ 100. Zero whenever no retention applies. */
+  retention_amount: number;
+  /** Still held: `retention_amount` until it is released, then 0. */
+  retention_held: number;
+  /** gross_total − retention_held — what is actually chaseable today. */
+  payable_now: number;
+  /**
+   * payable_now − paid.
+   *
+   * This is the one existing formula retention changes. With `retention_pct`
+   * null — every row before 0019 — `retention_held` is 0, `payable_now` is
+   * `gross_total`, and this is `gross_total − paid` exactly as it always was.
+   * A retention is NOT an unpaid bill and must never read as one; keeping it
+   * out of here is the whole of the feature.
+   */
+  balance: number;
   status: PurchaseStatus;
 }
 
@@ -326,7 +372,13 @@ export interface PurchaseTotals {
   purchase_count: number;
   gross: number;
   paid: number;
-  balance: number; // gross − paid
+  /**
+   * Σ retention still held (migration 0019). Reported BESIDE Owed, never
+   * inside it: a retention is money you agreed to hold, not a bill you are
+   * late paying, and adding the two back together undoes the feature.
+   */
+  retention_held: number;
+  balance: number; // payable_now − paid
 }
 
 export interface SupplierListRow {
@@ -419,6 +471,14 @@ export interface ItemBundle {
 // buildPurchaseRows in lib/purchaseWrite.ts, so the client and the server
 // coerce them the same way.
 
+/** Just enough of a task to name it in a picker, with its phase for context. */
+export interface TaskRef {
+  id: string;
+  name: string;
+  phase_name: string | null;
+  status: TaskStatus;
+}
+
 export interface PurchaseLineInput {
   // Present when editing a line that already exists. Not used as a key on
   // save — an edit replaces the whole line set — but it keeps the form and
@@ -433,6 +493,11 @@ export interface PurchaseLineInput {
   unit_price: number | string;
   line_net: number | string;
   vat_rate: number | string;
+  // Which piece of work this line paid for (migration 0017). Line level is
+  // authoritative: the form's "apply to all lines" control writes this same
+  // field on every line rather than tagging the document, so there is one
+  // place a per-task total can be summed from.
+  task_id?: string | null;
 }
 
 export interface PaymentInput {
@@ -456,6 +521,14 @@ export interface PurchaseInput {
   location_room: string | null;
   notes: string | null;
   entry_status: ExpenseStatus;
+  // ---- retention (migration 0019) ----
+  // Blank means no retention, which is what almost every invoice says. The
+  // form only shows the two dates once a percentage has been typed.
+  retention_pct?: number | string | null;
+  retention_release_due?: string | null;
+  retention_released_on?: string | null;
+  // Which order this invoice answers (migration 0023).
+  purchase_order_id?: string | null;
   lines: PurchaseLineInput[];
   payments: PaymentInput[];
 }
@@ -519,6 +592,30 @@ export interface PurchaseFormBundle {
   next_week: number;
   next_week_by_project: Record<string, number>;
   invoices: InvoiceRef[];
+  // Tasks per project, for the line-level task picker. Keyed by project for
+  // the same reason `next_week_by_project` is: the nav-bar invoice flow lets
+  // the project be changed on the form, and a task list from the wrong project
+  // is worse than none.
+  tasks_by_project: Record<string, TaskRef[]>;
+  /**
+   * Open purchase orders per project (migration 0023), for the "which order
+   * is this?" picker.
+   *
+   * Keyed by project for the same reason the two above are: the nav-bar
+   * invoice flow lets the project be changed on the form, and an order list
+   * from the wrong job is worse than none.
+   */
+  orders_by_project: Record<string, PurchaseOrderRef[]>;
+}
+
+/** Just enough of an order to recognise it in a picker. */
+export interface PurchaseOrderRef {
+  id: string;
+  po_number: string | null;
+  supplier_id: string | null;
+  supplier_name: string | null;
+  raised_on: string;
+  status: PoStatus;
 }
 
 // Just enough of a project to name it in a dropdown.
@@ -719,6 +816,10 @@ export interface InvoiceLineView {
   supplier_id: string | null;
   supplier: string; // "No supplier" when the header has none
   item_id: string | null;
+  // Which piece of work this line paid for (migration 0017). Null on every
+  // line until somebody tags it, which is why every screen that reports per
+  // task also reports the untagged total — see lib/scheduleCosts.ts.
+  task_id: string | null;
   // The canonical item name when the line was matched to one, otherwise the
   // description exactly as the document wrote it. Never blank.
   item_name: string;
@@ -806,6 +907,1046 @@ export interface ItemPriceRow {
   trend: PriceMove;
   last_date: string | null;
   points: ItemPriceRowPoint[]; // oldest → newest
+}
+
+// ============================================================
+// The schedule (migrations 0016–0018) — phases, tasks, dependencies,
+// baselines and the revision log.
+// ============================================================
+// This is the second half of the application: the first half tracks money,
+// this one tracks time, and `task_id` on a purchase line is the whole of the
+// join between them.
+//
+// The rule that governs everything below, stated once (about.md §15):
+// `duration_days` is AUTHORITATIVE and the planned dates are derived from it
+// plus the dependency constraints — except for a task with no predecessors,
+// where `planned_start` is the anchor. Setting a date on a task that has
+// predecessors is an anchor, not a fact: the scheduler may move it.
+
+export const TASK_STATUSES = [
+  "Not started",
+  "In progress",
+  "Blocked",
+  "Complete",
+  "Cancelled",
+] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+// Deliberately NOT ExpenseStatus. A task is not a payment: 'Paid' is
+// meaningless for a piece of work, and 'In Progress' means a different thing
+// on each. Two lists, mirroring two separate CHECK constraints.
+
+export const DEP_TYPES = ["FS", "SS", "FF", "SF"] as const;
+export type DepType = (typeof DEP_TYPES)[number];
+
+/** What each dependency type actually constrains, for the picker's hint line. */
+export const DEP_TYPE_LABELS: Record<DepType, string> = {
+  FS: "Finish → start",
+  SS: "Start → start",
+  FF: "Finish → finish",
+  SF: "Start → finish",
+};
+
+export const REASON_CODES = [
+  "material_delay",
+  "weather",
+  "client_change",
+  "trade_no_show",
+  "scope_change",
+  "other",
+] as const;
+export type ReasonCode = (typeof REASON_CODES)[number];
+
+export const REASON_CODE_LABELS: Record<ReasonCode, string> = {
+  material_delay: "Material delay",
+  weather: "Weather",
+  client_change: "Client change",
+  trade_no_show: "Trade no-show",
+  scope_change: "Scope change",
+  other: "Other",
+};
+
+// 'manual'   — a person changed this task themselves
+// 'knock_on' — the scheduler moved it because something upstream moved
+export const SHIFT_SOURCES = ["manual", "knock_on"] as const;
+export type ShiftSource = (typeof SHIFT_SOURCES)[number];
+
+export const PHASE_COLOURS = [
+  "slate",
+  "emerald",
+  "amber",
+  "blue",
+  "violet",
+  "rose",
+  "teal",
+  "orange",
+] as const;
+export type PhaseColour = (typeof PHASE_COLOURS)[number];
+
+export interface ProjectPhase {
+  id: string;
+  user_id: string;
+  project_id: string;
+  name: string;
+  sort_order: number;
+  colour: PhaseColour | null;
+  // The phase's own target. Its ACTUAL dates are min/max over its tasks and
+  // are derived on read (phaseActualDates) — never stored.
+  target_start: string | null;
+  target_end: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Task {
+  id: string;
+  user_id: string;
+  project_id: string;
+  phase_id: string | null;
+  name: string;
+  // Free text matched against trade_lookups.name by convention only — no FK,
+  // exactly like purchases.trade.
+  trade: string | null;
+  // Reserved by 0016; gets its foreign key to `contacts` in Phase 5.
+  assignee_contact_id: string | null;
+  planned_start: string | null;
+  planned_end: string | null;
+  actual_start: string | null;
+  actual_end: string | null;
+  duration_days: number | null;
+  // Hand-entered. The cost-based figure is shown beside it, never instead.
+  progress_pct: number;
+  status: TaskStatus;
+  // EX-VAT, to match line_net. Compared against net cost, never gross.
+  budget_amount: number | null;
+  weather_sensitive: boolean;
+  lead_time_days: number | null;
+  // A time-based hire (scaffold), for the cost impact of a delay.
+  hire_daily_rate: number | null;
+  notes: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskDependency {
+  id: string;
+  user_id: string;
+  project_id: string;
+  predecessor_id: string;
+  successor_id: string;
+  dep_type: DepType;
+  // Negative is a lead, which is ordinary on a renovation.
+  lag_days: number;
+  /**
+   * The predecessor must be SIGNED OFF, not merely finished (migration 0020).
+   *
+   * This is the spec's own example — "the plasterer can't start until first
+   * fix is signed off" — and it is a different constraint from a finish date.
+   * A finished-but-unsigned predecessor leaves the successor `is_blocked`.
+   */
+  requires_signoff: boolean;
+  created_at: string;
+}
+
+export interface TaskBaseline {
+  id: string;
+  user_id: string;
+  project_id: string;
+  task_id: string;
+  baseline_name: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  duration_days: number | null;
+  // The budget is baselined too — otherwise "budget drift" has nothing to
+  // drift from.
+  budget_amount: number | null;
+  captured_at: string;
+  captured_by: string | null;
+}
+
+export interface TaskRevision {
+  id: string;
+  user_id: string;
+  project_id: string;
+  task_id: string;
+  changed_at: string;
+  changed_by: string | null;
+  field: string;
+  // Text, not typed values: this is a log, not a calculation input.
+  old_value: string | null;
+  new_value: string | null;
+  reason_code: ReasonCode | null;
+  reason_note: string | null;
+  shift_source: ShiftSource;
+}
+
+export interface ProjectHoliday {
+  id: string;
+  user_id: string;
+  project_id: string;
+  holiday_date: string;
+  name: string | null;
+  created_at: string;
+}
+
+/**
+ * Which days count as working days.
+ *
+ * `working_weekdays` is ISO numbering — 1 = Monday … 7 = Sunday — the same
+ * convention the database column uses. Holidays are ISO date strings.
+ */
+export interface WorkCalendar {
+  working_weekdays: number[];
+  holidays: string[];
+}
+
+// `DEFAULT_WORK_CALENDAR` deliberately lives in lib/schedule.ts, not here.
+// That module is covered by lib/schedule.test.mts, which runs under
+// `node --experimental-strip-types`: type-only imports are erased, but a
+// runtime import of a `const` from "@/types" would have to resolve the path
+// alias, which the bare Node runner cannot do. Keeping the engine's one
+// runtime constant beside the engine is what keeps it testable.
+
+// ---- computed read models (lib/schedule.ts) — none of this is stored ----
+
+/**
+ * One task with everything the scheduler worked out about it.
+ *
+ * `early_*` / `late_*` are the classic forward/backward pass results. Float is
+ * in WORKING days, not calendar days: "four days of slack" over a weekend
+ * means four days someone could actually be on site.
+ */
+export interface ScheduledTask extends Task {
+  // What the engine computed, which may differ from planned_start/end when a
+  // dependency constrains the task. These are what the Gantt draws.
+  computed_start: string | null;
+  computed_end: string | null;
+  early_start: string | null;
+  early_finish: string | null;
+  late_start: string | null;
+  late_finish: string | null;
+  // late_start − early_start, in working days. Null when the task has no
+  // dates to compute from.
+  total_float: number | null;
+  free_float: number | null;
+  is_critical: boolean;
+  // True when a predecessor is not yet complete — the difference between
+  // "could start today" and "waiting on someone".
+  is_blocked: boolean;
+  /**
+   * WHY it is blocked, so the badge can say so (migration 0020).
+   *
+   * 'predecessor' — something upstream is not finished.
+   * 'signoff'     — everything upstream IS finished, but a link that requires
+   *                 sign-off has not been signed. That is a different problem
+   *                 with a different fix, and a badge saying only "Blocked"
+   *                 sends somebody to chase the wrong person.
+   */
+  blocked_reason: "predecessor" | "signoff" | null;
+  /** The latest sign-off on this task, if any. Null means never signed. */
+  signoff: TaskSignoff | null;
+  predecessor_ids: string[];
+  successor_ids: string[];
+  // Days late (positive) or early (negative) against the captured baseline.
+  // Null when no baseline exists for this task.
+  drift_start_days: number | null;
+  drift_end_days: number | null;
+}
+
+export interface ScheduleResult {
+  tasks: ScheduledTask[];
+  // The latest computed finish across every task. Null when nothing is dated.
+  completion: string | null;
+  baseline_completion: string | null;
+  // completion vs baseline_completion, in working days. Positive is late.
+  completion_drift_days: number | null;
+  // Named as a path when one exists, so the header can say what is driving it.
+  critical_task_ids: string[];
+  // A dependency loop, if the stored graph contains one. The engine refuses to
+  // schedule rather than looping for ever, and the UI says which tasks.
+  cycle: string[] | null;
+}
+
+/** Everything the Schedule tab reads, in one server pass. */
+export interface ScheduleBundle {
+  project: Project;
+  phases: ProjectPhase[];
+  tasks: Task[];
+  dependencies: TaskDependency[];
+  // The current baseline set only — the newest `baseline_name` captured.
+  baseline: TaskBaseline[];
+  baseline_name: string | null;
+  revisions: TaskRevision[];
+  // Every sign-off on this project, newest first (migration 0020). The engine
+  // needs them to answer `requires_signoff` links; the UI needs them to show
+  // who signed what.
+  signoffs: TaskSignoff[];
+  calendar: WorkCalendar;
+}
+
+// ---- Phase 2: cost tied to the schedule (lib/scheduleCosts.ts) ----
+
+/**
+ * Budget vs money, per task. All EX-VAT on the budget side and labelled as
+ * such on screen: `budget_amount` is ex-VAT to match `line_net`, and comparing
+ * it against an incl-VAT cost is the double-VAT error this codebase has
+ * already made once.
+ */
+export interface TaskCostRow {
+  task_id: string;
+  task_name: string;
+  phase_id: string | null;
+  budget: number; // ex-VAT target, 0 when none set
+  committed: number; // Σ quoted_gross of the documents touching this task
+  net: number; // ex-VAT actual — the figure `budget` is comparable with
+  gross: number; // incl-VAT actual, for the money columns
+  paid: number;
+  owed: number; // gross − paid
+  variance: number; // net − budget. Positive is over.
+  variance_pct: number | null; // null when there is no budget to compare to
+  line_count: number;
+}
+
+/** The same, rolled up per phase, plus the bucket everything untagged lands in. */
+export interface PhaseCostRow extends Omit<TaskCostRow, "task_id" | "task_name"> {
+  phase_id: string | null;
+  phase_name: string;
+  task_count: number;
+}
+
+/**
+ * The project total — and the untagged figure, which is the whole reason this
+ * type exists. A project can look perfectly on budget because half its spend
+ * is invisible to the roll-up; one number on screen is the counter to that.
+ */
+export interface ProjectCostRollup {
+  budget: number;
+  net: number;
+  gross: number;
+  paid: number;
+  owed: number;
+  variance: number;
+  tagged_line_count: number;
+  untagged_line_count: number;
+  untagged_net: number;
+  untagged_gross: number;
+}
+
+/**
+ * What extending a task by N days is likely to cost.
+ *
+ * It only claims what it can evidence. `basis` says which rate was used, and
+ * when there is no rate on file the chip says so rather than showing £0 —
+ * a delay that reads as free is worse than no estimate at all.
+ */
+export interface CostImpact {
+  days: number;
+  hire_cost: number;
+  labour_cost: number;
+  total: number;
+  // Human-readable working, e.g. "scaffold £60/day × 3" — shown on the chip.
+  basis: string[];
+  // True when nothing on file could price this delay.
+  unpriced: boolean;
+}
+
+// ---- Phase 8: portfolio reporting (lib/portfolio.ts) ----
+
+/**
+ * How one project is doing, on the two axes that matter.
+ *
+ * There are TWO percentages and both are named, always. `pct_complete` is the
+ * duration-weighted mean of hand-entered task progress; `pct_cost` is spend
+ * against budget. Showing one number that silently means the other is the
+ * classic renovation reporting error.
+ */
+export interface ProjectHealth {
+  project_id: string;
+  project_name: string;
+  status: ProjectStatus;
+  pct_complete: number;
+  pct_cost: number | null; // null when nothing is budgeted
+  // Positive = behind. Working days, against the baseline where one exists.
+  days_variance: number | null;
+  // Which yardstick days_variance used, so the screen can say so.
+  variance_basis: "baseline" | "planned_end_date" | "none";
+  completion: string | null;
+  budget: number;
+  cost: number;
+  budget_variance: number;
+  task_count: number;
+  critical_count: number;
+  // Tasks whose order-by date (planned_start − lead_time_days) is within the
+  // next fortnight — how joinery and windows slip.
+  order_soon_count: number;
+}
+
+// ---- write models — what the forms send ----
+
+export interface TaskInput {
+  phase_id?: string | null;
+  name: string;
+  trade?: string | null;
+  /** Who is doing it (migration 0020). Blank means nobody yet. */
+  assignee_contact_id?: string | null;
+  planned_start?: string | null;
+  planned_end?: string | null;
+  actual_start?: string | null;
+  actual_end?: string | null;
+  duration_days?: number | string | null;
+  progress_pct?: number | string;
+  status: TaskStatus;
+  budget_amount?: number | string | null;
+  weather_sensitive?: boolean;
+  lead_time_days?: number | string | null;
+  hire_daily_rate?: number | string | null;
+  notes?: string | null;
+  sort_order?: number | string;
+  // Required by the API when a dated field moves on a task that has a
+  // baseline — the log is worthless if it is optional.
+  reason_code?: ReasonCode | "" | null;
+  reason_note?: string | null;
+}
+
+export interface PhaseInput {
+  name: string;
+  sort_order?: number | string;
+  colour?: PhaseColour | "" | null;
+  target_start?: string | null;
+  target_end?: string | null;
+  notes?: string | null;
+}
+
+export interface DependencyInput {
+  predecessor_id: string;
+  successor_id: string;
+  dep_type: DepType;
+  lag_days?: number | string;
+  requires_signoff?: boolean;
+}
+
+/**
+ * One task moved, and what it does to everything downstream.
+ *
+ * The same request shape is sent twice — once with `confirm: false` for the
+ * preview and once with `confirm: true` to save — so the preview can never
+ * disagree with what actually gets written.
+ */
+export interface ShiftRequest {
+  task_id: string;
+  planned_start: string | null;
+  planned_end: string | null;
+  duration_days?: number | string | null;
+  reason_code?: ReasonCode | "" | null;
+  reason_note?: string | null;
+  confirm: boolean;
+}
+
+/** One task the auto-shift would move, as shown in the confirm dialog. */
+export interface ShiftPreviewRow {
+  task_id: string;
+  task_name: string;
+  from_start: string | null;
+  to_start: string | null;
+  from_end: string | null;
+  to_end: string | null;
+  days: number;
+  // False for the task the user actually edited; true for everything the
+  // scheduler moved as a consequence. Written to task_revisions as
+  // shift_source = 'knock_on'.
+  knock_on: boolean;
+}
+
+export interface ShiftPreview {
+  rows: ShiftPreviewRow[];
+  completion_before: string | null;
+  completion_after: string | null;
+  completion_days: number;
+  cost_impact: CostImpact;
+  // Populated when the edit would create a dependency loop. Nothing is saved.
+  cycle: string[] | null;
+}
+
+// ============================================================
+// Track B — people, documents, communication and the money gaps
+// (migrations 0019–0024)
+// ============================================================
+// Independent of the schedule chain: none of this is needed to draw a Gantt,
+// and the Gantt is not needed to use any of it. Each const array below mirrors
+// a CHECK constraint, and the two change together, always (about.md §2 rule 4).
+
+// ---- Phase 5: people & trades (0020) ----
+
+export const CONTACT_STATUSES = ["active", "inactive"] as const;
+export type ContactStatus = (typeof CONTACT_STATUSES)[number];
+
+export const CERTIFICATION_KINDS = [
+  "Public liability",
+  "Employers liability",
+  "Gas Safe",
+  "NICEIC",
+  "Part P",
+  "CSCS",
+  "Other",
+] as const;
+export type CertificationKind = (typeof CERTIFICATION_KINDS)[number];
+
+export const SIGNOFF_OUTCOMES = [
+  "approved",
+  "rejected",
+  "approved_with_snags",
+] as const;
+export type SignoffOutcome = (typeof SIGNOFF_OUTCOMES)[number];
+
+export const SIGNOFF_OUTCOME_LABELS: Record<SignoffOutcome, string> = {
+  approved: "Approved",
+  rejected: "Rejected",
+  approved_with_snags: "Approved with snags",
+};
+
+/**
+ * A person — a subcontractor, a tradesman, an architect.
+ *
+ * NOT a supplier. Labour is logged against a person's name on a purchase line
+ * with no supplier row created (about.md §6.6.1); putting Dave Builder in
+ * `suppliers` would put him on the merchant screen with a trade account.
+ * `supplier_id` is the optional bridge for the one real overlap — somebody who
+ * also invoices as a limited company.
+ */
+export interface Contact {
+  id: string;
+  user_id: string;
+  name: string;
+  company: string | null;
+  // A person does more than one trade. Matched against trade_lookups.name by
+  // convention only, exactly like tasks.trade — no foreign key.
+  trades: string[];
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  day_rate: number | null;
+  hourly_rate: number | null;
+  supplier_id: string | null;
+  status: ContactStatus;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContactCertification {
+  id: string;
+  user_id: string;
+  contact_id: string;
+  kind: CertificationKind;
+  reference: string | null;
+  issued_on: string | null;
+  expires_on: string | null;
+  // The scan, once one is uploaded (0021).
+  document_id: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Whether a certificate is any good today. Derived on read in
+ * lib/certifications.ts, never stored — a stored "expired" flag is wrong the
+ * morning after it is written.
+ */
+export type ExpiryState = "valid" | "expiring_soon" | "expired" | "unknown";
+
+export interface CertificationView extends ContactCertification {
+  state: ExpiryState;
+  /** Negative once it has expired. Null when there is no expiry date. */
+  days_remaining: number | null;
+  contact_id: string;
+  contact_name: string;
+}
+
+/**
+ * Who said a stage was done, and when.
+ *
+ * It RECORDS and enforces nothing. This workspace has no roles: since 0015,
+ * signing in is the entire authorisation model (about.md §9.1). The name of
+ * the feature implies otherwise, so it is said here, in the migration, and on
+ * the screen.
+ */
+export interface TaskSignoff {
+  id: string;
+  user_id: string;
+  project_id: string;
+  task_id: string;
+  signed_by: string | null;
+  signed_at: string;
+  outcome: SignoffOutcome;
+  note: string | null;
+}
+
+/** One person, with everything hanging off them. */
+export interface ContactBundle {
+  contact: Contact;
+  certifications: CertificationView[];
+  supplier_name: string | null;
+  // Work assigned to them, across every project.
+  tasks: { task: Task; project_id: string; project_name: string | null }[];
+  /**
+   * Labour paid to this person. Matched on the NAME written on the invoice
+   * line, because that is how labour has always been recorded (about.md
+   * §6.6.1) and nothing retro-tags the history. Shown with that caveat.
+   */
+  labour_net: number;
+  labour_line_count: number;
+}
+
+export interface ContactListRow {
+  contact: Contact;
+  task_count: number;
+  /** The worst state across their certificates — what the row's chip shows. */
+  worst_state: ExpiryState;
+  expiring_count: number;
+  expired_count: number;
+}
+
+export interface ContactInput {
+  name: string;
+  company?: string | null;
+  trades?: string[];
+  phone?: string | null;
+  email?: string | null;
+  address?: string | null;
+  day_rate?: number | string | null;
+  hourly_rate?: number | string | null;
+  supplier_id?: string | null;
+  status?: ContactStatus;
+  notes?: string | null;
+}
+
+export interface CertificationInput {
+  kind: CertificationKind;
+  reference?: string | null;
+  issued_on?: string | null;
+  expires_on?: string | null;
+  document_id?: string | null;
+  notes?: string | null;
+}
+
+export interface SignoffInput {
+  outcome: SignoffOutcome;
+  note?: string | null;
+}
+
+// ---- Phase 6: documents & photos (0021) ----
+
+export const DOC_TYPES = [
+  "planning",
+  "building_control",
+  "warranty",
+  "certificate",
+  "drawing",
+  "spec",
+  "contract",
+  "photo",
+  "other",
+] as const;
+export type DocType = (typeof DOC_TYPES)[number];
+
+export const DOC_TYPE_LABELS: Record<DocType, string> = {
+  planning: "Planning",
+  building_control: "Building control",
+  warranty: "Warranty",
+  certificate: "Certificate",
+  drawing: "Drawing",
+  spec: "Spec",
+  contract: "Contract",
+  photo: "Photo",
+  other: "Other",
+};
+
+export interface ProjectDocument {
+  id: string;
+  user_id: string;
+  // Nullable: a company insurance certificate is not one project's.
+  project_id: string | null;
+  doc_type: DocType;
+  title: string;
+  storage_path: string;
+  mime_type: string | null;
+  size_bytes: number | null;
+  issued_on: string | null;
+  expires_on: string | null;
+  reference: string | null;
+  phase_id: string | null;
+  task_id: string | null;
+  contact_id: string | null;
+  snag_id: string | null;
+  // The CAPTURE date, distinct from the upload date — a photo's real position
+  // on the timeline.
+  taken_at: string | null;
+  location_room: string | null;
+  version_no: number;
+  supersedes_id: string | null;
+  /**
+   * The one derived value this codebase stores on purpose (about.md §19).
+   * Maintained by a trigger in 0021, never by application code, so it cannot
+   * drift from the chain it describes.
+   */
+  is_current: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentView extends ProjectDocument {
+  state: ExpiryState;
+  days_remaining: number | null;
+  phase_name: string | null;
+  task_name: string | null;
+  contact_name: string | null;
+  /** How many versions exist in this document's chain, including itself. */
+  version_count: number;
+}
+
+export interface DocumentBundle {
+  project: Project;
+  documents: DocumentView[];
+  phases: { id: string; name: string }[];
+  tasks: { id: string; name: string }[];
+  contacts: { id: string; name: string }[];
+}
+
+export interface DocumentInput {
+  project_id?: string | null;
+  doc_type: DocType;
+  title: string;
+  issued_on?: string | null;
+  expires_on?: string | null;
+  reference?: string | null;
+  phase_id?: string | null;
+  task_id?: string | null;
+  contact_id?: string | null;
+  snag_id?: string | null;
+  taken_at?: string | null;
+  location_room?: string | null;
+  notes?: string | null;
+  /** Set when this upload is a new revision of an existing document. */
+  supersedes_id?: string | null;
+}
+
+// ---- Phase 7: communication (0022) ----
+
+export const ACTIVITY_KINDS = [
+  "call",
+  "site_visit",
+  "decision",
+  "email",
+  "meeting",
+  "note",
+] as const;
+export type ActivityKind = (typeof ACTIVITY_KINDS)[number];
+
+export const ACTIVITY_KIND_LABELS: Record<ActivityKind, string> = {
+  call: "Call",
+  site_visit: "Site visit",
+  decision: "Decision",
+  email: "Email",
+  meeting: "Meeting",
+  note: "Note",
+};
+
+export interface ActivityEntry {
+  id: string;
+  user_id: string;
+  project_id: string;
+  // When it HAPPENED, not when it was typed.
+  occurred_at: string;
+  kind: ActivityKind;
+  summary: string;
+  detail: string | null;
+  contact_id: string | null;
+  task_id: string | null;
+  phase_id: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface ActivityView extends ActivityEntry {
+  contact_name: string | null;
+  task_name: string | null;
+  phase_name: string | null;
+}
+
+export interface ActivityInput {
+  occurred_at?: string | null;
+  kind: ActivityKind;
+  summary: string;
+  detail?: string | null;
+  contact_id?: string | null;
+  task_id?: string | null;
+  phase_id?: string | null;
+}
+
+export const SNAG_STATUSES = ["open", "fixed", "verified", "wont_fix"] as const;
+export type SnagStatus = (typeof SNAG_STATUSES)[number];
+
+export const SNAG_STATUS_LABELS: Record<SnagStatus, string> = {
+  open: "Open",
+  fixed: "Fixed",
+  verified: "Verified",
+  wont_fix: "Won't fix",
+};
+
+export const SNAG_SEVERITIES = ["minor", "major", "safety"] as const;
+export type SnagSeverity = (typeof SNAG_SEVERITIES)[number];
+
+export const SNAG_SEVERITY_LABELS: Record<SnagSeverity, string> = {
+  minor: "Minor",
+  major: "Major",
+  safety: "Safety",
+};
+
+export interface Snag {
+  id: string;
+  user_id: string;
+  project_id: string;
+  title: string;
+  description: string | null;
+  location_room: string | null;
+  phase_id: string | null;
+  task_id: string | null;
+  // Who is responsible for putting it right.
+  contact_id: string | null;
+  status: SnagStatus;
+  severity: SnagSeverity;
+  raised_on: string;
+  fixed_on: string | null;
+  verified_on: string | null;
+  verified_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SnagView extends Snag {
+  contact_name: string | null;
+  task_name: string | null;
+  phase_name: string | null;
+  photos: ProjectDocument[];
+}
+
+export interface SnagInput {
+  title: string;
+  description?: string | null;
+  location_room?: string | null;
+  phase_id?: string | null;
+  task_id?: string | null;
+  contact_id?: string | null;
+  status: SnagStatus;
+  severity: SnagSeverity;
+  raised_on?: string | null;
+  fixed_on?: string | null;
+  verified_on?: string | null;
+}
+
+/** Everything the Log screen reads, in one server pass. */
+export interface CommunicationBundle {
+  project: Project;
+  activity: ActivityView[];
+  snags: SnagView[];
+  phases: { id: string; name: string }[];
+  tasks: { id: string; name: string }[];
+  contacts: { id: string; name: string }[];
+}
+
+// ---- Track B / B3: purchase orders (0023) ----
+
+export const PO_STATUSES = [
+  "draft",
+  "sent",
+  "part_received",
+  "received",
+  "cancelled",
+] as const;
+export type PoStatus = (typeof PO_STATUSES)[number];
+
+export const PO_STATUS_LABELS: Record<PoStatus, string> = {
+  draft: "Draft",
+  sent: "Sent",
+  part_received: "Part received",
+  received: "Received",
+  cancelled: "Cancelled",
+};
+
+/**
+ * An order you raised — an intention, not money.
+ *
+ * Nothing here feeds Committed, Cost, Paid or Owed. Only the invoice that
+ * follows is spend, and `purchases.purchase_order_id` is how the two are
+ * matched so over-delivery and price creep are visible.
+ */
+export interface PurchaseOrder {
+  id: string;
+  user_id: string;
+  project_id: string;
+  supplier_id: string | null;
+  po_number: string | null;
+  raised_on: string;
+  expected_delivery: string | null;
+  status: PoStatus;
+  task_id: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PurchaseOrderLine {
+  id: string;
+  user_id: string;
+  po_id: string;
+  line_no: number;
+  item_id: string | null;
+  description: string;
+  qty_ordered: number;
+  qty_received: number;
+  unit: string | null;
+  unit_price: number;
+  vat_rate: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One line, with its arithmetic. Nothing below is a column. */
+export interface PurchaseOrderLineView extends PurchaseOrderLine {
+  line_net: number; // qty_ordered × unit_price
+  line_vat: number;
+  line_gross: number;
+  qty_outstanding: number; // ordered − received, floored at 0
+  over_delivered: boolean; // received > ordered
+}
+
+export interface PurchaseOrderView extends PurchaseOrder {
+  supplier_name: string | null;
+  task_name: string | null;
+  lines: PurchaseOrderLineView[];
+  net: number;
+  vat: number;
+  gross: number;
+  line_count: number;
+  /** True when every line has had at least its ordered quantity delivered. */
+  fully_received: boolean;
+  /** Invoices matched back to this order. */
+  invoice_count: number;
+  invoiced_net: number;
+  /**
+   * invoiced_net − net. Positive means the invoices came to more than the
+   * order did, which is the number this whole table exists to surface.
+   */
+  price_variance: number | null;
+}
+
+export interface PurchaseOrderLineInput {
+  id?: string | null;
+  item_id?: string | null;
+  description: string;
+  qty_ordered: number | string;
+  qty_received?: number | string;
+  unit?: string | null;
+  unit_price: number | string;
+  vat_rate: number | string;
+}
+
+export interface PurchaseOrderInput {
+  supplier_name?: string | null;
+  po_number?: string | null;
+  raised_on?: string | null;
+  expected_delivery?: string | null;
+  status: PoStatus;
+  task_id?: string | null;
+  notes?: string | null;
+  lines: PurchaseOrderLineInput[];
+}
+
+// ---- Track B / B4: variations (0024) ----
+
+export const VARIATION_STATUSES = [
+  "proposed",
+  "approved",
+  "rejected",
+  "withdrawn",
+] as const;
+export type VariationStatus = (typeof VARIATION_STATUSES)[number];
+
+export const VARIATION_STATUS_LABELS: Record<VariationStatus, string> = {
+  proposed: "Proposed",
+  approved: "Approved",
+  rejected: "Rejected",
+  withdrawn: "Withdrawn",
+};
+
+/**
+ * A change to the job: what changed, why, what it cost and what it did to the
+ * programme.
+ *
+ * `cost_impact` and `days_impact` are SIGNED and hand-entered — they are the
+ * agreement made at the time, not a derivation. A variation can be an
+ * omission, and a table that can only record additions overstates the job.
+ */
+export interface Variation {
+  id: string;
+  user_id: string;
+  project_id: string;
+  ref: string | null;
+  title: string;
+  description: string | null;
+  requested_by: string | null;
+  raised_on: string;
+  status: VariationStatus;
+  approved_on: string | null;
+  approved_by: string | null;
+  cost_impact: number | null;
+  days_impact: number | null;
+  task_id: string | null;
+  phase_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VariationView extends Variation {
+  task_name: string | null;
+  phase_name: string | null;
+  /**
+   * What the linked task has ACTUALLY cost since, ex-VAT, from the lines
+   * tagged to it. Shown beside `cost_impact` and never instead of it: one is
+   * what was agreed, the other is what happened, and conflating them is how a
+   * variations log stops being evidence.
+   */
+  task_actual_net: number | null;
+  /** Days the linked task has drifted against its baseline. */
+  task_drift_days: number | null;
+}
+
+/** The project's variation position — approved only, plus what is pending. */
+export interface VariationRollup {
+  approved_cost: number;
+  approved_days: number;
+  proposed_cost: number;
+  proposed_days: number;
+  approved_count: number;
+  proposed_count: number;
+}
+
+export interface VariationInput {
+  ref?: string | null;
+  title: string;
+  description?: string | null;
+  requested_by?: string | null;
+  raised_on?: string | null;
+  status: VariationStatus;
+  approved_on?: string | null;
+  cost_impact?: number | string | null;
+  days_impact?: number | string | null;
+  task_id?: string | null;
+  phase_id?: string | null;
 }
 
 export const PURCHASE_ORIGINS: PurchaseOrigin[] = [

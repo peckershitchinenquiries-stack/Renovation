@@ -207,6 +207,18 @@ function headerFields(input: PurchaseInput, category: ExpenseCategory | null) {
     location_room: text(input.location_room),
     notes: text(input.notes),
     entry_status: input.entry_status,
+    // ---- retention (migration 0019) ----
+    // NULL and not 0 when the field is blank. `text()` already collapses ""
+    // to null, which is exactly the distinction the column needs: "no
+    // retention on this invoice" is a different statement from "0% was held",
+    // and it is what keeps every pre-0019 figure identical.
+    retention_pct:
+      text(input.retention_pct) === null ? null : Number(input.retention_pct),
+    retention_release_due: text(input.retention_release_due),
+    retention_released_on: text(input.retention_released_on),
+    // Which order this invoice answers (migration 0023). Null means unmatched,
+    // which is a legitimate state and is what every existing invoice says.
+    purchase_order_id: text(input.purchase_order_id),
   };
 }
 
@@ -231,6 +243,11 @@ function lineRows(
       unit_price: round(line.unit_price, 4),
       line_net: round2(Number(line.line_net) || 0),
       vat_rate: Number(line.vat_rate) || 0,
+      // Blank means untagged, and untagged is a legitimate state — it shows in
+      // the untagged bucket rather than being hidden. `on delete set null` on
+      // the column means a stale id here can only ever become null, never
+      // delete the line.
+      task_id: text(line.task_id) ?? null,
     };
   });
 }

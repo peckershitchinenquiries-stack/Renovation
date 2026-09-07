@@ -26,12 +26,16 @@ export function combineTotals(
       purchase_count: acc.purchase_count + t.purchase_count,
       gross: acc.gross + t.gross,
       paid: acc.paid + t.paid,
+      retention_held: acc.retention_held + t.retention_held,
       balance: acc.balance + t.balance,
     }),
-    { purchase_count: 0, gross: 0, paid: 0, balance: 0 }
+    { purchase_count: 0, gross: 0, paid: 0, retention_held: 0, balance: 0 }
   );
-  // Recomputed rather than summed, so it can never disagree with the two
-  // figures printed beside it.
-  combined.balance = combined.gross - combined.paid;
+  // Recomputed rather than summed, so it can never disagree with the figures
+  // printed beside it. Retention is subtracted here for the same reason it is
+  // in totalsBySource: what is deliberately held back is not owed (0019). With
+  // no retention anywhere — every row before 0019 — this is `gross − paid`,
+  // unchanged.
+  combined.balance = combined.gross - combined.retention_held - combined.paid;
   return combined;
 }

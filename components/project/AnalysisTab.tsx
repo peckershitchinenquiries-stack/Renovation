@@ -11,10 +11,13 @@ import { Icon } from "@/components/ui/Icon";
 import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
 import PivotTable, { type PivotColumn } from "./PivotTable";
 import { fmtDate, fmtQty, fmtUnitPrice } from "./format";
+import { VarianceChip } from "@/components/schedule/VarianceChip";
+import { BUDGET } from "@/lib/vocabulary";
 import type {
   InvoiceLineView,
   ItemPriceRow,
   SupplierInvoiceRow,
+  TaskCostRow,
   TradeInvoiceRow,
 } from "@/types";
 
@@ -34,7 +37,7 @@ import type {
  * Every builder in `lib/invoiceViews.ts` is untouched — this is presentation.
  */
 
-export type AnalysisView = "trade" | "supplier" | "material" | "price";
+export type AnalysisView = "trade" | "supplier" | "material" | "price" | "task";
 export type LineCategory = "all" | "materials" | "labour";
 
 const VIEWS: { value: AnalysisView; label: string }[] = [
@@ -42,6 +45,11 @@ const VIEWS: { value: AnalysisView; label: string }[] = [
   { value: "supplier", label: "By supplier" },
   { value: "material", label: "By material" },
   { value: "price", label: "Price history" },
+  // The fifth pivot, and nearly free: the same invoice lines grouped by the
+  // task they were tagged to (migration 0017). This is where the spec's
+  // "budget vs actual per trade/line item" finally becomes "...per task",
+  // which is the question the schedule half of the app exists to answer.
+  { value: "task", label: "By task" },
 ];
 
 const CATEGORIES: { value: LineCategory; label: string }[] = [
@@ -62,6 +70,7 @@ export default function AnalysisTab({
   materials,
   labour,
   priceRows,
+  taskRows = [],
 }: {
   projectId: string;
   view: AnalysisView;
@@ -74,6 +83,9 @@ export default function AnalysisTab({
   materials: InvoiceLineView[];
   labour: InvoiceLineView[];
   priceRows: ItemPriceRow[];
+  // Empty until migration 0016 has been run and some tasks exist. The pivot
+  // then shows every task plus an untagged block, so no money can hide.
+  taskRows?: TaskCostRow[];
 }) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
@@ -194,6 +206,7 @@ export default function AnalysisTab({
           }
         />
       )}
+      {view === "task" && <TaskView rows={taskRows} lines={allLines} q={q} />}
       {view === "price" && (
         <PriceView
           projectId={projectId}
@@ -1151,6 +1164,182 @@ function PriceHistory({
 // A totals row of £0.00 under an empty table reads as a project that has spent
 // nothing, so a search matching nothing replaces the table rather than emptying
 // it — the same rule the Costs tab follows.
+/* ----------------------------------------------------------------- By task */
+
+/**
+ * Budget vs cost, per piece of work - plus everything tagged to none.
+ *
+ * Two things make this honest rather than comforting:
+ *
+ *   * **Both comparison columns are ex VAT.** `tasks.budget_amount` matches
+ *     `line_net`, so the comparison is net against net. An incl-VAT cost beside
+ *     an ex-VAT budget reports a 20% overrun on a task that is exactly on
+ *     budget - the double-VAT error this codebase has already made once, in a
+ *     different place.
+ *   * **The untagged block is always shown.** Without it a project reads as
+ *     perfectly on budget while half its spend sits outside every task. It is
+ *     not behind a filter and not behind a toggle.
+ */
+function TaskView({
+  rows,
+  lines,
+  q,
+}: {
+  rows: TaskCostRow[];
+  lines: InvoiceLineView[];
+  q: string;
+}) {
+  const known = useMemo(() => new Set(rows.map((r) => r.task_id)), [rows]);
+
+  // A line whose task was deleted counts as untagged. `task_id` is
+  // `on delete set null`, so this is normally empty - but a tag pointing at a
+  // task from another project would land here too, which is correct.
+  const untagged = useMemo(
+    () =>
+      lines.filter(
+        (l) =>
+          l.entry_status !== "Cancelled" && (!l.task_id || !known.has(l.task_id))
+      ),
+    [lines, known]
+  );
+  const untaggedNet = untagged.reduce((s, l) => s + l.line_net, 0);
+  const untaggedGross = untagged.reduce((s, l) => s + l.line_gross, 0);
+
+  const filtered = useMemo(
+    () => (q ? rows.filter((r) => r.task_name.toLowerCase().includes(q)) : rows),
+    [rows, q]
+  );
+
+  if (rows.length === 0)
+    return (
+      <EmptyState
+        icon="list"
+        title="No tasks to report against"
+        description="Break the job into tasks on the Schedule tab, give each one a budget, then tag your invoice lines to them. This is where budget drift shows up first."
+      />
+    );
+  if (filtered.length === 0 && untagged.length === 0) return <NothingMatches />;
+
+  const totals = filtered.reduce(
+    (acc, r) => {
+      acc.budget += r.budget;
+      acc.net += r.net;
+      acc.gross += r.gross;
+      acc.paid += r.paid;
+      acc.owed += r.owed;
+      acc.lines += r.line_count;
+      return acc;
+    },
+    { budget: 0, net: 0, gross: 0, paid: 0, owed: 0, lines: 0 }
+  );
+
+  const columns: PivotColumn<TaskCostRow>[] = [
+    {
+      key: "task",
+      header: "Task",
+      cell: (r) => <span className="font-medium">{r.task_name}</span>,
+    },
+    {
+      key: "lines",
+      header: "Lines",
+      align: "right",
+      cell: (r) => r.line_count || "-",
+      foot: totals.lines,
+    },
+    {
+      key: "budget",
+      header: BUDGET.label,
+      title: "Ex VAT - a task budget, so it matches the net on an invoice line",
+      align: "right",
+      cell: (r) => (r.budget > 0 ? formatCurrency(r.budget) : "-"),
+      foot: formatCurrency(totals.budget),
+    },
+    {
+      key: "net",
+      header: "Cost (net)",
+      title: "Ex VAT, so it is comparable with the budget beside it",
+      align: "right",
+      cell: (r) => formatCurrency(r.net),
+      foot: formatCurrency(totals.net),
+    },
+    {
+      key: "gross",
+      header: MONEY.cost.label,
+      title: MONEY.cost.hint,
+      align: "right",
+      cell: (r) => <span className="font-medium">{formatCurrency(r.gross)}</span>,
+      foot: formatCurrency(totals.gross),
+    },
+    {
+      key: "paid",
+      header: MONEY.paid.label,
+      // Payment is recorded per document, never per line, so a task's share of
+      // it is apportioned by gross. Said here rather than left to be assumed.
+      title: "Apportioned from each invoice by this task's share of it",
+      align: "right",
+      cell: (r) => formatCurrency(r.paid),
+      foot: formatCurrency(totals.paid),
+    },
+    {
+      key: "variance",
+      header: "Variance",
+      align: "right",
+      cell: (r) => <VarianceChip row={r} />,
+    },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <PivotTable
+        rows={filtered}
+        columns={columns}
+        rowKey={(r) => r.task_id}
+        footLabel="Tagged total"
+        mobileTotals={
+          <MobileTotals
+            gross={totals.gross}
+            paid={totals.paid}
+            balance={totals.owed}
+          />
+        }
+        card={(r) => (
+          <div className="card">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <span className="block truncate text-[0.9375rem] font-bold text-gray-900">
+                  {r.task_name}
+                </span>
+                <p className="mt-0.5 truncate text-xs text-gray-500">
+                  {r.line_count} {r.line_count === 1 ? "line" : "lines"} &middot;{" "}
+                  {BUDGET.label} {formatCurrency(r.budget)} ex VAT
+                </p>
+              </div>
+              <VarianceChip row={r} />
+            </div>
+            <CardMoney net={r.net} paid={r.paid} balance={r.owed} />
+          </div>
+        )}
+      />
+
+      {untagged.length > 0 ? (
+        <div className="rounded-2xl bg-amber-50 px-4 py-3 ring-1 ring-inset ring-amber-600/20">
+          <p className="text-[0.8125rem] font-semibold text-amber-900">
+            <span className="tnum">{formatCurrency(untaggedNet)}</span> net (
+            <span className="tnum">{formatCurrency(untaggedGross)}</span> incl
+            VAT) on {untagged.length}{" "}
+            {untagged.length === 1 ? "line" : "lines"} not tagged to a task
+          </p>
+          <p className="mt-1 text-[0.8125rem] leading-snug text-amber-800">
+            These count towards the project total but against no task&rsquo;s
+            budget - which is exactly how a job reads as on budget while it is
+            not. Tag them on the invoice or cost form.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function NothingMatches() {
   return (
     <EmptyState

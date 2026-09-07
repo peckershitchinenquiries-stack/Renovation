@@ -252,11 +252,25 @@ export default async function SupplierPage({
               tone={totals.balance > 0.001 ? "bad" : "good"}
               hint={MONEY.owed.hint}
             />
-            <StatCard
-              icon="receipt"
-              label="Purchases"
-              value={String(totals.purchase_count)}
-            />
+            {/* Retention gets the fourth card whenever there is any, pushing
+                the purchase count out (migration 0019). It is money this
+                supplier is owed but has agreed to wait for, and it must be
+                readable BESIDE Owed rather than inside it — a retention that
+                reads as an overdue bill is what the feature exists to end. */}
+            {totals.retention_held > 0.001 ? (
+              <StatCard
+                icon="clock"
+                label="Retention held"
+                value={formatCurrency(totals.retention_held)}
+                hint="Held back, not overdue"
+              />
+            ) : (
+              <StatCard
+                icon="receipt"
+                label="Purchases"
+                value={String(totals.purchase_count)}
+              />
+            )}
           </div>
         ) : null}
 

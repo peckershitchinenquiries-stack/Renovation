@@ -3,7 +3,13 @@ import { createClient } from "@/lib/supabase/server";
 import { safeReturnTo } from "@/lib/safeReturnTo";
 import LabourForm from "@/components/forms/LabourForm";
 import { PageHeader } from "@/components/ui/PageHeader";
-import type { Project, TradeLookup } from "@/types";
+import type {
+  Contact,
+  Project,
+  TaskRef,
+  TaskStatus,
+  TradeLookup,
+} from "@/types";
 
 export const dynamic = "force-dynamic";
 
@@ -20,16 +26,50 @@ export default async function NewLabourPage({
   searchParams: { returnTo?: string };
 }) {
   const supabase = createClient();
-  const [{ data: project }, { data: trades }] = await Promise.all([
-    supabase.from("projects").select("*").eq("id", params.id).single(),
-    supabase.from("trade_lookups").select("*"),
-  ]);
+  // A third small query joins the two: the task list for the task tag. It is
+  // deliberately tolerant — migrations here are applied by hand, so on a
+  // database where 0016 has not been run these tables do not exist, and a
+  // labour form that 500s because the SCHEDULE is not installed would be an
+  // absurd coupling. The tag simply does not appear.
+  // The people register (0020) is read the same tolerant way, and for the same
+  // reason: it only fills the name, trade and rate in, so a database without
+  // 0020 simply has no shortcut and the form works exactly as before.
+  const [
+    { data: project },
+    { data: trades },
+    { data: taskRows },
+    { data: phaseRows },
+    { data: contacts },
+  ] = await Promise.all([
+      supabase.from("projects").select("*").eq("id", params.id).single(),
+      supabase.from("trade_lookups").select("*"),
+      supabase
+        .from("tasks")
+        .select("id, name, status, phase_id")
+        .eq("project_id", params.id)
+        .neq("status", "Cancelled")
+        .order("sort_order"),
+      supabase.from("project_phases").select("id, name").eq("project_id", params.id),
+      supabase.from("contacts").select("*").order("name"),
+    ]);
   if (!project) notFound();
   const named = project as Project;
 
   // Untrusted: arrives on the query string, so it is validated before it can
   // reach router.push() inside the form.
   const returnTo = safeReturnTo(searchParams?.returnTo);
+
+  const phaseNames = new Map(
+    ((phaseRows ?? []) as { id: string; name: string }[]).map((p) => [p.id, p.name])
+  );
+  const tasks: TaskRef[] = (
+    (taskRows ?? []) as { id: string; name: string; status: TaskStatus; phase_id: string | null }[]
+  ).map((t) => ({
+    id: t.id,
+    name: t.name,
+    phase_name: t.phase_id ? phaseNames.get(t.phase_id) ?? null : null,
+    status: t.status,
+  }));
 
   return (
     <div className="mx-auto max-w-2xl">
@@ -50,6 +90,8 @@ export default async function NewLabourPage({
         <LabourForm
           projectId={named.id}
           trades={(trades ?? []) as TradeLookup[]}
+          tasks={tasks}
+          contacts={(contacts ?? []) as Contact[]}
           returnTo={returnTo ?? undefined}
         />
       </div>

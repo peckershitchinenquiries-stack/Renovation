@@ -26,6 +26,8 @@ export async function POST(req: Request) {
     target_budget: Number(body.target_budget ?? 0),
     status: body.status ?? "active",
     notes: body.notes ?? null,
+    start_date: body.start_date || null,
+    planned_end_date: body.planned_end_date || null,
   };
 
   const { data, error: dbError } = await auth.supabase

@@ -21,6 +21,7 @@ import {
   VAT_RATES,
   type ExpenseEntry,
   type InvoiceLineView,
+  type TaskRef,
   type TradeLookup,
 } from "@/types";
 
@@ -40,6 +41,9 @@ interface Props {
   // that a missed render path silently disabled the warning, so a caller that
   // forgets it fails to compile instead.
   invoiceLines: InvoiceLineView[];
+  // The project's tasks, for the task tag. Empty until migration 0016 has been
+  // run, in which case the field simply does not appear.
+  tasks?: TaskRef[];
   onSaved: () => void;
   onCancel: () => void;
 }
@@ -66,6 +70,7 @@ export default function ExpenseForm({
   template,
   priorEntries = [],
   invoiceLines,
+  tasks = [],
   onSaved,
   onCancel,
 }: Props) {
@@ -96,6 +101,9 @@ export default function ExpenseForm({
       unit_cost: base?.unit_cost?.toString() ?? "",
       vat_rate: base?.vat_rate?.toString() ?? "0",
       status: expense?.status ?? "Planned",
+      // A repeat copies the task tag along with the description: doing the
+      // same job again is the usual reason to repeat a cost.
+      task_id: base?.task_id ?? "",
     };
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -558,6 +566,30 @@ export default function ExpenseForm({
           </button>
         </fieldset>
       )}
+
+      {/* The task tag, next to the trade field the reader has just filled in.
+          Position matters: a tag that is optional and buried gets skipped, and
+          then every task reports its budget against a cost of nothing. */}
+      {tasks.length > 0 ? (
+        <div>
+          <label className="label" htmlFor="task_id">
+            Part of which task?
+          </label>
+          <Select
+            id="task_id"
+            title="Task"
+            placeholder="Not tagged"
+            clearable
+            value={form.task_id}
+            onChange={(v) => set("task_id", v)}
+            options={tasks.map((t) => ({
+              value: t.id,
+              label: t.name,
+              hint: t.phase_name ?? undefined,
+            }))}
+          />
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-2 gap-3">
         <div>

@@ -94,6 +94,11 @@ export async function POST(req: Request, { params }: { params: { id: string } })
         // disagree and offers to fix it; it never silently overwrites.
         line_net: lineNet,
         vat_rate: vatRate,
+        // Labour against a task is the most valuable of the three tags: a
+        // trade standing around waiting is exactly what the spec's cost-impact
+        // example is about, and it is invisible until the hours are attached
+        // to the piece of work they were spent on.
+        task_id: text(body.task_id),
       },
     ],
     // Planned / In Progress / Cancelled write no payment row at all — a

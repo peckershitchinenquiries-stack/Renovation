@@ -4918,3 +4918,684 @@ No money figure moved; this is presentation only.
 **Not checked in a browser.** Both screens are behind the login and I do not
 enter passwords, so this was verified by build/typecheck and by reading the CSS
 only. Worth a 10-second look on a phone.
+
+---
+
+### 2026-09-03 — Wrote a gap analysis of the new feature spec against the app as it stands
+
+**What changed (in plain English):**
+Added one new document, `feature-spec-gap-analysis.md`, at the repo root. It
+does two things side by side: it describes what RenovaTrack actually is today
+(data model, screens, what works, what the data currently contains), and it goes
+through every feature in the new spec PDF the owner supplied, marking each one
+done / partial / absent, with the reason. It ends with what would have to be
+built first for the rest to be possible, and six questions that have to be
+answered before any of it is designed.
+
+The headline finding: RenovaTrack is a strong **money** tracker and has no
+concept of **time** at all — no tasks, no phases, no dates on work, no
+dependencies — so the spec's Gantt chart section, which is its largest and is
+explicitly called "core, not a bolt-on", is greenfield from end to end. Two of
+roughly thirty-two spec items are done, and both are money features.
+
+**Why:**
+The owner supplied a three-page feature spec and asked, before any code is
+written, for a written statement of where the project currently is and what the
+document is asking for. Having it on paper means the build order can be argued
+about cheaply, rather than discovered halfway through building a Gantt chart
+that has nothing to draw.
+
+**Where the information came from:**
+- `renovation-tracker-spec.pdf` — the new requirements, supplied by the owner
+  and sitting in their Downloads folder, not in this repository. Its full
+  contents are transcribed into §2 of the new document so the analysis still
+  makes sense if that file is ever lost.
+- The repository itself, at commit `6994484`.
+
+**Files used (read, not changed):**
+- `C:\Users\landa\Downloads\renovation-tracker-spec.pdf` — the requirements
+- `about.md` — the reference for how everything currently works
+- `updates.md` — recent history
+- `CLAUDE.md`
+- `package.json` — to confirm what libraries exist (no Gantt library; Recharts
+  is the only charting dependency)
+- `types/index.ts` — the full list of types, which is the quickest map of what
+  the app models
+- `supabase/migrations/0008_transaction_core.sql` — to confirm exactly which
+  columns `suppliers` and `items` carry (this is what proves there is nowhere to
+  put a phone number, an insurance expiry or a day rate)
+- the file listings of `app/`, `lib/`, `components/` and `supabase/migrations/`
+
+**Files changed:**
+- `feature-spec-gap-analysis.md` — new file, the analysis itself
+- `updates.md` — this entry
+
+**Database:**
+None. No migration was written and none was run. Nothing queried the database;
+this was done entirely by reading code and documentation.
+
+**Result / numbers after:**
+No figure moved — nothing was calculated, imported or displayed differently.
+The only new number is the scoreboard in the document: **2 of ~32 spec items
+complete, 3 partial, ~27 absent**, with the absent ones concentrated in
+scheduling, people, documents and communication.
+
+`about.md` was **not** updated, and deliberately so: nothing about how the app
+works changed, so §13 and every other figure in it still stand. If and when any
+of these features is actually built, `about.md` is the file that has to move.
+
+No code was changed, so there was nothing to build or typecheck.
+
+---
+
+### 2026-09-03 — Wrote an implementation plan for the new feature spec
+
+**What changed (in plain English):**
+Added one new document, `implementation-plan.md`, at the repo root. It turns
+yesterday's gap analysis into a build order: ten phases across two tracks, each
+one naming the migration it needs, the tables and columns that migration
+creates, the `lib/` files and API routes and screens it touches, a plain-English
+test for when it is finished, and what is most likely to go wrong.
+
+It also **commits to answers** for the six open questions the gap analysis
+ended with, because a plan cannot be written without them. In short: week
+numbers are kept and derived from a project start date rather than thrown away;
+the schedule tables are project-scoped so a second site is possible later
+without a migration; sign-off records who signed but enforces nothing, matching
+the existing "signing in is the whole of the authorisation model" rule; a task's
+actual cost is the sum of the **invoice lines** tagged to it, tagged in one
+place only so nothing can double-count; progress is typed in per task rather
+than inferred from money spent; and weather is a manual flag before it is ever
+an API. Each assumption is written down with what would change if the owner
+disagrees.
+
+The two judgements most worth arguing about:
+
+1. **The Gantt chart is built fourth, not first.** It is the part you can see,
+   so it is the part that will be asked for first, but a chart of tasks with no
+   costs attached to them is a prettier list. The spec's own priority note says
+   the thing that must not be missed is budget drift — so the plan puts the
+   schedule tables (phase 1), the link from money to tasks (phase 2) and the
+   scheduling maths (phase 3) ahead of the drawing. Stopping after phase 2 would
+   already deliver what the spec calls the must-have.
+2. **The chart is drawn in-house rather than with an off-the-shelf library**,
+   because the app is used almost entirely on phones and every mature Gantt
+   library is a desktop mouse-first control, and because the scheduling maths
+   has to live in our own code anyway for the non-chart screens — two engines
+   would eventually disagree. A named fallback is written into the plan in case
+   dragging proves harder than estimated.
+
+**Why:**
+The owner asked for a plan before any code is written. Writing it down means the
+order of work, and the assumptions underneath it, can be argued about now while
+that costs nothing — rather than discovered halfway through building a Gantt
+chart that has nothing to draw.
+
+**Where the information came from:**
+- `renovation-tracker-spec.pdf` (owner-supplied) via `feature-spec-gap-analysis.md`
+- the repository as it stands at commit `6994484`
+
+**Files used (read, not changed):**
+- `feature-spec-gap-analysis.md` — the companion document this one builds on
+- `about.md`, `CLAUDE.md` — the house rules the plan has to obey, in particular
+  never storing a computed total, never filtering by `user_id`, and running
+  migrations by hand
+- `lib/api.ts` — the `requireUser()` shape every new route must follow
+- `lib/data.ts`, `lib/purchaseWrite.ts`, `lib/validation.ts` — the existing
+  read, write and validation patterns the new ones are modelled on
+- `components/project/ProjectDetail.tsx` — the tab structure a Schedule tab
+  would join
+- `supabase/migrations/0008_transaction_core.sql` — the exact columns of
+  `purchases`, `purchase_lines` and `payments`
+- `supabase/migrations/0014_service_role_grants.sql`,
+  `0015_shared_workspace.sql` — the policy and grant shape every new table must
+  copy
+- `package.json` — to confirm what is and is not already a dependency
+
+**Files changed:**
+- `implementation-plan.md` — new file, the plan itself
+- `updates.md` — this entry
+
+**Database:**
+None. No migration was written and none was run. The plan *proposes* migrations
+`0016` through `0025` and describes what each would contain, but not one of them
+exists as a file yet.
+
+**Two things found while writing it that should be checked, and are not yet
+fixed:**
+
+1. `0015_shared_workspace.sql` still carries a `STATUS: NOT YET RUN` banner in
+   its header, while `CLAUDE.md` describes the app as already being on the
+   shared-workspace policy. One of the two is out of date. Every new table in
+   the plan copies `0015`'s policy shape, so it matters which. Checking takes
+   one query in the SQL editor:
+   `select tablename, policyname from pg_policies where schemaname = 'public';`
+2. `purchase_lines.vat_rate` still carries `check (vat_rate in (0,20))` from
+   `0008`, while `expense_entries.vat_rate` was widened to `(0,5,20)` by
+   `0011`. A 5% line is ordinary on residential renovation work, and `0011`
+   exists precisely because one of them silently saved as zero-rated. Worth
+   fixing on its own, whatever happens to this plan.
+
+**Result / numbers after:**
+No figure moved — nothing was calculated, imported or displayed differently.
+The only new numbers are the plan's own estimates: **ten phases**, roughly **ten
+proposed migrations**, and the schema going from **12 tables to about 24** if
+all of it is built.
+
+`about.md` was **not** updated, deliberately: nothing about how the app works
+has changed. The plan's §13 lists which `about.md` sections would need new
+material as each phase lands.
+
+No code was changed, so there was nothing to build or typecheck.
+
+---
+
+### 2026-09-03 — Built the schedule: Track A, phases 1, 2, 3, 4, 8 and 9
+
+**What changed (in plain English):**
+The app now tracks **time** as well as money. Until today it knew, per invoice
+line, what was bought and what it cost, and had no concept of a task, a date,
+a phase or a dependency at all. It now has all of those, plus a Gantt chart,
+a critical path, and — the thing the spec called the must-have — **a budget and
+an actual cost against each piece of work**.
+
+Concretely, a project can now be broken into phases (demo, first fix, second
+fix, snagging — editable, not fixed), each holding tasks with a trade, a
+duration, planned and actual dates, a status, a progress percentage and a
+budget. Tasks can be linked to each other; when one slips the app works out
+which downstream tasks move, shows you the list and the new completion date,
+and writes nothing until you confirm. Every invoice line and hand-entered cost
+can be tagged to a task, so each task shows budget vs cost vs paid, and the
+project says out loud how much spend is tagged to *no* task. A fifth project
+tab, **Schedule**, holds the list and the chart. The Home screen gained a
+Money / Schedule switch showing every site's progress and how far behind it is.
+
+**Why:**
+`feature-spec-gap-analysis.md` scored the app at 2 of roughly 32 spec items,
+both of them money features, and identified the missing half as "a second,
+larger application (scheduling) bolted onto the first". `implementation-plan.md`
+laid that out as ten phases across two tracks. This entry is Track A —
+phases 1, 2, 3, 4, 8 and 9 — built in the order the plan recommends and for the
+reason it gives: **phase 2 lands before the chart**, because the spec's own
+Priority Note says budget drift going unnoticed is the failure mode, and a
+chart drawn over untagged costs delivers nothing the app did not already have.
+
+Track B (retention, purchase orders, variations) and phases 5–7 (people,
+documents, communication) were **not** built and remain as described in the
+plan.
+
+**Where the information came from:**
+`feature-spec-gap-analysis.md` and `implementation-plan.md`, both already in the
+repo, which in turn transcribe `renovation-tracker-spec.pdf`. No spreadsheet was
+read and no data was imported. The plan's six open decisions in its §1 were
+taken **as the plan proposed them** — `week_number` kept and untouched,
+portfolio-capable from day one, no role system, cost tagged at line level,
+progress typed in rather than derived, and weather as a manual flag.
+
+**Files used (read, not changed):**
+- `feature-spec-gap-analysis.md`, `implementation-plan.md` — the brief
+- `CLAUDE.md`, `about.md` — the house rules
+- `supabase/migrations/0008_transaction_core.sql` — SQL style, and the
+  `norm_key` / trigger / grant patterns
+- `supabase/migrations/0014_service_role_grants.sql`,
+  `0015_shared_workspace.sql` — the policy and grant shape every new table copies
+- `lib/purchases.ts`, `lib/summary.ts`, `lib/invoiceViews.ts` — how derived
+  figures are built here
+- `lib/purchaseWrite.ts` — the write-path shape `lib/scheduleWrite.ts` follows
+- `components/ui/*`, `app/globals.css` — the design system
+- `lib/purchases.test.mts` — the only existing test file, for its runner setup
+
+**Files changed:**
+
+*Migrations (new, none of them run — see Database below):*
+- `supabase/migrations/0016_schedule_core.sql` — five tables + two columns on
+  `projects`
+- `supabase/migrations/0017_task_cost_link.sql` — `task_id` on
+  `purchase_lines` and `expense_entries`
+- `supabase/migrations/0018_work_calendar.sql` — `working_weekdays` and
+  `project_holidays`
+
+*New library code:*
+- `lib/schedule.ts` — the scheduling engine: working-day arithmetic, cycle
+  detection, topological sort, forward and backward passes, float, critical
+  path, baseline drift, `applyShift`, lead-time alerts. Pure functions only
+- `lib/schedule.test.mts` — **40 tests**, the first real test suite in the
+  project (see Result below for why)
+- `lib/scheduleCosts.ts` — budget vs cost per task, per phase and per project,
+  the untagged bucket, and what a delay costs
+- `lib/scheduleWrite.ts` — the one write path, through which no date can move
+  without a revision row
+- `lib/portfolio.ts` — per-project health and the portfolio roll-up
+
+*Existing library code:*
+- `types/index.ts` — the schedule types, `task_id` on `PurchaseLine`,
+  `ExpenseEntry` and `InvoiceLineView`, and `start_date` /
+  `planned_end_date` / `working_weekdays` on `Project`
+- `lib/data.ts` — `getScheduleBundle`, `getPortfolio`, and the task list added
+  to `getPurchaseFormBundle`
+- `lib/validation.ts` — `validatePhase`, `validateTask`, `validateDependency`,
+  `validateShiftReason`
+- `lib/invoiceViews.ts` — carries `task_id` down onto each flattened line
+- `lib/purchaseWrite.ts`, `lib/expense.ts` — persist the tag
+- `lib/purchases.ts` — synthetic invoice entries carry `task_id: null`, with a
+  comment saying why it must stay null
+
+*New API routes, all under `app/api/projects/[id]/schedule/`:*
+`route.ts` (the bundle) · `phases/` + `phases/[phaseId]/` ·
+`tasks/` + `tasks/[taskId]/` · `dependencies/` + `dependencies/[depId]/` ·
+`baseline/` · `shift/`
+
+*New components:*
+- `components/schedule/` — `ScheduleTab`, `Gantt`, `GanttBar`,
+  `DependencyArrows`, `TimelineScale`, `TaskSheet`, `TaskHistory`,
+  `DependencyEditor`, `ShiftDialog`, `ScenarioPanel`, `CostImpactChip`,
+  `VarianceChip`, `PortfolioGantt`
+- `components/forms/TaskForm.tsx`, `components/forms/PhaseForm.tsx`
+- `components/project/DashboardScreen.tsx` — Home, with the Money / Schedule
+  switch
+
+*Existing screens:*
+- `components/project/ProjectDetail.tsx` — the fifth tab
+- `components/project/AnalysisTab.tsx` — a fifth pivot, **By task**
+- `components/project/OverviewTab.tsx` — one sentence: how much of the cost is
+  tagged to a task and how much is not
+- `components/project/ExpensesTab.tsx`, `components/forms/ExpenseForm.tsx`,
+  `components/forms/AddExpensePanel.tsx`, `components/forms/PurchaseForm.tsx`,
+  `components/forms/LabourForm.tsx` — the task tag, in the three places a cost
+  is entered
+- `app/(app)/dashboard/page.tsx`, `app/(app)/projects/[id]/page.tsx`,
+  `app/(app)/projects/[id]/expenses/new/page.tsx`,
+  `app/(app)/projects/[id]/labour/new/page.tsx` — the new loaders
+- `app/api/projects/[id]/labour/route.ts` — writes the tag onto the labour line
+
+*Documentation:*
+- `about.md` — §2 goes from five rules to **seven**; §4 gains a group summary
+  (12 tables → 22); §12 gains the three migrations; and six new sections:
+  §15 the schedule model, §16 the engine, §17 cost tied to schedule, §18 what a
+  delay costs, §19 the Gantt, §20 portfolio reporting, §21 what does *not* exist
+- `updates.md` — this entry
+
+**Database:**
+
+Three new migration files. **None of them has been run.** They must be pasted
+into the Supabase SQL editor and run **in this order**:
+
+1. `0016_schedule_core.sql`
+2. `0017_task_cost_link.sql`
+3. `0018_work_calendar.sql`
+
+All three are additive and re-runnable. **No existing row is read, changed or
+deleted by any of them**, and no figure in `about.md` §13 moves: `0017` adds
+`task_id` as nullable and backfills nothing, so every existing invoice line and
+expense row starts untagged and every total reads exactly as it did before.
+
+Two things to know before running them:
+
+- **`0015_shared_workspace.sql` must already have been run.** All three copy its
+  `shared workspace` policy shape, and `0016` refuses to commit if its own five
+  tables do not end up shared. Its header still carries a `STATUS: NOT YET RUN`
+  banner while `CLAUDE.md` describes the app as already shared — that
+  contradiction was flagged in the previous entry and is still unresolved.
+  Check with
+  `select tablename, policyname from pg_policies where schemaname = 'public';`
+- Until all three have been run, the Schedule tab, the dashboard's Schedule
+  segment and the task pickers on the three cost forms all **say the migrations
+  are missing** rather than rendering empty. That is deliberate: an empty
+  schedule and an uninstalled schedule look identical otherwise, which is the
+  ambiguity `about.md` §2 rule 3 exists to warn about. Nothing else in the app
+  is affected — every loader that touches the schedule tables tolerates them not
+  existing, so the money half keeps working exactly as it does today.
+
+One deviation from the plan worth recording: the plan proposed a separate
+`0019_hire_rate.sql` for `tasks.hire_daily_rate`. It is folded into `0016`
+instead — it is one nullable column on a table being created in that same file,
+and a fourth migration to run by hand for one column is a cost with no benefit.
+
+**Result / numbers after:**
+
+No money figure moved, in either direction. That is the point of `0017` being
+nullable and backfilling nothing:
+
+- project totals, per-trade, per-supplier and per-item figures: **unchanged**
+- every per-task figure: **£0 of £0, on 0 tagged lines**, until somebody
+  creates tasks and tags costs to them
+- the untagged total, on day one, is **100% of the project's spend** — which is
+  correct, and is precisely the number the untagged bucket exists to show
+
+What is new, in code rather than data:
+
+- **12 tables → 22.** Six new tables (five in `0016`, one in `0018`) and three
+  new columns on `projects`.
+- **0 test files → 1.** `lib/schedule.test.mts` holds **40 tests** and
+  `npm test` now runs **52** in total. This is the one place in the project
+  where the absence of a test suite genuinely hurt: `npm run build` catches a
+  wrong figure on a screen, but a forward pass that is off by one over a
+  weekend produces dates that look entirely plausible and are wrong by a day a
+  week. The tests pin the four rules the engine is built on, including the
+  Friday-plus-three-days case (it finishes on the **Tuesday**) and the fact
+  that float is counted in working days while drift is counted in calendar
+  days.
+- `npm run build` **passes**, which is still the only full typecheck.
+
+**The one thing most likely to go wrong, said plainly:** tagging costs to tasks
+is optional, and an optional tag that nobody uses makes every task report a
+budget against a cost of nothing — which reads as "we are miles under budget"
+rather than "nobody filled this in". The counter is built in three places and
+none of it is behind a filter: the untagged figure sits on the Schedule tab, at
+the foot of the By-task pivot, and in a sentence on Overview. If those numbers
+are large, the per-task figures are not to be trusted yet.
+
+---
+
+### 2026-09-03 — Track B: retention, people, documents, log & snags, orders, variations
+
+**What changed (in plain English):**
+
+The whole of **Track B** from [`implementation-plan.md`](./implementation-plan.md)
+— everything in the feature spec that does *not* depend on the schedule. Six
+new areas, six new migration files (`0019`–`0024`), nine new tables and five
+new screens:
+
+1. **Retention** (`0019`). A percentage held back from a contractor until the
+   defects period is up can now be recorded on an invoice, and it is kept
+   **out of Owed**. Before this the only way to record one was to leave an
+   invoice permanently part-paid, which put it next to genuinely overdue bills
+   and made it indistinguishable from one. The dashboard and the project
+   Overview both list retentions whose release date has passed, because
+   retention is deliberately invisible to every Owed figure and so nothing
+   else in the app will ever chase it.
+2. **People** (`0020`). A proper register of the trades working on the job —
+   name, company, trades, phone, email, day and hourly rate — with
+   **insurance and certification expiry dates that the app warns about 30 days
+   out, on the Dashboard**. A task can be assigned to a person, and a stage can
+   be signed off with a record of who signed and when.
+3. **Documents and photos** (`0021`). Planning permission, building control,
+   warranties, gas and electrical certificates, drawings and specs in one
+   place, with **version control** where it is always obvious which revision is
+   current — and a **site photo timeline** grouped by phase, ordered by the day
+   the photo was taken and filterable by room.
+4. **Activity log and snagging** (`0022`). A dated log of calls, site visits
+   and decisions, and a snagging list with photos that moves open → fixed →
+   verified. An open **safety** snag is surfaced on the project header itself.
+5. **Purchase orders** (`0023`). The app has always recorded invoices it was
+   sent; it can now record the orders you send out, and match an arriving
+   invoice back to one. That match is what makes **over-delivery** and
+   **price creep** visible instead of absorbed.
+6. **Variations** (`0024`). What changed, why, who asked, who agreed, what it
+   was worth and how many days it added — shown against what the linked task
+   has *actually* cost since.
+
+**Why:**
+
+The gap analysis scored the app at **2 of ~32 spec items**, both of them money
+features. Track A (the schedule and the Gantt) closed most of §1, §2's task
+half, §6 and all of §7. Track B is the rest: §2's people half, §3's two missing
+money features, §4 entirely, §5 entirely, and §1's variations log and photo
+timeline.
+
+It is called out in the plan as independent of the schedule for a reason —
+none of it needed the Gantt to exist, and two items in it (retention and
+contact details) were flagged as *"the cheapest real value in the whole plan"*.
+
+**Where the information came from:**
+
+- `renovation-tracker-spec.pdf`, as transcribed in
+  [`feature-spec-gap-analysis.md`](./feature-spec-gap-analysis.md) §2
+- [`implementation-plan.md`](./implementation-plan.md) §7 (Phase 5), §8
+  (Phase 6), §9 (Phase 7) and §12 (Track B / B1, B3, B4)
+- User request: *"execute all Track B tasks"*
+
+**Files used (read, not changed):**
+
+- `feature-spec-gap-analysis.md`, `implementation-plan.md` — the specification
+- `supabase/migrations/0008`, `0010`, `0011`, `0015`, `0016`, `0018` — the SQL
+  house style, the storage-bucket policy shape, and the `vat_rate` history
+- `lib/api.ts`, `lib/fetcher.ts`, `lib/scheduleWrite.ts` — the route-handler,
+  client-fetch and write-path patterns
+- `components/ui/*` — the design-system primitives
+- `app/api/invoices/upload-url/route.ts`,
+  `app/api/projects/[id]/purchases/[pid]/document/route.ts` — the signed-upload
+  and signed-read patterns the document routes copy
+
+**Files changed:**
+
+*Migrations (new — see the Database section for run status):*
+- `supabase/migrations/0019_retention.sql`
+- `supabase/migrations/0020_people.sql`
+- `supabase/migrations/0021_documents.sql`
+- `supabase/migrations/0022_activity_snags.sql`
+- `supabase/migrations/0023_purchase_orders.sql`
+- `supabase/migrations/0024_variations.sql`
+
+*New library modules:*
+- `lib/certifications.ts` — expiry state, derived on read, never stored
+- `lib/documents.ts` — version chains, the photo timeline, file sizes
+- `lib/purchaseOrders.ts` — order arithmetic, price variance, over-delivery
+- `lib/purchaseOrderWrite.ts` — the order write path, and `recordReceipt`
+- `lib/variations.ts` — variation views and the approved/proposed roll-up
+- `lib/contactWrite.ts` — form-string coercion for every Track B write
+
+*Library changes:*
+- `lib/purchases.ts` — `retentionAmount`, `retentionHeld`, `retentionIsDue`;
+  `computePurchase` now derives `payable_now` and **`balance` becomes
+  `payable_now − paid`**; `totalsBySource` carries `retention_held`
+- `lib/purchaseWrite.ts` — the header now writes the three retention columns
+  and `purchase_order_id`
+- `lib/schedule.ts` — `is_blocked` is sign-off aware; adds `blocked_reason`
+  and the task's latest `signoff`
+- `lib/scheduleWrite.ts` — `buildTaskPayload` carries `assignee_contact_id`
+- `lib/data.ts` — `signoffs` added to both schedule bundles; eight new
+  loaders (`getContacts`, `getContactBundle`, `getExpiringCertifications`,
+  `getRetentionsDue`, `getDocumentBundle`, `getCommunicationBundle`,
+  `getPurchaseOrders`, `getVariations`); `getPurchaseFormBundle` now returns
+  `orders_by_project`
+- `lib/validation.ts` — nine new validators; `validatePurchase` folds in
+  `validateRetention`
+- `types/index.ts` — the Track B block, plus retention on `Purchase` /
+  `PurchaseComputed` / `PurchaseTotals` / `PurchaseInput`, `requires_signoff`
+  on `TaskDependency`, and `blocked_reason` / `signoff` on `ScheduledTask`
+- `lib/schedule.test.mts` — **six new tests** for sign-off blocking
+- `components/purchases/totals.ts` — `combineTotals` subtracts retention
+
+*New API routes:*
+- `app/api/contacts/route.ts`, `app/api/contacts/[id]/route.ts`
+- `app/api/contacts/[id]/certifications/route.ts` and `[certId]/route.ts`
+- `app/api/projects/[id]/schedule/tasks/[taskId]/signoff/route.ts`
+- `app/api/documents/upload-url/route.ts`, `app/api/documents/[id]/route.ts`,
+  `app/api/documents/[id]/file/route.ts`
+- `app/api/projects/[id]/activity/route.ts` and `[entryId]/route.ts`
+- `app/api/projects/[id]/snags/route.ts` and `[snagId]/route.ts`
+- `app/api/projects/[id]/orders/route.ts`, `[poId]/route.ts`,
+  `[poId]/receipt/route.ts`
+- `app/api/projects/[id]/variations/route.ts` and `[variationId]/route.ts`
+
+*New screens and routes:*
+- `app/(app)/contacts/page.tsx`, `[id]/page.tsx` (+ two `loading.tsx`)
+- `app/(app)/projects/[id]/documents/`, `log/`, `orders/`, `variations/`
+- `components/directory/ContactScreen.tsx`
+- `components/documents/DocumentsScreen.tsx`, `DocumentUpload.tsx`
+- `components/snags/LogScreen.tsx`
+- `components/orders/OrdersScreen.tsx`
+- `components/variations/VariationsScreen.tsx`
+- `components/forms/ContactForm.tsx`, `CertificationForm.tsx`,
+  `ActivityForm.tsx`, `SnagForm.tsx`, `PurchaseOrderForm.tsx`,
+  `VariationForm.tsx`
+
+*Screen changes:*
+- `components/directory/Directory.tsx`, `DirectoryScreen.tsx` — a **third
+  segment, People**
+- `app/(app)/directory/page.tsx` — accepts `?view=people`
+- `components/project/DashboardScreen.tsx`, `app/(app)/dashboard/page.tsx` —
+  the certificate-expiry and retention-due warnings
+- `components/project/ProjectDetail.tsx`, `app/(app)/projects/[id]/page.tsx` —
+  retention figures, the open-snag banner, the four new routes in the "…"
+  sheet, and the contacts list for the assignee picker
+- `components/project/OverviewTab.tsx` — Owed now excludes retention, plus a
+  **Retention held** card and a retention-due sentence
+- `components/forms/PurchaseForm.tsx` — retention fields, a live retention
+  figure, and the "against which order" picker
+- `components/forms/TaskForm.tsx` — the assignee picker
+- `components/forms/LabourForm.tsx`,
+  `app/(app)/projects/[id]/labour/new/page.tsx` — pick a person from the
+  register to fill the name, trade and rate
+- `components/schedule/ScheduleTab.tsx`, `TaskSheet.tsx` — sign-off actions,
+  the sign-off record, and a blocked badge that says *why*
+- `components/schedule/DependencyEditor.tsx` — the **needs sign-off** toggle
+- `app/(app)/suppliers/[id]/page.tsx` — a **Retention held** card
+
+*Documentation:*
+- `about.md` — §2 goes from seven rules to **nine**; §4's group table grows
+  from 22 tables to **31**; §12 gains six migrations and records `0015`–`0018`
+  as run; §21 is rewritten (sign-off now exists and still enforces nothing);
+  and six new sections: §22 retention, §23 people, §24 documents, §25 the log
+  and snagging, §26 purchase orders, §27 variations
+- `updates.md` — this entry
+
+**Database:**
+
+Six new migration files. **None of them has been run.** They must be pasted
+into the Supabase SQL editor and run **in this order**:
+
+1. `0019_retention.sql`
+2. `0020_people.sql`
+3. `0021_documents.sql`
+4. `0022_activity_snags.sql`
+5. `0023_purchase_orders.sql`
+6. `0024_variations.sql`
+
+`0016`, `0017` and `0018` were run by the owner on 2026-09-03, before this
+work started, so the schedule tables these build on are in place.
+
+All six are additive and re-runnable, and **not one of them reads, changes or
+deletes an existing row.** Two things to know before running them:
+
+- **`0021` creates a storage bucket as well as a table.** Both are needed —
+  the file asserts the bucket exists and refuses to commit otherwise, because
+  a missing bucket makes every upload fail with a 403 and no useful message.
+- Only two of the six depend on each other: `0021` adds a foreign key to a
+  column `0020` created, and `0022` adds a column to the table `0021` created.
+  Run them in filename order regardless.
+
+Until each has been run, the screen that needs it **says so** rather than
+rendering empty. Every Track B loader treats a missing relation as "not
+installed yet" and returns null, which is a different thing from an empty
+list — that ambiguity is `about.md` §2 rule 3 and it has caused a real
+incident in this project before.
+
+**Result / numbers after:**
+
+**No money figure moved, in either direction.** That matters most for
+retention, because `0019` is the only migration in this batch that changes an
+existing formula:
+
+- `balance`, before: `gross_total − paid`
+- `balance`, after: `(gross_total − retention_held) − paid`
+
+Every existing row has `retention_pct` **null**, which makes `retention_held`
+zero and the two expressions identical to the penny. Concretely:
+
+- project totals, per-trade, per-supplier and per-item figures: **unchanged**
+- Owed on every screen: **unchanged**
+- **Retention held: £0.00 on every invoice**, until somebody types a percentage
+- retentions past their release date: **0**
+- invoices matched to a purchase order: **0 → 0** (nothing is backfilled)
+- purchase-order spend contribution: **£0.00, permanently** — an order is an
+  intention, and no PO figure ever reaches Committed, Cost, Paid or Owed
+
+What is new, in code rather than data:
+
+- **22 tables → 31.** Nine new tables (`contacts`,
+  `contact_certifications`, `task_signoffs`, `documents`, `activity_log`,
+  `snags`, `purchase_orders`, `purchase_order_lines`, `variations`) and four
+  new columns on existing ones (three retention columns plus
+  `purchase_order_id`, all on `purchases`).
+- **2 storage buckets → 3.** `receipts` and `invoices` are untouched;
+  `documents` is new and holds everything that is not an invoice.
+- **52 tests → 58.** The six new ones pin sign-off blocking, which is the one
+  piece of Track B logic that is genuinely easy to get wrong: three of its
+  four states render as the same word on screen ("Blocked") while meaning
+  different things, and `approved_with_snags` counting as approved is a
+  judgement that would otherwise be invisible.
+- `npm run build` **passes** and `npm run lint` is **clean** — still the only
+  full typecheck.
+
+**The two things most likely to go wrong, said plainly:**
+
+1. **Somebody adds retention back into an "outstanding" total.** It is
+   subtracted in three places (`computePurchase`, `totalsBySource`,
+   `combineTotals`) and reported beside Owed on four screens. A fifth screen
+   that sums `gross − paid` by hand would silently undo the entire feature and
+   nothing would fail. This is now `about.md` §2 rule 8.
+2. **Sign-off is read as a permission check.** It is not — there are still no
+   roles, and anyone signed in can sign off anything and then delete it. The
+   name implies otherwise strongly enough that it is said in the migration, in
+   the route, on the screen itself, and in `about.md` §2 rule 9 and §21. If a
+   real role system is ever wanted, that is a decision about every RLS policy
+   in the database and should be taken on its own.
+
+### 2026-09-04 — Schedule feature showcase data (TEMPORARY — pending deletion)
+
+**What changed (in plain English):**
+Gave the user a hand-run SQL script that adds 4 fake tasks to "46 Glenferrie
+Road" so they can walk a client through the new Schedule tab: one finished
+on time and on budget, one finished late and over budget (to show red
+Drift/Variance), one that is Blocked because its predecessor hasn't been
+signed off and is badly overdue to order (to show the "needs ordering soon"
+alert), and one scheduled to be the last thing to finish so it shows as
+Critical, plus a "before vs after" on baseline drift and a delayed vs
+early comparison. Two small demo costs (£300 and £1,100, both "Paid") were
+tagged to two of these tasks so the Budget · Cost / Variance columns have
+something real to show. A matching cleanup script was written to delete all
+of it afterwards — nothing here is meant to be permanent.
+
+**Why:**
+The user is demonstrating the new Schedule feature (phases, tasks,
+dependencies, sign-off blocking, baselines/drift, float, lead-time ordering
+alerts, and budget variance) to a client and needed live examples of every
+state rather than an empty schedule.
+
+**Where the information came from:**
+User request in chat — no spreadsheet involved. Task/column meanings were
+confirmed by reading `lib/schedule.ts`, `lib/scheduleCosts.ts`,
+`components/schedule/ScheduleTab.tsx` and `components/schedule/VarianceChip.tsx`
+before writing the SQL, so the demo data would actually exercise the real
+logic rather than just look plausible.
+
+**Files used (read, not changed):**
+- `lib/schedule.ts`
+- `lib/scheduleCosts.ts`
+- `components/schedule/ScheduleTab.tsx`
+- `components/schedule/VarianceChip.tsx`
+- `supabase/migrations/0016_schedule_core.sql`
+- `supabase/migrations/0017_task_cost_link.sql`
+- `supabase/migrations/0018_work_calendar.sql`
+- `supabase/migrations/0020_people.sql`
+
+**Files changed:**
+- `updates.md` — this entry.
+- No application code changed. No migration file was added to
+  `supabase/migrations/` — this is throwaway demo data, not a schema change,
+  so it was handed to the user as a one-off script to paste into the Supabase
+  SQL editor rather than committed as a numbered migration.
+
+**Database:**
+Not run by Claude — the user runs the INSERT script themselves in the
+Supabase SQL editor, and later runs the matching DELETE script (also
+provided) to remove every row it created. All 4 tasks, their 2 dependency
+links, their 3 baseline rows and the 2 expense entries are named or
+described starting with `[DEMO]`, so the cleanup script finds everything by
+that prefix. **This must be reverted after the demo** — while it's live it
+inflates the real "Cost to date" / budget figures on Overview by £1,400 and
+moves the project's computed completion date out by a couple of days (the
+new Critical task is deliberately scheduled to finish after everything
+else). `about.md` §13 was deliberately NOT updated for this, since the
+change is explicitly temporary and reverting it a second time in about.md
+would just be churn — about.md's figures describe the real data, and stay
+correct once the cleanup script runs.
+
+**Result / numbers after:**
+Until the cleanup script is run: Cost to date +£1,400 (two new "Paid"
+entries of £300 and £1,100), 4 extra tasks visible on the Schedule tab,
+completion date pushed out by ~2 days. After cleanup: everything reverts
+to exactly what it was before this entry, including the completion date and
+Cost to date figure.

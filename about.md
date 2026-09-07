@@ -41,7 +41,7 @@ migration file does not apply it. Always tell the user to run it.
 
 ---
 
-## 2. Five rules that will bite you
+## 2. Nine rules that will bite you
 
 1. **Never persist a computed total.** `total_incl_vat` is not a column. It is
    derived on every read by `computeEntry`. Same for `subtotal`, `vat_amount`,
@@ -62,6 +62,26 @@ migration file does not apply it. Always tell the user to run it.
    rejected too before that). Match the allowed value lists in §4 exactly.
 5. **`on delete cascade` on every `user_id`.** Deleting an auth user destroys
    all their data. This has already happened once — see §11.
+6. **A task's dates are derived from its duration and its dependencies.**
+   `tasks.duration_days` is authoritative; `planned_start` is a *"start no
+   earlier than"* anchor, not a fact. Setting a date on a task that has
+   predecessors does not stop the scheduler moving it later. See §15 and §16.
+7. **A task's budget is EX-VAT.** `tasks.budget_amount` matches
+   `purchase_lines.line_net`, so variance is `net − budget`, never
+   `gross − budget`. Comparing it against an incl-VAT cost reports a 20%
+   overrun on a task that is exactly on budget — the same class of mistake as
+   rule 1. See §17.
+8. **A retention is not Owed.** Since `0019`, `balance` is
+   `payable_now − paid`, where `payable_now` is `gross_total` minus the
+   retention still held. Money you agreed to hold back is not a bill you are
+   late paying, and adding it back into Owed — anywhere, including in a
+   "total outstanding" on a new screen — undoes the whole feature. It is
+   always reported **beside** Owed, never inside it. See §22.
+9. **Sign-off records who, and enforces nothing.** `task_signoffs` (`0020`)
+   is a log, not a permission check. There are still no roles: signing in is
+   the entire authorisation model (§9.1), so anyone with a login can sign off
+   anything — and delete it afterwards. The word implies otherwise strongly
+   enough that this is said on the screen too. See §21.
 
 ---
 
@@ -257,8 +277,32 @@ space — resolve to one canonical merchant each.
 
 ## 4. Tables
 
-There are **four application tables**, all in schema `public`. Defined in
-`supabase/migrations/0001_init.sql`, amended by `0002` and `0003`.
+There are **four original application tables**, all in schema `public`, defined
+in `supabase/migrations/0001_init.sql` and amended by `0002` and `0003`. Since
+then the schema has grown in three groups, and it is worth knowing which group
+a table belongs to before reading its columns:
+
+| Group | Tables | Added by |
+|---|---|---|
+| **The original four** | `projects`, `expense_entries`, `trade_lookups`, `project_weeks` | `0001`–`0003` |
+| **The transaction core** — money, one row per document | `suppliers`, `supplier_aliases`, `items`, `item_aliases`, `purchases`, `purchase_lines`, `payments`, `receipts` | `0008` |
+| **Ingestion** — how an invoice gets in | `invoice_uploads`, `gmail_accounts`, `gmail_events`, `supplier_domains` | `0010`, `0012`, `0013` |
+| **The schedule** — work and time (§15) | `project_phases`, `tasks`, `task_dependencies`, `task_baselines`, `task_revisions`, `project_holidays` | `0016`, `0018` |
+| **People** — who does the work (§23) | `contacts`, `contact_certifications`, `task_signoffs` | `0020` |
+| **Files** — everything that is not an invoice (§24) | `documents` | `0021` |
+| **Communication** — what happened, what is wrong (§25) | `activity_log`, `snags` | `0022` |
+| **Orders** — what was asked for (§26) | `purchase_orders`, `purchase_order_lines` | `0023` |
+| **Variations** — what changed (§27) | `variations` | `0024` |
+
+**Thirty-one tables in all.** Two nullable columns join the money group to
+everything else, and they are the whole of the plumbing:
+
+* `purchase_lines.task_id` (`0017`) — money ↔ schedule. See §17.
+* `purchases.purchase_order_id` (`0023`) — invoice ↔ order. See §26.
+
+Retention (`0019`) adds no table: three columns on `purchases`, because a
+retention is an attribute of one document rather than an entity with a life of
+its own. See §22.
 
 ### 4.1 `projects`
 
@@ -2594,7 +2638,37 @@ place. The same deletion would cause the same loss again.
 | `0012_upload_before_project.sql` | makes `invoice_uploads.project_id` **nullable**, so an invoice can be uploaded before anyone has said which job it belongs to (§8.2), plus a CHECK that a `committed` upload must still have one. Re-runnable, only widens what is allowed, and raises rather than commits if the column is still NOT NULL afterwards. No §13 figure moves | ✅ **run** — 0013 asserts this file's constraint exists and committed, so it was already in place by 2026-08-25 |
 | `0013_gmail_ingest.sql` | Gmail ingestion phase 1 (§8.3): `gmail_accounts`, `gmail_events`, `supplier_domains`, eight new nullable/defaulted columns on `invoice_uploads` with the `file_hash` dedupe index, and one widened CHECK adding `needs_triage` to `invoice_uploads.status`. Reuses `norm_key()` from 0008. Additive and re-runnable; every existing row stays valid and no §13 figure moves. Raises rather than commits if the widened CHECK did not take or if 0012 was never run | ✅ **run** — 2026-08-25, per the banner in the file; confirmed live on 2026-08-27 by `gmail_events` rows draining normally |
 | `0014_service_role_grants.sql` | gives `service_role` full privileges on the tables, views, sequences and functions in schema `public`, plus a default-privileges rule so tables created later are covered. Fixes a hard `42501 permission denied` — **not** an RLS failure — that had broken every Gmail route since the feature shipped: the drain 500'd every five minutes and push 503'd on every delivery, because `service_role` had never been granted anything and only the three machine-to-machine Gmail routes use it (§8.4, R3). `anon` and `authenticated` are deliberately untouched. No data, policy or schema change; no §13 figure moves. Raises rather than commits if any of the four Gmail tables is still refused | ✅ **run** — 2026-08-27. Confirmed by seven `gmail_events` rows being claimed and marked `done` through `createServiceClient()`, which was a hard refusal beforehand |
-| `0015_shared_workspace.sql` | turns the app from one-tenant-per-user into **one shared workspace** (§9.1): all sixteen `own …` policies become one `shared workspace` policy, `for all to authenticated using (true) with check (true)`. Storage SELECT/DELETE on both private buckets become shared too (INSERT stays own-folder); `trg_seed_trades` now seeds only into an empty table; duplicate `trade_lookups` and `supplier_domains` are collapsed and given global unique indexes. `user_id` columns, indexes and inserts are all untouched — the column becomes provenance rather than permission. No expense data is touched and no §13 figure moves. Re-runnable, and raises rather than commits if any table is still on the old policy | ⬜ **not yet run** |
+| `0015_shared_workspace.sql` | turns the app from one-tenant-per-user into **one shared workspace** (§9.1): all sixteen `own …` policies become one `shared workspace` policy, `for all to authenticated using (true) with check (true)`. Storage SELECT/DELETE on both private buckets become shared too (INSERT stays own-folder); `trg_seed_trades` now seeds only into an empty table; duplicate `trade_lookups` and `supplier_domains` are collapsed and given global unique indexes. `user_id` columns, indexes and inserts are all untouched — the column becomes provenance rather than permission. No expense data is touched and no §13 figure moves. Re-runnable, and raises rather than commits if any table is still on the old policy | ✅ **run** — inferred, not observed: `0016` aborts unless its five tables end up on the `shared workspace` policy, and `0016` committed on 2026-09-03. The banner inside the file still reads `STATUS: NOT YET RUN`; it is stale |
+| `0016_schedule_core.sql` | the **schedule core** (§15): `project_phases`, `tasks`, `task_dependencies`, `task_baselines`, `task_revisions`, plus `projects.start_date` and `projects.planned_end_date` back (both were dropped by `0002`). Every table gets the `0015` `shared workspace` policy and grants to `authenticated` **and** `service_role`. Purely additive — nothing existing is read or changed, and no §13 figure moves. Re-runnable; raises rather than commits if any of the five is not shared | ✅ **run** — 2026-09-03, by the owner |
+| `0017_task_cost_link.sql` | the join between the money half and the schedule half (§17): `task_id` on `purchase_lines` and on `expense_entries`, both nullable and both **`on delete set null`** — deleting a task must never delete money. Two partial indexes. Nothing is backfilled; every row starts untagged and every existing figure reads the same afterwards. Fails early and clearly if `0016` was skipped | ✅ **run** — 2026-09-03, by the owner |
+| `0018_work_calendar.sql` | the working calendar (§16): `projects.working_weekdays smallint[]` defaulting to `{1,2,3,4,5}` with a CHECK that it is a non-empty subset of 1–7, and `project_holidays`. Without it the scheduler counts calendar days and drifts two days a week. Additive, re-runnable, no §13 figure moves | ✅ **run** — 2026-09-03, by the owner |
+| `0019_retention.sql` | **retention** (§22): three columns on `purchases` — `retention_pct`, `retention_release_due`, `retention_released_on` — plus two CHECKs and a partial index. Changes one derived formula (`balance` becomes `payable_now − paid`) but **moves no figure**: every existing row has `retention_pct` null, which makes the arithmetic identical to the penny. No new table and no policy change; `purchases` already carries `0015`'s. Re-runnable | ⬜ **not yet run** |
+| `0020_people.sql` | **people and sign-off** (§23, §21): `contacts`, `contact_certifications`, `task_signoffs`; the FK `0016` reserved on `tasks.assignee_contact_id`; and `task_dependencies.requires_signoff`. All three tables get `0015`'s policy and both grants. Additive; nothing existing is read or changed. Re-runnable; raises rather than commits if any of the three is not shared | ⬜ **not yet run** |
+| `0021_documents.sql` | **the document store** (§24): the `documents` table, the `documents_supersede()` trigger that maintains `is_current`, a **third private storage bucket** (`documents`) with `0015`'s three policies, and the FK `0020` reserved on `contact_certifications.document_id`. Raises rather than commits if the table is not shared **or the bucket was not created** — both are needed and a missing bucket makes every upload fail with no useful message | ⬜ **not yet run** |
+| `0022_activity_snags.sql` | **the log and the snagging list** (§25): `activity_log`, `snags`, and `documents.snag_id` so a snag photo is an ordinary document rather than a second file store. Additive and re-runnable | ⬜ **not yet run** |
+| `0023_purchase_orders.sql` | **purchase orders** (§26): `purchase_orders`, `purchase_order_lines`, and `purchases.purchase_order_id` (`on delete set null` — deleting an order you sent must never delete a bill you received). No totals columns anywhere, by design. Nothing is backfilled, so no invoice is matched to an order and **no spend figure moves**. Re-runnable | ⬜ **not yet run** |
+| `0024_variations.sql` | **change orders** (§27): the `variations` table, with signed `cost_impact` / `days_impact` and a CHECK that only an approved variation carries an approval date. Additive and re-runnable | ⬜ **not yet run** |
+
+**`0019` through `0024` must be run in that order**, after `0018`. Only two of
+the six actually depend on each other — `0021` adds a foreign key to a column
+`0020` created, and `0022` adds a column to the table `0021` created — but
+filename order is execution order in this project and there is no reason to
+depart from it. All six are additive: **not one of them reads, changes or
+deletes an existing row**, and no figure in §13 moves when they are run.
+
+Until each has been run, the screen that depends on it says so explicitly
+rather than rendering empty — every Track B loader treats a missing relation
+as "not installed yet" and returns null, which is a different thing from an
+empty list. That distinction is §2 rule 3, and getting it wrong caused a real
+incident here before (§11).
+
+**`0016`, `0017` and `0018` were run in that order on 2026-09-03**, after
+`0015`. `0017` has a foreign key to `tasks` and refuses to run without it;
+`0018`'s calendar is what makes every date the engine produces correct rather
+than plausible. Each screen that depends on them still detects their absence
+and says so explicitly rather than rendering empty — an empty schedule and an
+uninstalled schedule look identical otherwise, which is the same ambiguity §2
+rule 3 warns about, and that guard is worth keeping for a fresh database.
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.
@@ -2732,3 +2806,687 @@ be intentional and recorded in `updates.md`. The cheapest way to check is
 6. Run `npm run build` (or `npx tsc --noEmit`).
 7. Check the §13 figures still hold, or explain why they moved.
 8. **Add an entry to `updates.md`.** This is mandatory.
+
+---
+
+## 15. The schedule model
+
+Added by migrations `0016`–`0018`, this is the second half of the application.
+The first half tracks **money**; this one tracks **time**. The join between
+them is a single nullable `task_id` on an invoice line (§17).
+
+### The five tables
+
+| Table | Holds |
+|---|---|
+| `project_phases` | a stage of the job — demo, first fix, second fix, snagging. Editable, not hard-coded. Carries its own target dates. |
+| `tasks` | one piece of work: name, trade, phase, planned and actual dates, duration, progress, status, **budget**, weather flag, lead time, hire rate |
+| `task_dependencies` | predecessor → successor, with a type (`FS` / `SS` / `FF` / `SF`) and a lag in days (negative = a lead) |
+| `task_baselines` | the plan, frozen. Captured for the whole project at once by an explicit "Set baseline". Never overwritten — a second capture makes "Baseline 2". |
+| `task_revisions` | append-only: what moved, from what to what, why, and **whether a person chose it or the scheduler did** |
+
+Plus `project_holidays` (`0018`) and three columns on `projects`:
+`start_date`, `planned_end_date`, `working_weekdays`.
+
+### Duration is authoritative — the rule everything else follows
+
+**`tasks.duration_days` is the fact. The dates are the consequence.**
+
+A task's computed start is the latest of:
+
+* every constraint its predecessors impose, and
+* its own `planned_start`, treated as **"start no earlier than"**.
+
+Its computed end is then `start + duration − 1`, counted in **working days**.
+
+That second bullet is the part worth understanding. `planned_start` is a lower
+bound, not an override, and it applies whether or not the task has
+predecessors. It is what makes a manual shift *stick* — you drag a bar right,
+the date is written, and nothing pulls it back — while still letting an
+upstream slip push it further right. Real schedulers call this constraint SNET;
+`forwardPass` in `lib/schedule.ts` implements exactly that and nothing more.
+
+Two consequences to internalise:
+
+* Typing an end date does not lengthen a task. The form fills the duration in
+  from it, and the duration is what is stored and used.
+* Pulling a task *earlier* than its constraints allow is not possible. That is
+  correct — the constraint is the reason it cannot start earlier.
+
+### Phase actual dates are derived, never stored
+
+`phaseActualDates` takes the earliest `actual_start` and the latest
+`actual_end` over the phase's tasks, and **withholds the end entirely while any
+started task is still open**. A phase with work in progress has not finished,
+and reporting a date for it would be a stored computed total (rule 1).
+
+### Cycles are guarded in TypeScript, not in SQL
+
+Postgres cannot express "this graph is acyclic" as a cheap constraint, so
+**nothing in the database prevents A → B → C → A**. It is guarded in three
+places instead:
+
+1. `detectCycle` in `lib/schedule.ts` — iterative DFS, returns the offending
+   path or null.
+2. `POST …/schedule/dependencies` runs it against the graph that *would* exist
+   and refuses with a 400 **naming the tasks in the loop**, so the user is told
+   which link to break.
+3. `scheduleProject` returns `cycle` populated and every task undated rather
+   than looping. Half-truthful dates from a broken graph would be worse.
+
+Do not assume the database is checking this. It is not.
+
+### Task status is not payment status
+
+`TASK_STATUSES` is `Not started · In progress · Blocked · Complete ·
+Cancelled` — deliberately **not** `EXPENSE_STATUSES`. A task is not a payment:
+"Paid" is meaningless for a piece of work, and "In Progress" means a different
+thing on each. Two lists, two CHECK constraints, and nothing joins them.
+
+---
+
+## 16. The scheduling engine
+
+`lib/schedule.ts`. Pure functions: no I/O, no React, no Supabase, nothing
+async. This is not an aesthetic choice — it is what makes the "what if"
+scenario mode (§20) nearly free, because a scenario is the same
+`scheduleProject` run over a modified copy of the bundle that is never saved.
+
+It is also **the one part of this codebase with tests**
+(`lib/schedule.test.mts`, 40 of them, run by `npm test`). `npm run build` is a
+defensible verification step for CRUD and derived totals, where a wrong figure
+is visible on screen. It is not defensible for a critical-path algorithm: a
+forward pass that is off by one over a weekend produces dates that look
+entirely plausible and are wrong by a day a week.
+
+### What it computes
+
+| Function | Does |
+|---|---|
+| `detectCycle` | DFS; the offending path, or null |
+| `topoSort` | Kahn's algorithm; ties break on `sort_order` |
+| `forwardPass` | earliest start / finish per task |
+| `backwardPass` | latest start / finish, from the project finish |
+| `scheduleProject` | the one entry point — dates, float, critical path, blocking, drift |
+| `applyShift` | a **new** bundle with one task moved; never mutates, never writes |
+| `leadTimeAlerts` | what has to be ordered in the next fortnight |
+
+`total_float = late_start − early_start`. A task is **critical** when its total
+float is zero or less. `free_float` is the slack before the *next* task moves,
+as opposed to before the *project* moves — a task can have plenty of the second
+and none of the first.
+
+**Blocked** means a predecessor is not yet Complete. It is not the same as
+"has a predecessor", and the difference is the difference between "could start
+today" and "waiting on someone".
+
+### Float is working days; drift is calendar days
+
+They are read by different people for different reasons and mixing them is
+wrong in both directions:
+
+* **Float** answers *"how many days on site could I lose here"*. A weekend is
+  not one of them.
+* **Drift** answers *"how late are we"*. A builder who is a week late is seven
+  days late, not five.
+
+Both are labelled on screen. `workingDaysBetween` and `calendarDaysBetween` are
+separate functions for this reason, and a test pins the difference.
+
+### The working calendar
+
+`projects.working_weekdays` is ISO numbering — 1 = Monday … 7 = Sunday,
+defaulting to `{1,2,3,4,5}` — plus `project_holidays`. A scheduler that counts
+calendar days instead of working days drifts by two days a week, every week,
+and is a fortnight out after two months.
+
+Every date helper takes the calendar. `endFromDuration("2026-03-06", 3)` — a
+Friday plus three working days — is the **Tuesday**.
+
+### Auto-shift: preview, then confirm
+
+The spec asks for the knock-on effect. The dangerous version silently rewrites
+twenty rows. What is built:
+
+1. The user changes a date.
+2. `POST …/schedule/shift` with `confirm: false` computes the consequence in
+   memory and returns it — *"this moves 6 tasks; completion goes 27 Nov →
+   4 Dec"* — **writing nothing**.
+3. Nothing is saved until the same request comes back with `confirm: true`.
+4. On confirm, each moved task is written **and** gets a `task_revisions` row.
+   The downstream ones are marked `shift_source = 'knock_on'` and carry the
+   originating task's reason.
+
+**The same request shape is used both times.** That symmetry is worth more than
+the round trip it costs: a preview computed by different code from the save is
+a preview that can silently disagree with what actually happens.
+
+Point 4 is what makes the revision log worth reading. Six months later it says
+*"this slipped because the steels were late"*, not *"this slipped"*.
+
+**A confirmed shift writes the computed dates back as `planned_start` /
+`planned_end` on every moved task**, including the knocked-on ones. Without
+that pinning, the next recompute would pull them straight back to wherever
+their constraints allow and the confirmed shift would quietly undo itself.
+
+### The reason gate
+
+Moving `planned_start`, `planned_end` or `duration_days` on a task that **has a
+baseline** requires a reason code. Enforced in `validateShiftReason`, applied by
+both the form and the route, so the two cannot drift. Before a baseline exists
+the gate does not apply — there is nothing to explain until there is something
+to explain it against.
+
+This is deliberately compulsory rather than encouraged. A revision log that is
+optional is a log everybody skips, and a log everybody skipped answers no
+question at all.
+
+---
+
+## 17. Cost tied to the schedule
+
+`lib/scheduleCosts.ts`, over the `task_id` added by migration `0017`. This is
+the spec's stated must-have and it is three nullable columns plus pure
+derivation.
+
+### Line level is authoritative
+
+`purchase_lines.task_id` is the link. **A task's cost is the sum of the LINES
+tagged to it**, never of whole documents. Tagging at document level as well
+would create two places to sum from and one of them would eventually
+double-count. The invoice form's "tag the whole invoice to one task" control
+writes the same per-line `task_id` onto every line — convenience, not a second
+source of truth.
+
+`expense_entries.task_id` is the hand-entered half. A flat expense row is its
+own line, so the same rule holds.
+
+Both are `on delete set null`, **never cascade**: deleting a task must not
+delete money. An untagged cost is a reporting gap that one screen already shows
+you; a deleted invoice line is a lost record with no way back.
+
+### The budget is ex-VAT
+
+`tasks.budget_amount` matches `line_net`, so:
+
+```
+variance = net − budget          ← correct
+variance = gross − budget        ← reports a 20% overrun on a task that is on budget
+```
+
+Every screen showing the pair labels the basis. This is rule 7 of §2 and it is
+the same class of error as the double-VAT bug of 2026-08-06.
+
+### Paid and Committed are apportioned; net and gross are exact
+
+Payment is recorded per **document**, never per line (§6), so a line genuinely
+cannot say what *it* cost you. `paid` and `committed` at task level are
+apportioned pro rata by the line's share of its document's gross, and labelled
+as an estimate. The alternative — reporting a task's paid figure as zero until
+the whole invoice is settled — would be precisely wrong rather than
+approximately right.
+
+`net`, `gross` and `line_count` are not apportioned. They are exact.
+
+### The untagged bucket is a feature
+
+Every screen that reports per task also reports **"£X on N lines not tagged to
+a task"** — on the Schedule tab, in the By-task pivot, and as a sentence on
+Overview. It is not behind a filter and not behind a toggle.
+
+Without it a project reads as perfectly on budget because half its spend is
+invisible to the roll-up. That is the single most likely way this whole feature
+produces a comforting, wrong answer, and one number on screen is the counter.
+
+### Where tagging happens
+
+Three places, all beside a field the user already fills in habitually:
+
+* `PurchaseForm` — a `Select` per line, plus "tag the whole invoice"
+* `ExpenseForm` — one `Select`, next to the trade
+* `LabourForm` — one `Select`. The most valuable of the three: a trade standing
+  around waiting is exactly what the spec's cost-impact example is about.
+
+Changing project on the invoice form **clears every task tag unconditionally**,
+typed or not. A task id from the previous project is not a stale default, it is
+a foreign key pointing at another job's work.
+
+---
+
+## 18. What a delay costs
+
+`costImpactOfShift` prices an extension, and it **only claims what it can
+evidence**:
+
+* **Time-based hire** — `tasks.hire_daily_rate` × extra days. Scaffold is the
+  spec's own example and the common case.
+* **A waiting trade** — `trade_lookups.default_rate × 8`, because that lookup
+  is an *hourly* rate. Labelled an estimate, because it is one.
+
+When neither exists the chip says **"no rate on file — no cost estimate"**
+rather than showing £0. A delay that reads as free is worse than a delay with
+no number on it: £0 is exactly the kind of figure that gets quoted at a client
+and later turns out to be invented. The chip also prints its working, so the
+number can be argued with rather than believed.
+
+A task that **moved** without getting **longer** costs nothing extra in these
+terms, and the code says so: only the increase in span is priced. A hire that
+starts a week later costs the same.
+
+---
+
+## 19. The Gantt
+
+`components/schedule/`. Built in-house rather than with a library:
+
+* The scheduling maths already lives in `lib/schedule.ts`, because the critical
+  path and the float are needed by screens that are not charts. A Gantt library
+  brings its own engine, and then there are two, and they disagree.
+* This app is used almost entirely on phones. Every mature Gantt library is a
+  desktop, mouse-first, dense-grid control.
+* The design system is specific and consistently applied; a library brings its
+  own CSS and its own controls.
+* Inline cost-impact-on-drag is a custom render on the bar in every case.
+
+`TimelineScale.tsx` owns the day→pixel mapping so a bar, a header tick and a
+dependency arrow cannot each compute it slightly differently. Everything on the
+chart is in **calendar** days — it draws real time — while the engine's
+arithmetic is in working days. Non-working days are shaded from the project's
+own calendar, so a bar spanning seven days is visibly five days of work.
+
+**Touch does not drag.** A bar is sixteen pixels tall, a thumb is not precise,
+and a horizontal drag on a scrolling chart fights the page. On a phone a bar is
+a button that opens the shift sheet, which reaches the same API with the same
+preview and the same confirmation. The desktop gets the drag because a mouse
+can hit a six-pixel handle.
+
+Arrows are one absolutely-positioned SVG over the whole grid — an arrow crosses
+rows by definition, so a per-row element would clip itself — and are
+`pointer-events-none` throughout. A link is emphasised only when **both** ends
+are critical, which is the chain the reader is looking for. A collapsed phase
+hides its arrows rather than drawing them to nowhere.
+
+---
+
+## 20. Portfolio reporting, and the two percentages
+
+`lib/portfolio.ts`. No schema; everything is derived from §15–§17.
+
+### There are two percentages and both are always named
+
+* **`pct_complete`** — the duration-weighted mean of hand-entered
+  `tasks.progress_pct`. Weighted by duration because a three-week task at 50%
+  is worth more than a one-day task at 100%. Cancelled tasks are excluded.
+* **`pct_cost`** — spend against budget.
+
+They disagree constantly, and that is the most useful thing this screen says: a
+job is routinely 40% built and 70% spent. Deriving progress *from* spend, which
+is the tempting shortcut, reports 90% done the day a large material order
+lands.
+
+On the dashboard card they are **two separate bars in two colours**, the
+schedule one explicitly labelled "built". They are never merged.
+
+### "Days behind" says what it measured against
+
+Against the captured baseline where one exists; against
+`projects.planned_end_date` where it does not; and **null when there is
+neither, rather than zero**. `variance_basis` carries which, so the screen
+prints "7 days behind baseline" or "7 days behind target" and never leaves the
+reader guessing which promise is being broken.
+
+The portfolio roll-up sums the **money** and counts the **projects behind**. It
+does not average the percentages: averaging "60% complete" across a £400k job
+and a £4k job produces a number that describes neither.
+
+### Where it lives
+
+A **segmented control on the dashboard** — Money / Schedule — not a fifth nav
+destination. The 2026-08-28 rewrite went from six nav items to four on purpose,
+and "how are my sites doing on time" is not a different place from "how are my
+sites doing on money"; it is the same list on the other axis.
+
+The rolled-up chart is **one `Gantt` per project, stacked**, not one chart with
+every bar in it. Two sites share no dependencies and no critical path, so a
+merged grid would draw arrows between unrelated buildings and a "critical path"
+that spans both. It is read-only there: editing one site's schedule from a
+screen about all of them is how you move the wrong bar.
+
+### "What if"
+
+Scenario mode holds a draft bundle in React state, renders it with a distinct
+treatment, and shows the delta — *completion +9 days, cost +£2,140, 3 tasks
+newly critical*. **Nothing is written to the database for a scenario.** Apply
+replays the same edits through the ordinary `POST …/schedule/shift` route, so
+the live schedule is only ever changed by the one path that logs revisions;
+Discard throws the draft away.
+
+A saved, named, shareable scenario is a different and much larger feature and
+is deliberately out of scope.
+
+### Lead time and weather
+
+* A task with `lead_time_days` shows an **order-by marker** on the chart at
+  `planned_start − lead_time_days` (calendar days — a merchant's lead time does
+  not care that Saturday is not a working day), and anything inside the next
+  fortnight is listed on the Schedule tab and counted on the dashboard. This is
+  how joinery and windows slip.
+* `weather_sensitive` is a **manual flag**: a badge, and a one-tap filter. That
+  is the whole feature. A live forecast API is a paid key, a site postcode, a
+  cron and a failure mode, for information the flag mostly already carries —
+  "this bar is weather-dependent and it is in February".
+
+---
+
+## 21. Sign-off, roles and what does NOT exist
+
+Worth stating plainly, because this part of the app *looks* as though it
+implies a permission model and it does not:
+
+* There is **no role system**. §9.1 still holds in full: signing in is the
+  entire authorisation model. Anyone with a login can add, move, re-baseline or
+  delete any task on any project — and can sign any of it off.
+* There **is** a sign-off record since `0020`. `task_signoffs` holds
+  `signed_by`, `signed_at`, an `outcome` of `approved` / `rejected` /
+  `approved_with_snags`, and a note. It is **append-only by convention** — no
+  update route is built, because a sign-off that can be edited afterwards is
+  not a sign-off. Withdrawing one means recording a second, later outcome,
+  which is also what happens on site.
+* **The record enforces nothing.** `POST …/tasks/[taskId]/signoff` has no
+  permission check, and its absence is deliberate rather than missing. Adding
+  real roles means rewriting every RLS policy in the database, and that should
+  be its own decision rather than a side effect of building this. The route,
+  the migration and the screen all say so, in those words.
+* `task_dependencies.requires_signoff` is the one place the record has teeth,
+  and only over the *display*: a successor whose predecessor is `Complete` but
+  unsigned reports `is_blocked` with `blocked_reason: "signoff"` rather than
+  `"predecessor"`. Nothing is prevented; the schedule simply says which of the
+  two problems it is, because they send you to chase different people.
+  `approved_with_snags` counts as approved — on site that is what signing off
+  with a snag list means, and the snags are chased through §25 instead.
+* `task_revisions.changed_by` records **who**, not **whether they were allowed
+  to**. It is provenance, exactly as `user_id` is (§9).
+
+---
+
+## 22. Retention (`0019`)
+
+A retention is a percentage of an invoice held back from a contractor until the
+defects period is up. Before `0019` the only way to record one was to leave an
+invoice permanently part-paid — which put it in **Owed**, next to genuinely
+overdue bills and indistinguishable from one. Telling those two apart is the
+entire feature.
+
+Three columns on `purchases`, no new table, because a retention is an attribute
+of one document rather than an entity with a life of its own:
+
+| Column | Meaning |
+|---|---|
+| `retention_pct` | numeric(5,2), 0–100. **NULL, not 0**, when there is none |
+| `retention_release_due` | when it becomes payable |
+| `retention_released_on` | when it actually was; non-null means no longer held |
+
+**NULL and 0 are different answers.** "No retention on this invoice" is not
+"0% was held", and the CHECK `purchases_retention_dates_need_pct` refuses a
+release date with no percentage because that describes nothing.
+`validateRetention` rejects a typed 0 with "leave it blank if nothing is held
+back".
+
+Everything derived, nothing stored (`lib/purchases.ts`):
+
+```
+retention_amount = round2(gross_total × retention_pct / 100)
+retention_held   = retention_released_on ? 0 : retention_amount
+payable_now      = gross_total − retention_held
+balance          = payable_now − paid          ← the changed formula
+status           = purchaseStatus(payable_now, paid)
+```
+
+Two consequences worth internalising:
+
+* **`balance` changed and nothing moved.** Every row predating `0019` has
+  `retention_pct` null, so `retention_held` is 0, `payable_now` is
+  `gross_total`, and the arithmetic is identical to the penny. A figure only
+  moves when somebody types a percentage.
+* **`status` measures against payable, not gross.** An invoice with 5% held and
+  95% handed over is `Paid`. Calling it `Partial` for the length of the defects
+  period would put it on every chase list for a year.
+
+`PurchaseTotals.retention_held` carries the figure through `totalsBySource` and
+`combineTotals`, both of which subtract it from `balance` rather than folding it
+in. Because retention is deliberately invisible to every Owed figure, **nothing
+in the app will ever chase it** — which is why `getRetentionsDue()` exists and
+why the Dashboard and the project Overview both carry a "past its release date"
+line. A retention nobody reclaims is a discount given away by accident.
+
+---
+
+## 23. People, and why a worker is not a supplier (`0020`)
+
+`contacts` is a separate register from `suppliers`, and that is not a style
+preference — it is how the money side already behaves. Labour is logged with the
+person's name on `purchase_lines.description_raw` and **no supplier row is
+created** (§6.6.1). Putting Dave Builder into `suppliers` would put him on the
+Suppliers screen as a merchant with a trade account and start matching invoices
+against his name. `contacts.supplier_id` is the optional bridge for the one real
+overlap: a subcontractor who also invoices as a limited company.
+
+**The valuable half is `contact_certifications.expires_on`**, not the phone
+numbers. Public liability that lapsed in March on a job that is still running is
+a real problem, and the only reason nobody notices is that nobody looks.
+`lib/certifications.ts` derives the state on every read — never stored, because
+a stored `expired` flag is wrong the morning after it is written, silently and
+in the reassuring direction:
+
+| State | Meaning |
+|---|---|
+| `valid` | more than 30 days left |
+| `expiring_soon` | 30 days or fewer |
+| `expired` | the date has passed |
+| `unknown` | **no expiry date on file** — deliberately not folded into `valid` |
+
+`unknown` is the important one. "We have not checked" and "we checked and it is
+fine" are different answers, and a register that conflates them is worse than no
+register. A contact with no certificates at all reports `unknown`, not `valid`.
+
+`getExpiringCertifications()` filters to **active** contacts only: chasing a
+lapsed certificate for somebody who left the job is noise, and noise is what
+makes a warning ignorable. It surfaces on the Dashboard, because a compliance
+date behind three taps is a date nobody reads.
+
+Three smaller notes:
+
+* `contacts.trades` is `text[]`, matched against `trade_lookups.name` by
+  convention only — no FK, exactly like `tasks.trade` and `purchases.trade`.
+* The **Directory gained a third segment**: Suppliers ⇄ Items ⇄ People, one
+  destination, for the same reason the first two were merged — all three are
+  cross-project registers, and the nav went from six items to four on purpose.
+  `/contacts` renders it, as `/suppliers` and `/items` already do. People is
+  the only segment with an Add button: suppliers and items are created as a side
+  effect of logging an invoice, and a person never is.
+* `LabourForm`'s contact picker fills the name, trade and hourly rate and
+  **changes nothing about how labour is stored**. The name still goes on the
+  line; typing one freehand works exactly as before. It prefers the hourly rate
+  over the day rate because the form is rate × hours — dividing a day rate by
+  eight would invent a number and then store it as though it had been agreed.
+
+---
+
+## 24. Documents, and the one derived value that IS stored (`0021`)
+
+`receipts` (`0001`) and the `invoices` bucket (`0010`) hold invoice evidence and
+are untouched. An invoice attachment is a different thing with a different
+lifecycle: it is evidence for one money row, it arrives through the extraction
+pipeline, and it is never versioned. `documents` is everything else — planning
+decisions, building control, warranties, certificates, drawings, specs,
+contracts and site photographs — in a **third private bucket**, `documents`,
+with `0015`'s policy shape (shared read and delete; INSERT still keyed to
+`storage.foldername(name)[1] = auth.uid()::text`).
+
+**`documents.is_current` is the one place this codebase stores a derived value
+on purpose.** It means "nothing supersedes me", which is computable — but the
+whole point of the requirement is that *which drawing is current* must be
+unambiguous at a glance and correct even if the chain is edited by hand.
+Computing it would make "current" an opinion of whichever query ran.
+
+It cannot drift, because nothing maintains it by hand: the trigger
+`trg_documents_supersede` clears the superseded row's flag in the same statement
+that creates the new version. Application code reads it and never writes it.
+`version_no` is likewise read from the row being superseded rather than trusted
+from the client, so it cannot be typed wrong.
+
+`DELETE /api/documents/[id]` repairs the chain before deleting: anything that
+superseded this row is re-pointed at what this row superseded, and if nothing
+superseded it then what it superseded becomes current again. Without that,
+deleting rev B out of A → B → C would leave C orphaned and A marked superseded
+by nothing — exactly the ambiguity `is_current` exists to prevent.
+`versionChain()` also guards against a loop, because `supersedes_id` is
+nullable and editable and Postgres cannot express "this chain is acyclic" any
+more cheaply than it could for task dependencies (§15).
+
+Three more things worth knowing:
+
+* **`taken_at` is not `created_at`.** A photo taken in February and uploaded in
+  June belongs in February on the timeline. Photos with no capture date sort
+  **last**, in their own group, rather than being placed on the upload date — a
+  timeline that invents dates is worse than one with a gap in it.
+* **`project_id` is nullable.** A company insurance certificate is not one job's,
+  and `getDocumentBundle` shows project-less documents alongside the project's
+  own, because hiding one is how a certificate goes unnoticed.
+* Files go **straight to Storage** with a signed upload URL, the same two-step
+  the invoice flow uses and for the same reason (§8.2): Vercel caps serverless
+  bodies at 4.5MB. If the PUT fails the row is deleted again — a document
+  pointing at a file that does not exist would show in the list and fail every
+  time somebody opened it. Reading is a **redirect** through
+  `/api/documents/[id]/file`, minted at click time, because a signed URL
+  embedded at page load is dead by the time a list has been open half an hour.
+  There is no thumbnail pipeline: the photo grid loads the real files, because
+  this is a handful of photos per phase and half an image pipeline is worse than
+  none.
+
+---
+
+## 25. The activity log and the snagging list (`0022`)
+
+Two tables, deliberately not one. An activity entry records something that
+**happened** and is finished; a snag is something that is **wrong** and has a
+state that changes until somebody fixes it and somebody else agrees. One table
+with a nullable status would make every snagging query filter out phone calls.
+
+**`activity_log` is append-only and has no PATCH route.** The value of a log is
+entirely in its being trustworthy, and one that can be quietly reworded six
+months later answers nothing. A mistake is corrected by deleting the entry and
+writing a new one, which at least leaves the correction visible as a correction.
+`occurred_at` is when it *happened*, not when it was typed —
+`buildActivityPayload` stamps midday UTC so an entry cannot slide onto the
+previous day when read back in a British summer.
+
+**`snags` is editable, and that is not an inconsistency** — see above. Its
+`status` and its dates have to tell the same story, so `validateSnag` refuses
+`fixed` with no `fixed_on` and `verified` with neither date. "Verified" with
+nothing saying when anybody looked is precisely the claim a snagging list exists
+to be able to prove. `verified_by` is stamped by the server, never sent by the
+form, and cleared again if a snag is reopened.
+
+`status` has **four** values, not the spec's three: every real list eventually
+contains something that was looked at and deliberately left, and without
+`wont_fix` that item stays open for ever and makes the open count meaningless.
+`severity` exists so "any open safety snags?" is a query rather than a read of
+every title — and an open safety snag is surfaced on the project header itself,
+above the tabs, because it should never need looking for.
+
+**Snag photos are `documents` rows** with `doc_type = 'photo'` and a `snag_id`
+(`on delete set null`). Not a second file store: one document table means one
+upload route, one bucket, one signed-URL read and one delete path. Deleting a
+snag leaves its photographs in place — deleting a record must not delete
+evidence, the same rule that keeps invoice lines alive when a task is deleted.
+
+---
+
+## 26. Purchase orders — and the fact that a PO is not spend (`0023`)
+
+`purchases` records a document that has **already been issued to you**. There was
+no outbound order: no PO number, no "ordered but not delivered" state, no
+ordered-versus-received quantity, no expected delivery. `PURCHASE_ORIGINS` covers
+manual / excel / text / invoice_ocr / legacy_import — none of which is "we raised
+this order".
+
+**Nothing in `purchase_orders` reaches Committed, Cost, Paid or Owed.** An order
+is an intention; only the invoice that follows is money. That is why it is its
+own table rather than a status on `purchases`, and **any screen that adds a PO
+total to a spend total is wrong.** There is no totals column and no `line_net`:
+qty × unit price is arithmetic, computed on read in `lib/purchaseOrders.ts`.
+`orderLineTotals()` is shared with the form so the running total while typing
+and the figure stored cannot disagree by a penny.
+
+The value is `purchases.purchase_order_id`. Two figures come out of it:
+
+* **`price_variance`** = `invoiced_net − net`, both ex-VAT. This is where price
+  creep on a trade account becomes visible instead of being absorbed. It is
+  **null, not zero**, until something has been invoiced — £0 would read as "came
+  in exactly on budget", a very different and much more reassuring claim than
+  "nothing has arrived".
+* **over-delivery**, per line: ordered 40, took 48. Kept separate from the price
+  variance because they are different failures with different fixes — a merchant
+  sending too much versus charging too much — and one combined "something is
+  wrong" figure would hide both. Over-delivery is **recorded, never refused**;
+  that is the point of the table.
+
+Matching is **document to document only**. There is no line-to-line match:
+merchants split and merge lines between the order and the invoice constantly, and
+a fuzzy line match would produce confident, wrong pairings. The invoice form's
+order picker sorts this supplier's orders first but **never auto-selects**, for
+the same reason — an unmatched invoice is a visible gap; a wrongly matched one
+reports a variance that never happened. Draft and cancelled orders are not
+offered at all.
+
+Recording a delivery has its own route (`…/orders/[poId]/receipt`) and its own
+sheet, because it is done standing in a yard on a phone: making somebody open a
+form with every price and VAT rate editable to type one number is how a wrong
+price gets saved by accident. **The order's status follows the quantities**
+rather than being typed — an order whose lines have all arrived *is* received,
+and letting the two disagree makes the status worthless. A cancelled order that
+receives a delivery stays cancelled; that is a problem for a human, and quietly
+reviving it would hide it.
+
+`purchase_order_lines.vat_rate` uses **0 / 5 / 20**, the same set `0011` gave the
+other two money tables. (The implementation plan warned that
+`purchase_lines.vat_rate` was still stuck at 0/20 and should be widened here. It
+was wrong: `0011` already did it, which is why `0011` exists.)
+
+---
+
+## 27. Variations — two numbers, never one (`0024`)
+
+The app has always had `quoted_amount` and a variance against it, which is the
+*result* of variations. `variations` is the record of the variations themselves:
+what changed, **why**, who asked, who agreed, what it was worth and how many days
+it added.
+
+**`cost_impact` and `days_impact` are hand-entered and signed.** They are the
+agreement made at the time, not a derivation. Signed because a variation can be
+an omission — taking the second bathroom out of the scope is worth −£6,000 and
+−5 days, and a roll-up that can only add would report the job as more expensive
+than it is.
+
+The screen shows the agreed figure **beside** the linked task's actual net cost
+and actual baseline drift, and never combines them. The only reason anybody opens
+a variations log six months later is to find out whether those two matched;
+collapsing them into a single "variation cost" throws the question away.
+`variationsOverAgreement()` flags where they have parted company, and the screen
+says plainly that it is a prompt to look rather than a verdict — a task's cost
+includes everything tagged to it, not only this variation's share.
+
+**Approved and proposed are counted separately and never added.** An approved
+variation is a commitment; a proposed one is a conversation, and a forecast that
+quietly includes conversations is fiction. `rejected` and `withdrawn` contribute
+to neither and are kept as a record that the question was asked and answered —
+which is why the screen offers `withdrawn` rather than deletion.
+
+`approved_by` is stamped by the server and only while the variation actually is
+approved, so a name cannot outlive the decision; re-saving an already-approved
+variation does not reassign it to whoever edited the wording. The CHECK
+`variations_approved_needs_status` refuses an approval date on anything not
+approved, which is why `buildVariationPayload` nulls it when the status moves.
+
+Cost is **ex-VAT**, to match the task budgets it is compared against (rule 7).
