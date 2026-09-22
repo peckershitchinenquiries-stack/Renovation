@@ -38,10 +38,18 @@ dashboard.
 npm run dev     # dev server on :3000
 npm run build   # production build — also the only full typecheck
 npm run lint    # next lint
+npm test        # the scheduling engine's unit tests (65)
 ```
 
-There is no test suite. `npm run build` is the closest thing to a verification
-step, since it typechecks the whole project; run it after non-trivial changes.
+`npm run build` is the verification step for most of this project, since it
+typechecks everything; run it after non-trivial changes.
+
+**One part of the codebase does have tests: the scheduling engine.**
+`lib/schedule.test.mts` — 65 tests, Node's built-in runner, no framework. Run
+them with `npm test` after touching `lib/schedule.ts` or anything that feeds
+it. A wrong total is visible on a screen; a forward pass that is off by one
+over a weekend produces dates that look entirely plausible and are wrong by a
+day a week. Everything else still has no tests.
 
 Migrations are **not** applied by a CLI. Each file in `supabase/migrations/` is
 pasted into the Supabase SQL editor and run by hand, in filename order.
@@ -122,8 +130,32 @@ No screen sums both, and none should start. New entries default to `diary`.
 
 `middleware.ts` runs `updateSession` on every non-static path to refresh the
 Supabase session cookie. Route Handlers use the server client, never the browser
-client. `createServiceClient()` (service-role key) exists only for storage MIME
-validation and signed URLs — never expose it to the client.
+client. `createServiceClient()` (service-role key) is used by the three
+cron/push Gmail routes and **nothing else** — never expose it to the client.
+(This used to say "only for storage MIME validation and signed URLs". That was
+never true and it mattered: it read as though uploaded files were being
+inspected server-side. Nothing sniffs uploaded content — upload limits are
+enforced by the storage buckets themselves, see about.md §9.2.)
+
+### Uploads are limited by the bucket, not by the route
+
+The document and invoice upload routes hand the browser a **signed upload URL**
+and never see the file, so their size and MIME checks are only as honest as the
+JSON body that declared them. `0025_storage_limits.sql` puts
+`file_size_limit` and `allowed_mime_types` on all three buckets, which is what
+actually enforces them. **The list in code and the bucket's list change
+together.** For documents that list is `DOCUMENT_MIME_TYPES` in
+`lib/documents.ts` — one list, read by the upload route *and* by the file
+picker's `accept` attribute, because those two used to disagree and the picker
+offered files the route refused with a 415. The `invoices` bucket must keep
+`image/heic`: the Gmail drain uploads it and the manual route does not, and
+Gmail ingestion fails silently.
+
+Adding a document is **bytes first, row second**: `POST
+/api/documents/upload-url` returns a signed URL and creates nothing, and `POST
+/api/documents` inserts the row only after finding the object in the bucket.
+Do not put it back the other way round — a row created first survives a closed
+tab and becomes a document that cannot be opened. See about.md §24.
 
 ## Schema constraints that bite
 

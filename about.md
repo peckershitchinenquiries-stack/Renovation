@@ -2407,9 +2407,13 @@ them.
   Supabase session cookie.
 - Route Handlers use the **server** client (`lib/supabase/server.ts`), never the
   browser client.
-- `createServiceClient()` (service-role key) is for storage MIME validation,
-  signed URLs, **and the three cron/push Gmail routes** — see §8.4. Nowhere
-  else.
+- `createServiceClient()` (service-role key) is used by **the three cron/push
+  Gmail routes and nothing else** — see §8.4. It was long described here and in
+  `CLAUDE.md` as also doing "storage MIME validation", which it never has:
+  `grep createServiceClient` returns the three Gmail routes and its own
+  definition. That wording mattered, because it read as though uploaded files
+  were being inspected server-side when nothing was — see §9.2 for what
+  actually enforces upload limits.
 - `service_role` bypasses RLS but still needs table **grants**;
   `0014_service_role_grants.sql` gives it them, and sets default privileges so
   new tables inherit them. A missing grant is a hard `42501 permission denied`,
@@ -2471,6 +2475,77 @@ destroys the work that friend did.
 **An empty result is ambiguous** — it means either "no rows" or, before `0015`,
 "rows owned by a different user". This exact ambiguity caused a real incident.
 See §11.
+
+### 9.2 Upload limits are enforced by the bucket, not by the route
+
+Two of the three upload paths hand the browser a **signed upload URL** and let
+it PUT the bytes straight at Storage, because Vercel caps a serverless request
+body at 4.5MB and a phone photo is bigger. The route never sees the file — it
+sees a JSON body saying *"this is a 2MB image/png"*, and it checks that.
+
+Which means, until `0025`, those checks were **advisory**. The size and the
+type were whatever the client claimed, and the signed URL accepted anything:
+declare 1KB of `image/png`, PUT half a gigabyte of something else, and both
+checks pass because neither was ever looking at the file. All three buckets had
+been created with `id`, `name` and `public` and nothing else.
+
+`0025_storage_limits.sql` sets `file_size_limit` and `allowed_mime_types` on
+all three. Storage enforces both at upload time. The list in code stays as the
+first line, because it can say *why* in a message under the right field where a
+400 from Storage cannot — so **the two lists change together**, the same
+pairing rule §2 rule 4 states for CHECK constraints and the arrays in
+`types/index.ts`.
+
+For `documents` that list in code is `DOCUMENT_MIME_TYPES` in
+`lib/documents.ts`, read by the upload route **and** by the file picker's
+`accept` attribute. It became one list on 2026-09-22; before that the picker
+had its own, wider one (`image/*`) and offered files the route then refused
+with a 415. `image/heif` joined `image/heic` in the same change — see §24.
+
+| bucket | limit | types |
+|---|---|---|
+| `documents` | 25MB | jpeg, png, webp, heic, heif, pdf, docx, doc, txt |
+| `invoices` | 20MB | jpeg, png, webp, heic, pdf |
+| `receipts` | 10MB | jpeg, png, webp, pdf |
+
+Three things about that table are load-bearing:
+
+* **`invoices` is the UNION of two writers, not one.** The manual route allows
+  jpeg/png/webp/pdf; the Gmail drain's `ATTACHMENT_MIME_TYPES` allows
+  pdf/jpeg/png/**heic**. Narrowing this to the manual route's list would reject
+  every HEIC attachment arriving from an iPhone by email — and Gmail ingestion
+  fails **silently** (§8.4): the event is marked done, the cursor moves past
+  it, and that mail is stranded for ever. `0025` asserts `image/heic` is
+  present and refuses to commit without it.
+* **`image/svg+xml` is gone from `documents`**, from the route and the bucket
+  both. An SVG is a scripted document, not a picture, and these are served
+  inline through a redirect to a signed URL. Nothing here needs one — drawings
+  arrive as PDFs. Rows predating the change stay readable, but
+  `/api/documents/[id]/file` now forces a **download** for them rather than
+  rendering one in a tab.
+* **`receipts` was never at risk** — that route POSTs the file through the
+  handler and checks the real bytes. It is limited anyway, so all three read
+  the same way.
+
+**What this does not do.** `allowed_mime_types` is checked against the
+content-type the uploader *declares*; Storage does not sniff magic bytes. A
+signed-in user can still store arbitrary bytes labelled `image/png`. The size
+hole is closed completely — bytes are bytes — and the casual wrong-file case is
+closed. Sniffing content after the fact needs a service-role read of every
+uploaded object and is separate work that has not been done.
+
+### 9.3 One query builds a filter by interpolation, and is guarded
+
+Every query in `lib/data.ts` passes values through `.eq()` and friends, which
+send them as parameters that cannot be read as syntax. One does not:
+`getDocumentBundle` uses `.or('project_id.eq.<id>,project_id.is.null')`,
+because `.or()` takes a filter *expression* and there is no parameter form.
+
+Route params reach these loaders straight from the URL, so an id containing a
+comma or a dot would be parsed as more filter rather than as a value. The
+loader now refuses anything that is not a UUID before it gets there (`isUuid`).
+A non-UUID cannot name a project in any case, so nothing legitimate is lost.
+**Do not remove the guard without removing the interpolation.**
 
 ---
 
@@ -2648,6 +2723,7 @@ place. The same deletion would cause the same loss again.
 | `0022_activity_snags.sql` | **the log and the snagging list** (§25): `activity_log`, `snags`, and `documents.snag_id` so a snag photo is an ordinary document rather than a second file store. Additive and re-runnable | ⬜ **not yet run** |
 | `0023_purchase_orders.sql` | **purchase orders** (§26): `purchase_orders`, `purchase_order_lines`, and `purchases.purchase_order_id` (`on delete set null` — deleting an order you sent must never delete a bill you received). No totals columns anywhere, by design. Nothing is backfilled, so no invoice is matched to an order and **no spend figure moves**. Re-runnable | ⬜ **not yet run** |
 | `0024_variations.sql` | **change orders** (§27): the `variations` table, with signed `cost_impact` / `days_impact` and a CHECK that only an approved variation carries an approval date. Additive and re-runnable | ⬜ **not yet run** |
+| `0025_storage_limits.sql` | **makes the upload limits real** (§9.2): sets `file_size_limit` and `allowed_mime_types` on `documents` (25MB), `invoices` (20MB) and `receipts` (10MB). Until this runs, the size and type checks in the two signed-URL routes are advisory — the route never sees the file. Touches no table, no row, no policy; no §13 figure moves. `invoices` is the **union** of the manual route and the Gmail drain and must keep `image/heic`, which the migration asserts before committing. Re-runnable | ⬜ **not yet run** |
 
 **`0019` through `0024` must be run in that order**, after `0018`. Only two of
 the six actually depend on each other — `0021` adds a foreign key to a column
@@ -2669,6 +2745,18 @@ than plausible. Each screen that depends on them still detects their absence
 and says so explicitly rather than rendering empty — an empty schedule and an
 uninstalled schedule look identical otherwise, which is the same ambiguity §2
 rule 3 warns about, and that guard is worth keeping for a fresh database.
+
+That guard was **claimed but not actually working until 2026-09-22**, and it is
+worth knowing why, because the same trap is waiting for the next loader anyone
+writes. `app/(app)/projects/[id]/page.tsx` wrapped `getScheduleBundle` in a
+`.catch()` — but supabase-js reports a missing relation in the RESULT rather
+than throwing, so the catch never fired, `tasks` came back null, and the tab
+rendered a perfectly ordinary empty schedule. `getScheduleBundle` now runs
+`missingRelation` on the tasks query and returns null, exactly as every Track B
+loader already did. The five schedule write routes answer `42P01` with a 503
+naming `0016_schedule_core.sql`, the way the contacts, snags, variations and
+purchase-order routes do — a raw *"relation does not exist"* reads as a bug in
+the form rather than as a step nobody has taken.
 
 `0009` is a **generated file**. Edit the Python script and regenerate — never
 hand-edit the SQL.
@@ -2821,8 +2909,8 @@ them is a single nullable `task_id` on an invoice line (§17).
 |---|---|
 | `project_phases` | a stage of the job — demo, first fix, second fix, snagging. Editable, not hard-coded. Carries its own target dates. |
 | `tasks` | one piece of work: name, trade, phase, planned and actual dates, duration, progress, status, **budget**, weather flag, lead time, hire rate |
-| `task_dependencies` | predecessor → successor, with a type (`FS` / `SS` / `FF` / `SF`) and a lag in days (negative = a lead) |
-| `task_baselines` | the plan, frozen. Captured for the whole project at once by an explicit "Set baseline". Never overwritten — a second capture makes "Baseline 2". |
+| `task_dependencies` | predecessor → successor, with a type (`FS` / `SS` / `FF` / `SF`) and a lag in **calendar** days (negative = a lead) |
+| `task_baselines` | the plan, frozen. Captured for the whole project at once by an explicit "Set baseline". Never overwritten — a second capture makes "Baseline 2". Two clicks a moment apart both read the existing names and both pick the same next one; `ux_task_baselines_task_name` refuses the loser, and because every task goes in one statement the loser rolls back whole. That is the schema working, so the only thing fixed (2026-09-22) was the message: a `23505` is now a **409 "was captured a moment ago"** rather than a raw Postgres string in a red toast. |
 | `task_revisions` | append-only: what moved, from what to what, why, and **whether a person chose it or the scheduler did** |
 
 Plus `project_holidays` (`0018`) and three columns on `projects`:
@@ -2893,7 +2981,7 @@ scenario mode (§20) nearly free, because a scenario is the same
 `scheduleProject` run over a modified copy of the bundle that is never saved.
 
 It is also **the one part of this codebase with tests**
-(`lib/schedule.test.mts`, 40 of them, run by `npm test`). `npm run build` is a
+(`lib/schedule.test.mts`, 65 of them, run by `npm test`). `npm run build` is a
 defensible verification step for CRUD and derived totals, where a wrong figure
 is visible on screen. It is not defensible for a critical-path algorithm: a
 forward pass that is off by one over a weekend produces dates that look
@@ -2920,18 +3008,24 @@ and none of the first.
 "has a predecessor", and the difference is the difference between "could start
 today" and "waiting on someone".
 
-### Float is working days; drift is calendar days
+### Float is working days; drift and lag are calendar days
 
 They are read by different people for different reasons and mixing them is
-wrong in both directions:
+wrong in every direction:
 
 * **Float** answers *"how many days on site could I lose here"*. A weekend is
   not one of them.
 * **Drift** answers *"how late are we"*. A builder who is a week late is seven
   days late, not five.
+* **Lag** answers *"how long must we wait"*. Screed dries at the weekend and
+  concrete cures over a bank holiday, so a 7-day lag is **a week** — not the
+  nine calendar days it would be if the wait were walked in working days. This
+  was walked in working days until 2026-09-22 and is now `addLag()`; it is the
+  same unit `orderByDate()` has always used for merchant lead times, so the two
+  finally agree.
 
-Both are labelled on screen. `workingDaysBetween` and `calendarDaysBetween` are
-separate functions for this reason, and a test pins the difference.
+All three are labelled on screen. `workingDaysBetween`, `calendarDaysBetween`
+and `addLag` are separate functions for this reason, and tests pin each.
 
 ### The working calendar
 
@@ -2969,17 +3063,53 @@ Point 4 is what makes the revision log worth reading. Six months later it says
 that pinning, the next recompute would pull them straight back to wherever
 their constraints allow and the confirmed shift would quietly undo itself.
 
+**A new END date is converted into a duration before anything else happens.**
+`duration_days` is authoritative (rule 1), so a request carrying only dates
+would leave the task at its old length: the preview would report *"no change"*
+and the confirm would then write the old duration's end date back over what the
+user had just typed. `durationFromDates()` does the conversion, and both the
+shift route and the scenario preview call it — so a dragged bar, a typed date
+and the saved row cannot disagree about how long the task now is. A drag that
+**moves** a bar is the one exception: it sends the task's existing duration, so
+crossing a weekend cannot quietly make the task a day longer.
+
+**A confirmed shift is all-or-nothing.** A Route Handler cannot open a
+transaction, so the loop remembers each task's stored dates before touching it
+and writes them all back if any row fails — the compensating clean-up
+`lib/purchaseOrderWrite.ts` uses. The revision rows are written only after
+every task is safely saved, so the log can never describe a move that was
+rolled back.
+
 ### The reason gate
 
-Moving `planned_start`, `planned_end` or `duration_days` on a task that **has a
-baseline** requires a reason code. Enforced in `validateShiftReason`, applied by
-both the form and the route, so the two cannot drift. Before a baseline exists
-the gate does not apply — there is nothing to explain until there is something
-to explain it against.
+Moving `planned_start`, `planned_end` or `duration_days` on a task that is in
+the **current baseline** requires a reason code. Enforced in
+`validateShiftReason`, applied by both the form and the route, so the two
+cannot drift. Before a baseline exists the gate does not apply — there is
+nothing to explain until there is something to explain it against.
+
+**It covers every task the move touches, not just the one that was edited.**
+Moving an unbaselined task that knocks on six baselined ones moves six
+baselined dates, and a log that stayed silent about those six is exactly the
+log nobody can answer a question from later. The shift route computes this from
+the bundle's current baseline and returns it as `needs_reason` on the preview;
+the dialog reads that flag rather than guessing, so the field the user is shown
+and the rule that rejects the save are one decision. The scenario sheet applies
+the same rule against the tasks its draft actually moves.
 
 This is deliberately compulsory rather than encouraged. A revision log that is
 optional is a log everybody skips, and a log everybody skipped answers no
 question at all.
+
+### Applying a scenario cannot be atomic, and says so
+
+A scenario is one `POST …/schedule/shift` per edited task, so there is no
+single transaction to wrap them in. Each individual shift is all-or-nothing,
+but the set is not. When one fails part way, the panel names how many landed,
+**removes those edits from the scenario and keeps the rest**, and refreshes the
+live schedule. The scenario stays open holding exactly what still has to be
+dealt with. Reporting "could not apply" after writing three of five was the
+real fault — not the missing transaction, but the missing account of one.
 
 ---
 
@@ -3355,14 +3485,74 @@ Three more things worth knowing:
   own, because hiding one is how a certificate goes unnoticed.
 * Files go **straight to Storage** with a signed upload URL, the same two-step
   the invoice flow uses and for the same reason (§8.2): Vercel caps serverless
-  bodies at 4.5MB. If the PUT fails the row is deleted again — a document
-  pointing at a file that does not exist would show in the list and fail every
-  time somebody opened it. Reading is a **redirect** through
-  `/api/documents/[id]/file`, minted at click time, because a signed URL
-  embedded at page load is dead by the time a list has been open half an hour.
-  There is no thumbnail pipeline: the photo grid loads the real files, because
-  this is a handful of photos per phase and half an image pipeline is worse than
-  none.
+  bodies at 4.5MB. **The bytes go up before the row goes in**, which is the
+  opposite of the order this shipped with and the reason it changed
+  (2026-09-22). It used to create the row first and have the browser delete it
+  again if the PUT threw — cleanup that only runs while the browser is still
+  alive. Close the tab on a slow phone upload and the row survived with no file
+  behind it: it showed in the list and failed every time anybody opened it,
+  because `/api/documents/[id]/file` redirects to a signed URL without asking
+  whether the object is there.
+
+  So the flow is now three steps, and the third one **looks in the bucket**:
+
+  1. `POST /api/documents/upload-url` — validates the metadata, returns a
+     signed URL, creates **nothing**
+  2. `PUT` the bytes at that URL
+  3. `POST /api/documents` — finds the object with `storage.list`, and only
+     then inserts the row, taking `size_bytes` and the content type from the
+     object rather than from whatever the browser claimed
+
+  An abandoned upload now costs an unreferenced object in a private bucket —
+  invisible, and the same tidiness problem the DELETE route already tolerates
+  in the other direction — instead of a document on screen that cannot be
+  opened. There is still **no pending state**, deliberately: an invoice is
+  uploaded and *then* read by the extractor, so it genuinely has a half-finished
+  life, whereas a document's title and type are typed by the person choosing the
+  file. A document either exists or it was never added.
+
+  Reading is a **redirect** through `/api/documents/[id]/file`, minted at click
+  time, because a signed URL embedded at page load is dead by the time a list
+  has been open half an hour. There is no thumbnail pipeline: the photo grid
+  loads the real files, because this is a handful of photos per phase and half
+  an image pipeline is worse than none.
+* **The details are editable; the file is not.** `PATCH /api/documents/[id]`
+  existed from the start and nothing called it, so until 2026-09-22 a typo'd
+  title, a wrong `doc_type` or a certificate added without its `expires_on`
+  could only be corrected by deleting and re-uploading — which breaks the
+  version chain, since `version_no` and `supersedes_id` are set at upload time
+  and a re-upload starts a fresh chain at v1. `DocumentEdit` (a pencil on every
+  file row and every photo card) now calls it. The file, `version_no` and
+  `supersedes_id` stay out of reach: a new file is a new VERSION, which is the
+  whole point.
+
+  **The route MERGES.** `buildDocumentPayload` writes every one of its columns
+  on every call, which is right for an insert and wrong for a PATCH — a body
+  with only a title would null `phase_id`, `task_id`, `taken_at`, `notes` and,
+  worst, `project_id`, which does not error anywhere. It quietly makes the
+  document global, and the document then appears on **every** project's list.
+  The form sends the complete object as well; the merge is what protects the
+  next caller. Absent means "leave it", empty string means "clear it".
+* **The accepted types are set in two places and change together** — the code's
+  `DOCUMENT_MIME_TYPES` in `lib/documents.ts` and the bucket's
+  `allowed_mime_types` (`0025`). It used to be the route's own `ALLOWED`, which
+  the file picker did not read: the picker said `accept="image/*,…"`, so a GIF,
+  a BMP or a TIFF was offered and then refused with a 415 after the whole form
+  had been filled in. One list, read by both ends, and the `accept` attribute is
+  built from it. The route never sees the file, so only the bucket actually
+  enforces anything; see §9.2. SVG is accepted by neither, and an SVG uploaded
+  before that is forced to **download** rather than render inline.
+* **An untyped file is typed from its extension, not waved through.**
+  `file.type` is empty surprisingly often — on some iOS versions it is empty
+  for HEIC, which is exactly the case this store has to handle. The old code
+  sent `file.type || "application/octet-stream"`, and octet-stream is on no
+  list anywhere, so those uploads were a certain 415 on a photo the user was
+  entitled to add. `documentMimeType()` falls back to the filename extension
+  and can only ever produce a type that is already on the list; anything else
+  is refused at the moment the file is chosen, with the reason, rather than at
+  the end of the form. `image/heif` was added alongside `image/heic` at the
+  same time — same iPhone container, other name, and accepting only one of the
+  two was a guaranteed rejection.
 
 ---
 
@@ -3447,7 +3637,18 @@ price gets saved by accident. **The order's status follows the quantities**
 rather than being typed — an order whose lines have all arrived *is* received,
 and letting the two disagree makes the status worthless. A cancelled order that
 receives a delivery stays cancelled; that is a problem for a human, and quietly
-reviving it would hide it.
+reviving it would hide it. If **nothing** has arrived the status is left alone
+rather than forced to `sent`: clearing a mistyped quantity back to zero used to
+promote a `draft` order to sent, which is a claim about an order nobody had
+placed.
+
+**Every quantity update is checked for a row, and a miss is an error.** Editing
+an order replaces its lines wholesale — `(po_id, line_no)` is unique, so
+renumbering in place would collide with itself — which means the line ids are
+re-issued every time. A receipt sheet left open while somebody edited the order
+is therefore holding ids that no longer exist, and those updates matched
+nothing, reported success, and the delivery was simply lost. It now says so and
+asks for the sheet to be reopened.
 
 `purchase_order_lines.vat_rate` uses **0 / 5 / 20**, the same set `0011` gave the
 other two money tables. (The implementation plan warned that
@@ -3490,3 +3691,42 @@ variation does not reassign it to whoever edited the wording. The CHECK
 approved, which is why `buildVariationPayload` nulls it when the status moves.
 
 Cost is **ex-VAT**, to match the task budgets it is compared against (rule 7).
+
+### 27.1 The budget the Overview shows (2026-09-22)
+
+`variationRollup()` was computed from the day the feature shipped and only the
+variations route rendered it; `variationSentence()`, written for the Overview,
+was called from nowhere at all. So a £12,000 approved variation left the
+project reading as £12,000 over budget with nothing on any screen saying why.
+
+The fix is a **derived** figure, `budgetWithApprovedVariations()`:
+
+```
+adjusted budget = projects.target_budget + rollup.approved_cost
+```
+
+Four things about it are deliberate, and none is negotiable:
+
+* **Nothing is written to `projects.target_budget`.** It stays exactly as it was
+  typed. A target that moves on its own is not a target, and the difference
+  between what was originally agreed and what it has become is the only
+  interesting thing on the card. Both are shown, side by side.
+* **Proposed variations are not in it.** An approved variation is a commitment;
+  a proposed one is a conversation, and a budget that quietly includes
+  conversations is a forecast that is fiction. The proposed figure is reported
+  beside it, in the same sentence, never inside it.
+* **`approved_cost` is signed**, so an omission *narrows* the budget. Nothing
+  here assumes variations only add.
+* **The two halves are on different VAT bases and the screen says so.**
+  `cost_impact` is ex VAT, to match `budget_amount` and `line_net`;
+  `target_budget` and every money card beside it are incl VAT. The agreed
+  figure is added **as agreed** — grossing it up at an invented rate would be a
+  guess dressed as arithmetic — and the card's hint, the hero caption and the
+  sentence all print the basis. Comparing an ex-VAT figure against an incl-VAT
+  one without saying so is how the double-VAT error of 2026-08-06 happened
+  (§17).
+
+Where it appears: the project header's budget bar (which is now a percentage of
+the adjusted figure), a second "Budget + variations" StatCard on Overview shown
+only when an approved variation has actually moved it, and one sentence from
+`variationSentence()` linking through to the variations log.

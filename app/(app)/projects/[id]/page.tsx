@@ -3,6 +3,7 @@ import {
   getProjectBundle,
   getProjectPurchases,
   getScheduleBundle,
+  getVariationRollup,
 } from "@/lib/data";
 import { createClient } from "@/lib/supabase/server";
 import ProjectDetail from "@/components/project/ProjectDetail";
@@ -31,8 +32,14 @@ export default async function ProjectPage({
   // read by no other loader. Per-task COST is not fetched here — it is derived
   // in the browser from the invoice lines the bundle above already carries.
   const supabase = createClient();
-  const [bundle, purchaseList, scheduleBundle, openSnags, contacts] =
-    await Promise.all([
+  const [
+    bundle,
+    purchaseList,
+    scheduleBundle,
+    openSnags,
+    contacts,
+    variationRollup,
+  ] = await Promise.all([
       getProjectBundle(params.id),
       getProjectPurchases(params.id),
       // Migrations in this project are run by hand, so the schedule tables may
@@ -70,6 +77,13 @@ export default async function ProjectPage({
           (r) => (r.data ?? []) as Contact[],
           () => [] as Contact[],
         ),
+      // The variation position (migration 0024): approved and proposed cost
+      // and days, counted separately. The Overview needs it to say what an
+      // approved variation did to the budget — without it a £12,000 approved
+      // change read as £12,000 over budget with nothing on screen explaining
+      // why. Null when 0024 has not been run, which the Overview treats as
+      // "say nothing" rather than as "no variations".
+      getVariationRollup(params.id).catch(() => null),
     ]);
   if (!bundle) notFound();
 
@@ -88,6 +102,7 @@ export default async function ProjectPage({
       purchaseRows={purchaseList?.rows ?? []}
       scheduleBundle={scheduleBundle}
       contacts={contacts}
+      variationRollup={variationRollup}
     />
   );
 }

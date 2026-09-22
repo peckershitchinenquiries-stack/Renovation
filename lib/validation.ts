@@ -358,9 +358,11 @@ export function validateDependency(
     errors.dep_type = "Invalid link type";
 
   // A lead is negative and perfectly ordinary — only a non-integer is wrong.
+  // The unit is CALENDAR days (lib/schedule.ts rule 3): a wait is a wait
+  // whether or not anybody is on site for it.
   const lag = String(data.lag_days ?? "0").trim();
   if (lag !== "" && !Number.isInteger(Number(lag)))
-    errors.lag_days = "Whole days (negative for a lead)";
+    errors.lag_days = "Whole calendar days (negative for a lead)";
 
   return errors;
 }

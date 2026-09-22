@@ -41,6 +41,14 @@ export async function POST(
     .insert({ ...payload, project_id: params.id, user_id: auth.user.id })
     .select()
     .single();
+  // Migrations here are pasted in by hand, so the schedule tables genuinely may
+  // not exist. Saying which file to run beats a raw "relation does not exist",
+  // which reads as a bug in the form rather than a step nobody has taken.
+  if (dbError?.code === "42P01")
+    return error(
+      "The schedule tables are not installed — run 0016_schedule_core.sql",
+      503
+    );
   if (dbError) return error(dbError.message, 500);
 
   // No revision row on create. A revision is a record of something CHANGING;

@@ -17,16 +17,18 @@
 //
 //   1. duration is authoritative
 //   2. planned_start is "start no earlier than", always
-//   3. float is working days, drift is calendar days
+//   3. float is working days, drift and LAG are calendar days
 //   4. cycles are refused, not survived
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_WORK_CALENDAR,
+  addLag,
   applyShift,
   calendarDaysBetween,
   detectCycle,
+  durationFromDates,
   endFromDuration,
   inclusiveWorkingDays,
   isWorkingDay,
@@ -247,14 +249,49 @@ test("a task with no dates at all anchors on the project start date", () => {
 // Dependency types
 // ============================================================
 
-test("FS with a lag inserts the lag as working days", () => {
+test("FS with a lag inserts the lag as calendar days", () => {
   const a = task({ planned_start: MONDAY, duration_days: 1 }); // Mon
   const b = task({ duration_days: 1 });
   const result = scheduleProject(
     bundle([a, b], [dep(a.id, b.id, { lag_days: 2 })])
   );
-  // Finish Mon, +1 working day = Tue, +2 lag = Thu.
+  // Finish Mon 02, + 1 day + 2 days of waiting = Thu 05, already a working day.
   assert.equal(byId(result, b.id).computed_start, "2026-03-05");
+});
+
+// Rule 3, and the case that made this worth fixing. A lag is a WAIT — screed
+// dries at the weekend, concrete cures over a bank holiday — so "leave it a
+// week" has to mean seven days. Walked in working days it used to mean nine,
+// which is the sort of error that hides for a fortnight.
+test("a 7-day lag is one week, not seven working days", () => {
+  const a = task({ planned_start: MONDAY, duration_days: 1 }); // Mon 02
+  const b = task({ duration_days: 1 });
+  const result = scheduleProject(
+    bundle([a, b], [dep(a.id, b.id, { lag_days: 7 })])
+  );
+  // Finish Mon 02, +1 = Tue 03, +7 calendar days = Tue 10. In working days it
+  // would have been Thu 12 — two days of imaginary drying time.
+  assert.equal(byId(result, b.id).computed_start, "2026-03-10");
+});
+
+test("a lag that lands on a weekend still starts on the next working day", () => {
+  const a = task({ planned_start: MONDAY, duration_days: 1 }); // Mon 02
+  const b = task({ duration_days: 1 });
+  const result = scheduleProject(
+    bundle([a, b], [dep(a.id, b.id, { lag_days: 4 })])
+  );
+  // Mon 02 + 1 + 4 = Sat 07, which is nobody's start date: snapped to Mon 09.
+  assert.equal(byId(result, b.id).computed_start, NEXT_MONDAY);
+});
+
+test("addLag counts calendar days and lands on a working day", () => {
+  // Fri 06 + 3 calendar days = Mon 09, which is already a working day.
+  assert.equal(addLag(FRIDAY, 3, DEFAULT_WORK_CALENDAR), NEXT_MONDAY);
+  // Fri 06 + 1 = Sat 07, snapped forward to Mon 09.
+  assert.equal(addLag(FRIDAY, 1, DEFAULT_WORK_CALENDAR), NEXT_MONDAY);
+  // Backwards, for the deadlines the backward pass computes: Mon 09 − 1 = Sun
+  // 08, snapped back to Fri 06.
+  assert.equal(addLag(NEXT_MONDAY, -1, DEFAULT_WORK_CALENDAR, -1), FRIDAY);
 });
 
 test("FS with a negative lag (a lead) overlaps the two tasks", () => {
@@ -263,7 +300,7 @@ test("FS with a negative lag (a lead) overlaps the two tasks", () => {
   const result = scheduleProject(
     bundle([a, b], [dep(a.id, b.id, { lag_days: -2 })])
   );
-  // Fri + 1 = Mon, then back two working days = Thursday.
+  // Fri 06 + (1 − 2) = Thu 05, a working day.
   assert.equal(byId(result, b.id).computed_start, "2026-03-05");
 });
 
@@ -496,6 +533,75 @@ test("a slip absorbed by float moves fewer tasks than days", () => {
 
   assert.equal(changes.length, 1); // only the task that was edited
   assert.equal(before.completion, after.completion);
+});
+
+// ============================================================
+// Resizing — rule 1 cuts both ways
+// ============================================================
+// `duration_days` being authoritative means a new END date does nothing on its
+// own. Every screen that lets somebody type or drag one therefore has to
+// convert it into a duration first, which is what durationFromDates is for.
+// Without it the shift preview reported "no change" and the save then wrote the
+// old duration's end date back over what the user had just typed.
+
+test("durationFromDates measures an inclusive span in working days", () => {
+  // Mon–Fri is five working days, counting both ends.
+  assert.equal(durationFromDates(MONDAY, FRIDAY, DEFAULT_WORK_CALENDAR), 5);
+  // Mon to the following Monday is six: the weekend is not work.
+  assert.equal(durationFromDates(MONDAY, NEXT_MONDAY, DEFAULT_WORK_CALENDAR), 6);
+  // One day is one day, not zero.
+  assert.equal(durationFromDates(MONDAY, MONDAY, DEFAULT_WORK_CALENDAR), 1);
+});
+
+test("durationFromDates refuses a half-answer rather than inventing one", () => {
+  assert.equal(durationFromDates(MONDAY, null), undefined);
+  assert.equal(durationFromDates(null, FRIDAY), undefined);
+  assert.equal(durationFromDates(MONDAY, ""), undefined);
+  // Backwards dates are a typo, not a negative duration.
+  assert.equal(durationFromDates(FRIDAY, MONDAY, DEFAULT_WORK_CALENDAR), undefined);
+});
+
+test("a new end date only resizes a task once it is turned into a duration", () => {
+  const a = task({ planned_start: MONDAY, planned_end: "2026-03-04", duration_days: 3 });
+
+  // What the shift dialog used to send: the dates alone. The duration wins, so
+  // the bar does not move at all.
+  const ignored = applyShift(bundle([a]), a.id, {
+    planned_start: MONDAY,
+    planned_end: FRIDAY,
+  });
+  assert.equal(byId(ignored.after, a.id).computed_end, "2026-03-04");
+  assert.equal(ignored.changes.length, 0);
+
+  // What it sends now.
+  const duration = durationFromDates(MONDAY, FRIDAY, DEFAULT_WORK_CALENDAR);
+  const resized = applyShift(bundle([a]), a.id, {
+    planned_start: MONDAY,
+    planned_end: FRIDAY,
+    duration_days: duration,
+  });
+  assert.equal(duration, 5);
+  assert.equal(byId(resized.after, a.id).computed_end, FRIDAY);
+  assert.equal(resized.changes.length, 1);
+});
+
+test("a task with no stored duration keeps its length when both dates travel", () => {
+  // The scenario-drag bug: sending a null end collapsed a task whose length
+  // came from its dates down to a single day, and everything downstream pulled
+  // forward with it.
+  const a = task({ planned_start: MONDAY, planned_end: FRIDAY, duration_days: null });
+
+  const collapsed = applyShift(bundle([a]), a.id, {
+    planned_start: NEXT_MONDAY,
+    planned_end: null,
+  });
+  assert.equal(byId(collapsed.after, a.id).computed_end, NEXT_MONDAY); // one day
+
+  const moved = applyShift(bundle([a]), a.id, {
+    planned_start: NEXT_MONDAY,
+    planned_end: "2026-03-13",
+  });
+  assert.equal(byId(moved.after, a.id).computed_end, "2026-03-13"); // still five
 });
 
 // ============================================================

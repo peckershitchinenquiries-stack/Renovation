@@ -53,6 +53,14 @@ export async function POST(
     })
     .select()
     .single();
+  // Migrations here are pasted in by hand, so the schedule tables genuinely may
+  // not exist yet. Naming the file to run beats a raw "relation does not
+  // exist", which reads as a bug in the form.
+  if (dbError?.code === "42P01")
+    return error(
+      "The schedule tables are not installed — run 0016_schedule_core.sql",
+      503
+    );
   if (dbError) return error(dbError.message, 500);
 
   return json(data, 201);

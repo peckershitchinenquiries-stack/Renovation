@@ -34,12 +34,19 @@ export async function PATCH(
   const errors = validateTask(body as unknown as Record<string, unknown>);
   if (hasErrors(errors)) return error("Validation failed", 422, errors);
 
-  const { data: before } = await auth.supabase
+  const { data: before, error: readError } = await auth.supabase
     .from("tasks")
     .select("*")
     .eq("id", params.taskId)
     .eq("project_id", params.id)
     .single();
+  // A missing table and a missing row are not the same problem, and only one
+  // of them is fixed by running a migration.
+  if (readError?.code === "42P01")
+    return error(
+      "The schedule tables are not installed — run 0016_schedule_core.sql",
+      503
+    );
   if (!before) return error("Task not found", 404);
 
   const payload = buildTaskPayload(body);

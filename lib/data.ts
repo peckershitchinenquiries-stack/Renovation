@@ -885,7 +885,7 @@ export async function getScheduleBundle(
 
   const [
     { data: phases },
-    { data: tasks },
+    { data: tasks, error: tasksError },
     { data: dependencies },
     { data: baselines },
     { data: revisions },
@@ -925,6 +925,15 @@ export async function getScheduleBundle(
       .eq("project_id", projectId)
       .order("signed_at", { ascending: false }),
   ]);
+
+  // 0016 has not been pasted into the SQL editor yet.
+  //
+  // supabase-js reports this in the result rather than throwing, so the page's
+  // `.catch()` never sees it and the tab used to render as a perfectly ordinary
+  // EMPTY schedule — a project with no tasks and a missing database look
+  // identical, which is about.md §2 rule 3 exactly. Returning null instead is
+  // what makes ProjectDetail show "run 0016_schedule_core.sql".
+  if (missingRelation(tasksError)) return null;
 
   const allBaselines = (baselines ?? []) as TaskBaseline[];
   // Newest first from the query, so the first row names the current set.
@@ -1162,6 +1171,25 @@ export async function getItemBundle(id: string): Promise<ItemBundle | null> {
 // empty list that is indistinguishable from "nobody has been added". That
 // ambiguity is exactly what about.md §2 rule 3 warns about, and it has caused
 // a real incident here before.
+
+/**
+ * Is this string a UUID?
+ *
+ * Used to guard the ONE place in this codebase that builds a PostgREST filter
+ * by string interpolation — `getDocumentBundle`'s `.or(...)`. Every other
+ * query passes values through `.eq()` and friends, which send them as
+ * parameters that cannot be read as syntax. An `.or()` takes a filter
+ * EXPRESSION, so an id containing a comma or a dot would be parsed as more
+ * filter rather than as a value.
+ *
+ * Route params reach these loaders straight from the URL, so nothing upstream
+ * guarantees the shape. Checking it here is cheap and removes the question.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID.test(value);
+}
 
 /** Did that query fail because the table is not there yet? */
 function missingRelation(
@@ -1422,6 +1450,12 @@ export async function getDocumentBundle(
   projectId: string
 ): Promise<DocumentBundle | null> {
   const supabase = createClient();
+  // The id is interpolated into a filter expression below rather than passed
+  // as a parameter, which is the only place in this file that happens. A
+  // non-UUID cannot name a project anyway, so it is refused here instead of
+  // being pasted into PostgREST syntax and finding out what it means.
+  if (!isUuid(projectId)) return null;
+
   const { data: project } = await supabase
     .from("projects")
     .select("*")
@@ -1435,6 +1469,10 @@ export async function getDocumentBundle(
     // Project-less documents — a company insurance certificate, say — are
     // shown alongside this project's. They are genuinely relevant to every
     // job, and hiding one is how a certificate goes unnoticed.
+    //
+    // `.or()` takes a filter EXPRESSION, so this is string-built where every
+    // other query in this file uses `.eq()`. The `isUuid` guard above is what
+    // makes that safe; do not remove one without the other.
     .or(`project_id.eq.${projectId},project_id.is.null`)
     .order("created_at", { ascending: false });
   if (missingRelation(error)) return null;
@@ -1650,6 +1688,31 @@ export interface VariationList {
   rollup: VariationRollup;
   phases: { id: string; name: string }[];
   tasks: { id: string; name: string }[];
+}
+
+/**
+ * Just the variation position on one project — no task figures (0024).
+ *
+ * The project page needs this and nothing else: the Overview says what the
+ * approved variations are worth and what that does to the budget, and it does
+ * NOT show them one by one, which is what the variations route is for.
+ * Calling `getVariations` for it would re-read the schedule and the whole
+ * project bundle a second time on every project page load to build figures
+ * nothing on that page renders.
+ *
+ * Null when `0024` has not been run — the Overview then says nothing at all,
+ * which is right: no table is not the same statement as no variations.
+ */
+export async function getVariationRollup(
+  projectId: string
+): Promise<VariationRollup | null> {
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("variations")
+    .select("status, cost_impact, days_impact")
+    .eq("project_id", projectId);
+  if (missingRelation(error)) return null;
+  return variationRollup((data ?? []) as Variation[]);
 }
 
 /**

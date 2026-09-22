@@ -23,6 +23,7 @@ import { IconTile, ListCard, ListRow } from "@/components/ui/List";
 import { formatDisplayDate } from "@/components/ui/DatePicker";
 import { useToast } from "@/components/ui/Toast";
 import DocumentUpload from "./DocumentUpload";
+import DocumentEdit from "./DocumentEdit";
 import {
   DOC_TYPE_LABELS,
   type DocumentBundle,
@@ -58,6 +59,11 @@ export default function DocumentsScreen({
   const [newVersionOf, setNewVersionOf] = useState<DocumentView | null>(null);
   const [chainOf, setChainOf] = useState<DocumentView | null>(null);
   const [deleting, setDeleting] = useState<DocumentView | null>(null);
+  // Correcting the details, which until now could only be done by deleting the
+  // document and uploading it again — and that breaks the version chain, since
+  // a re-upload starts a fresh one at v1. The file is not editable here; a new
+  // file is a new version, which is the button beside it.
+  const [editing, setEditing] = useState<DocumentView | null>(null);
 
   // Memoised because it is the dependency of four useMemo hooks below, and
   // `?? []` builds a fresh array on every render — which would make all four
@@ -272,6 +278,18 @@ export default function DocumentsScreen({
                       ) : null}
                       <button
                         type="button"
+                        aria-label="Edit details"
+                        title="Edit the title, type and dates"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setEditing(doc);
+                        }}
+                        className="btn-icon text-gray-400 hover:text-gray-700"
+                      >
+                        <Icon name="edit" size={17} />
+                      </button>
+                      <button
+                        type="button"
                         aria-label="Add a new version"
                         title="Add a new version"
                         onClick={(e) => {
@@ -308,6 +326,7 @@ export default function DocumentsScreen({
           room={room}
           onRoom={setRoom}
           onAdd={() => setAdding(true)}
+          onEdit={setEditing}
         />
       )}
 
@@ -337,6 +356,29 @@ export default function DocumentsScreen({
             setNewVersionOf(null);
           }}
         />
+      </Sheet>
+
+      <Sheet
+        open={editing !== null}
+        onClose={() => setEditing(null)}
+        title="Edit details"
+        description={editing?.title}
+        size="lg"
+      >
+        {editing ? (
+          <DocumentEdit
+            document={editing}
+            projectId={project.id}
+            phases={bundle.phases}
+            tasks={bundle.tasks}
+            contacts={bundle.contacts}
+            onSaved={() => {
+              setEditing(null);
+              router.refresh();
+            }}
+            onCancel={() => setEditing(null)}
+          />
+        ) : null}
       </Sheet>
 
       <Sheet
@@ -407,12 +449,19 @@ function PhotoTimelineView({
   room,
   onRoom,
   onAdd,
+  onEdit,
 }: {
   groups: { phase_id: string | null; phase_name: string; photos: DocumentView[] }[];
   rooms: string[];
   room: string;
   onRoom: (value: string) => void;
   onAdd: () => void;
+  /**
+   * A photo needs editing more often than anything else here: `taken_at` and
+   * the room are what put it in the right place on the timeline, and both are
+   * typed at upload time on a phone, standing in the room.
+   */
+  onEdit: (photo: DocumentView) => void;
 }) {
   if (groups.length === 0)
     return (
@@ -471,18 +520,32 @@ function PhotoTimelineView({
                   loading="lazy"
                   className="aspect-[4/3] w-full bg-gray-100 object-cover"
                 />
-                <div className="px-3 py-2.5">
-                  <p className="truncate text-[0.8125rem] font-semibold text-gray-900">
-                    {photo.title}
-                  </p>
-                  <p className="mt-0.5 truncate text-xs text-gray-500">
-                    {photo.taken_at ? (
-                      formatDisplayDate(photo.taken_at)
-                    ) : (
-                      <span className="text-gray-400">no date taken</span>
-                    )}
-                    {photo.location_room ? ` · ${photo.location_room}` : ""}
-                  </p>
+                <div className="flex items-start gap-1 px-3 py-2.5">
+                  <span className="min-w-0 flex-1">
+                    <p className="truncate text-[0.8125rem] font-semibold text-gray-900">
+                      {photo.title}
+                    </p>
+                    <p className="mt-0.5 truncate text-xs text-gray-500">
+                      {photo.taken_at ? (
+                        formatDisplayDate(photo.taken_at)
+                      ) : (
+                        <span className="text-gray-400">no date taken</span>
+                      )}
+                      {photo.location_room ? ` · ${photo.location_room}` : ""}
+                    </p>
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Edit ${photo.title}`}
+                    title="Edit the title, date taken and room"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onEdit(photo);
+                    }}
+                    className="btn-icon shrink-0 text-gray-400 hover:text-gray-700"
+                  >
+                    <Icon name="edit" size={16} />
+                  </button>
                 </div>
               </a>
             ))}

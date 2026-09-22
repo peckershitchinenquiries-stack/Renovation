@@ -179,6 +179,12 @@ export async function updatePurchaseOrder(
  * The status follows the quantities rather than being typed: an order whose
  * lines are all delivered IS received, and letting the two disagree makes the
  * status worthless.
+ *
+ * **Every update is checked for a row.** `updatePurchaseOrder` replaces an
+ * order's lines wholesale, so line ids are re-issued on every edit — which
+ * means a receipt sheet that was open while somebody edited the order is
+ * holding ids that no longer exist. Without this check those updates matched
+ * nothing, reported success, and the delivery was simply lost.
  */
 export async function recordReceipt(
   supabase: Client,
@@ -186,12 +192,17 @@ export async function recordReceipt(
   received: { line_id: string; qty_received: number | string }[]
 ): Promise<void> {
   for (const row of received) {
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("purchase_order_lines")
       .update({ qty_received: round(row.qty_received, 3) })
       .eq("id", row.line_id)
-      .eq("po_id", poId);
+      .eq("po_id", poId)
+      .select("id");
     if (error) throw new Error(error.message);
+    if (!data || data.length === 0)
+      throw new Error(
+        "This order changed while you were recording the delivery — close it, reopen it and enter the quantities again."
+      );
   }
 
   const { data: lines } = await supabase
@@ -206,7 +217,13 @@ export async function recordReceipt(
     (l) => Number(l.qty_received) + 0.001 >= Number(l.qty_ordered)
   );
   const some = rows.some((l) => Number(l.qty_received) > 0);
-  const status = all ? "received" : some ? "part_received" : "sent";
+
+  // Nothing has arrived, so nothing is known that was not known before: the
+  // status is LEFT ALONE rather than forced to 'sent'. Clearing a mistyped
+  // quantity back to zero on a DRAFT order used to promote it to sent, which
+  // is a claim about an order nobody had placed.
+  const status = all ? "received" : some ? "part_received" : null;
+  if (status === null) return;
 
   const { error } = await supabase
     .from("purchase_orders")

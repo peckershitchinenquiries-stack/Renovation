@@ -1,6 +1,11 @@
 import { requireUser, json, error } from "@/lib/api";
 import { getScheduleBundle } from "@/lib/data";
-import { applyShift, calendarDaysBetween, isISODate } from "@/lib/schedule";
+import {
+  applyShift,
+  calendarDaysBetween,
+  durationFromDates,
+  isISODate,
+} from "@/lib/schedule";
 import { costImpactOfShift } from "@/lib/scheduleCosts";
 import { recordRevisions, type FieldChange } from "@/lib/scheduleWrite";
 import { validateShiftReason, hasErrors } from "@/lib/validation";
@@ -48,14 +53,40 @@ export async function POST(
   const target = bundle.tasks.find((t) => t.id === body.task_id);
   if (!target) return error("Task not found", 404);
 
-  const duration =
+  // Dates are checked here rather than left to the CHECK constraints, because
+  // everything below derives from them — a reversed pair would otherwise become
+  // a silently ignored duration rather than a message under the field.
+  const start = body.planned_start ?? null;
+  const end = body.planned_end ?? null;
+  if (start !== null && !isISODate(start))
+    return error("Use a real date", 422, { planned_start: "Use a real date" });
+  if (end !== null && !isISODate(end))
+    return error("Use a real date", 422, { planned_end: "Use a real date" });
+  if (isISODate(start) && isISODate(end) && end < start)
+    return error("The end cannot be before the start", 422, {
+      planned_end: "The end cannot be before the start",
+    });
+
+  /**
+   * How long the task now is.
+   *
+   * `duration_days` is authoritative (rule 1 of lib/schedule.ts), so a new END
+   * date has to be converted into one or the engine ignores it outright: the
+   * preview would report "no change" and the confirm would then write the
+   * duration-derived end back over what the user typed. That was the bug. An
+   * explicit `duration_days` in the request still wins — the task form sends
+   * one — and a move with no end date leaves the duration alone.
+   */
+  const explicit =
     String(body.duration_days ?? "").trim() === ""
       ? undefined
       : Math.round(Number(body.duration_days));
+  const duration =
+    explicit ?? durationFromDates(start, end, bundle.calendar);
 
   const { before, after, changes } = applyShift(bundle, body.task_id, {
-    planned_start: body.planned_start ?? null,
-    planned_end: body.planned_end ?? null,
+    planned_start: start,
+    planned_end: end,
     ...(duration !== undefined ? { duration_days: duration } : {}),
   });
 
@@ -100,6 +131,21 @@ export async function POST(
 
   const { data: trades } = await auth.supabase.from("trade_lookups").select("*");
 
+  /**
+   * Is a reason compulsory?
+   *
+   * Every task this move TOUCHES is considered, not just the one the user
+   * edited. Moving an unbaselined task that knocks on six baselined ones moves
+   * six baselined dates, and a revision log that stayed silent about those six
+   * is exactly the log nobody can answer a question from later.
+   *
+   * Read from the bundle's CURRENT baseline — the set drift is measured
+   * against — rather than counting any baseline ever captured, so the rule and
+   * the Drift column agree about what is baselined.
+   */
+  const baselinedIds = new Set(bundle.baseline.map((b) => b.task_id));
+  const needsReason = rows.some((r) => baselinedIds.has(r.task_id));
+
   const preview: ShiftPreview = {
     rows,
     completion_before: beforeCompletion,
@@ -113,6 +159,7 @@ export async function POST(
       extraDays,
       (trades ?? []) as TradeLookup[]
     ),
+    needs_reason: needsReason,
     cycle: null,
   };
 
@@ -120,19 +167,35 @@ export async function POST(
 
   // ---- from here down, we are saving ----
 
-  const { count } = await auth.supabase
-    .from("task_baselines")
-    .select("id", { count: "exact", head: true })
-    .eq("task_id", body.task_id);
-
   const reasonErrors = validateShiftReason(
     body as unknown as Record<string, unknown>,
-    { movesDates: rows.length > 0, hasBaseline: (count ?? 0) > 0 }
+    { movesDates: rows.length > 0, hasBaseline: needsReason }
   );
   if (hasErrors(reasonErrors))
     return error("This moves a baselined date — say why", 422, reasonErrors);
 
   const afterById = new Map(after.tasks.map((t) => [t.id, t]));
+
+  /**
+   * What to put back if this goes wrong half way through.
+   *
+   * A Route Handler cannot open a transaction, so a multi-row write needs the
+   * compensating clean-up `lib/purchaseOrderWrite.ts` already uses: remember
+   * each task's stored dates BEFORE touching it, and on a failure write them
+   * all back. A shift that half-applied is worse than one that did not apply —
+   * it leaves a schedule nobody chose and no message saying which half landed.
+   */
+  const undo: { id: string; patch: Record<string, unknown> }[] = [];
+  /** Revisions to log once — and only if — every row has been written. */
+  const pending: { row: ShiftPreviewRow; fieldChanges: FieldChange[] }[] = [];
+  const rollback = async () => {
+    for (const step of undo.reverse())
+      await auth.supabase
+        .from("tasks")
+        .update(step.patch)
+        .eq("id", step.id)
+        .eq("project_id", params.id);
+  };
 
   for (const row of rows) {
     const scheduled = afterById.get(row.task_id);
@@ -149,12 +212,29 @@ export async function POST(
     };
     if (!row.knock_on && duration !== undefined) patch.duration_days = duration;
 
+    undo.push({
+      id: row.task_id,
+      patch: {
+        planned_start: stored?.planned_start ?? null,
+        planned_end: stored?.planned_end ?? null,
+        ...(patch.duration_days !== undefined
+          ? { duration_days: stored?.duration_days ?? null }
+          : {}),
+      },
+    });
+
     const { error: dbError } = await auth.supabase
       .from("tasks")
       .update(patch)
       .eq("id", row.task_id)
       .eq("project_id", params.id);
-    if (dbError) return error(dbError.message, 500);
+    if (dbError) {
+      await rollback();
+      return error(
+        `${dbError.message} — nothing was saved, the schedule is as it was`,
+        500
+      );
+    }
 
     const fieldChanges: FieldChange[] = [];
     if (row.from_start !== row.to_start)
@@ -176,6 +256,13 @@ export async function POST(
         new_value: String(duration),
       });
 
+    pending.push({ row, fieldChanges });
+  }
+
+  // The log is written only once every row is safely saved. Writing it inside
+  // the loop would leave revisions describing moves that a rollback has since
+  // undone — a log that says a task moved when it did not is worse than no log.
+  for (const { row, fieldChanges } of pending)
     await recordRevisions(
       auth.supabase,
       {
@@ -191,7 +278,6 @@ export async function POST(
       },
       fieldChanges
     );
-  }
 
   return json({ ...preview, saved: true });
 }

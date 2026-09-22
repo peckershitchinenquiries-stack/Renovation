@@ -104,6 +104,25 @@ export async function POST(
     .from("task_baselines")
     .insert(rows)
     .select();
+  if (dbError?.code === "42P01")
+    return error(
+      "The schedule tables are not installed — run 0016_schedule_core.sql",
+      503
+    );
+  // ux_task_baselines_task_name (0016) is on (task_id, baseline_name), and the
+  // name above is worked out by READING the existing names — so two clicks a
+  // moment apart both read the same set, both pick "Baseline 3", and the
+  // second one loses. The database is doing exactly the right thing: every
+  // task goes in one statement, so the loser rolls back whole and nothing
+  // half-captured survives. Only the message was wrong — a raw Postgres
+  // unique-violation string in a red toast, for a situation that is simply
+  // "somebody already pressed this".
+  if (dbError?.code === "23505")
+    return error(
+      `"${name}" was captured a moment ago — reload to see it`,
+      409,
+      { name: "Just captured" }
+    );
   if (dbError) return error(dbError.message, 500);
 
   return json({ baseline_name: name, rows: data }, 201);

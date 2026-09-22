@@ -12,6 +12,23 @@ import type { DocumentInput, ProjectDocument } from "@/types";
  * drawing version control is that rev B does not vanish when rev C arrives.
  * Letting an edit swap the bytes under an unchanged version number would make
  * the whole chain untrustworthy.
+ *
+ * **It MERGES.** `buildDocumentPayload` writes every one of its columns on
+ * every call, which is right for an insert and wrong for a PATCH: a form that
+ * posted only the title would silently null `phase_id`, `task_id`, `taken_at`,
+ * `notes` — and `project_id`, which is the dangerous one, because a document
+ * with no project is a deliberate feature (a company insurance certificate is
+ * not one job's) and so a nulled one quietly appears on EVERY project's list
+ * rather than erroring anywhere.
+ *
+ * The edit form sends the whole object, so the merge is belt and braces there.
+ * It is not belt and braces for anything else that ever calls this: a PATCH
+ * whose name means "change these fields" has to mean that, or the next caller
+ * writes the obvious thing and loses data without a single error.
+ *
+ * A field is cleared by sending it empty — `text()` turns "" into null — which
+ * is what the form does for a box somebody emptied. Absent and empty are
+ * different, and that is the whole distinction a merge exists to keep.
  */
 export async function PATCH(
   req: Request,
@@ -21,12 +38,30 @@ export async function PATCH(
   if ("response" in auth) return auth.response;
 
   const body = (await req.json().catch(() => ({}))) as DocumentInput;
-  const errors = validateDocument(body as unknown as Record<string, unknown>);
+
+  const { data: existing, error: readError } = await auth.supabase
+    .from("documents")
+    .select("*")
+    .eq("id", params.id)
+    .maybeSingle();
+  if (readError?.code === "42P01")
+    return error(
+      "The documents tables are not installed — run 0021_documents.sql",
+      503
+    );
+  if (!existing) return error("Document not found", 404);
+
+  const merged = {
+    ...(existing as unknown as DocumentInput),
+    ...body,
+  } as DocumentInput;
+
+  const errors = validateDocument(merged as unknown as Record<string, unknown>);
   if (hasErrors(errors)) return error("Validation failed", 422, errors);
 
   const { data, error: dbError } = await auth.supabase
     .from("documents")
-    .update(buildDocumentPayload(body))
+    .update(buildDocumentPayload(merged))
     .eq("id", params.id)
     .select()
     .single();

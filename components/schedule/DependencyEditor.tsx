@@ -187,7 +187,7 @@ export default function DependencyEditor({
             </div>
             <div>
               <label className="label" htmlFor="dep-lag">
-                Wait (days)
+                Wait (calendar days)
               </label>
               <input
                 id="dep-lag"
@@ -201,8 +201,9 @@ export default function DependencyEditor({
           </div>
           {error ? <p className="field-error">{error}</p> : null}
           <p className="hint">
-            A negative wait is an overlap — start the plasterer two days before
-            the first fix is finished.
+            Calendar days, not working days: screed dries at the weekend too, so
+            a wait of 7 means a week. A negative wait is an overlap — start the
+            plasterer two days before the first fix is finished.
           </p>
 
           {/* Migration 0020. This is the difference between a schedule and a

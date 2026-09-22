@@ -8,6 +8,10 @@ import { Icon } from "@/components/ui/Icon";
 import { WeeklySpendChart } from "@/components/charts/WeeklySpendChart";
 import { CategoryDonut } from "@/components/charts/CategoryDonut";
 import { combineTotals } from "@/components/purchases/totals";
+import {
+  budgetWithApprovedVariations,
+  variationSentence,
+} from "@/lib/variations";
 import type {
   ProjectCostRollup,
   ProjectSummary,
@@ -15,6 +19,7 @@ import type {
   CategoryTotal,
   ItemPriceRow,
   PurchaseTotals,
+  VariationRollup,
 } from "@/types";
 
 export default function OverviewTab({
@@ -30,6 +35,8 @@ export default function OverviewTab({
   retentionHeld = 0,
   retentionDueCount = 0,
   onViewInvoicesForRetention,
+  variationRollup = null,
+  onViewVariations,
 }: {
   summary: ProjectSummary;
   byWeek: WeekTotal[];
@@ -60,8 +67,42 @@ export default function OverviewTab({
   /** How many of those are past their agreed release date. */
   retentionDueCount?: number;
   onViewInvoicesForRetention?: () => void;
+  /**
+   * The project's variation position (migration 0024) — approved and proposed
+   * cost and days, counted separately and never added.
+   *
+   * It is here because it was NOWHERE. `variationRollup` was computed and only
+   * the variations route rendered it, so a £12,000 approved change left the
+   * project reading as £12,000 over budget with nothing on any screen saying
+   * why. Null when 0024 has not been run, which means "say nothing" rather
+   * than "there are none".
+   */
+  variationRollup?: VariationRollup | null;
+  onViewVariations?: () => void;
 }) {
   const invoiced = combineTotals(invoiceTotals);
+  /**
+   * Budget with the variations that were actually AGREED in it.
+   *
+   * Derived, never stored: `projects.target_budget` stays exactly as it was
+   * typed, because a target that moves on its own is not a target. Only
+   * approved variations count — a proposed one is a conversation — and the
+   * figure is signed, so an omission subtracts.
+   *
+   * The two halves are on different VAT bases and both cards say so. A
+   * variation is agreed ex VAT to match the task budgets it is compared
+   * against (rule 7); the money cards above are incl VAT. Grossing the
+   * variation up at an invented rate would be a guess dressed as arithmetic,
+   * so the agreed figure is added as agreed and the basis is printed.
+   */
+  const approvedVariations = variationRollup?.approved_cost ?? 0;
+  const adjustedBudget = budgetWithApprovedVariations(
+    summary.target_budget,
+    variationRollup
+  );
+  const variationLine = variationRollup
+    ? variationSentence(variationRollup, formatCurrency)
+    : null;
   // `summary.remaining_to_pay` is built from the cost totals and knows nothing
   // about retention, so it is corrected here rather than in buildSummary —
   // which also serves hand-entered diary rows, where retention does not exist.
@@ -138,6 +179,23 @@ export default function OverviewTab({
               label={BUDGET.label}
               value={formatCurrency(summary.target_budget)}
               hint={BUDGET.hint}
+            />
+          ) : null}
+          {/* The budget as it stands after the changes that were agreed. It is
+              a SECOND card rather than a replacement for the one above: what
+              was originally agreed and what it has become are two different
+              questions, and a screen that only answers the second loses the
+              ability to ask how far the job has moved from its original
+              target. Only shown when an approved variation has actually moved
+              it. */}
+          {summary.target_budget > 0 && Math.abs(approvedVariations) > 0.001 ? (
+            <StatCard
+              icon="hammer"
+              label="Budget + variations"
+              value={formatCurrency(adjustedBudget)}
+              hint={`Incl. ${approvedVariations > 0 ? "+" : ""}${formatCurrency(
+                approvedVariations
+              )} approved, agreed ex VAT`}
             />
           ) : null}
           <StatCard
@@ -297,6 +355,40 @@ export default function OverviewTab({
                 </>
               ) : (
                 ". Every line is tagged to a task."
+              )}
+            </span>
+            <Icon name="chevronRight" size={18} className="shrink-0 text-gray-400" />
+          </button>
+        ) : null}
+
+        {/* What was agreed as a CHANGE, in the same one-sentence shape as the
+            invoice and task lines above.
+
+            Approved and proposed are said apart and never added — an approved
+            variation is a commitment, a proposed one is a conversation, and a
+            budget that quietly includes conversations is a forecast that is
+            fiction. The basis is printed because it differs from the cards
+            above it: a variation is agreed EX VAT, to match the task budgets
+            it is compared against, while the money cards are incl VAT. */}
+        {variationLine ? (
+          <button
+            type="button"
+            onClick={onViewVariations}
+            className="mt-2.5 flex w-full items-center gap-3 rounded-2xl bg-gray-100 px-4 py-3 text-left transition active:bg-gray-200"
+          >
+            <span className="min-w-0 flex-1 text-[0.8125rem] leading-relaxed text-gray-600">
+              {variationLine}
+              {Math.abs(approvedVariations) > 0.001 ? (
+                <>
+                  {" "}
+                  Approved variations are added to the budget above as agreed;
+                  proposed ones are not, and nothing is regrossed for VAT.
+                </>
+              ) : (
+                <>
+                  {" "}
+                  Nothing is approved yet, so the budget above is unchanged.
+                </>
               )}
             </span>
             <Icon name="chevronRight" size={18} className="shrink-0 text-gray-400" />

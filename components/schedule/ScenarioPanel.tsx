@@ -50,6 +50,7 @@ export default function ScenarioPanel({
   draft,
   costImpact,
   tasksById,
+  baselinedTasks,
   onDiscard,
   onApplied,
   onRemoveEdit,
@@ -62,8 +63,15 @@ export default function ScenarioPanel({
   draft: ScheduleResult;
   costImpact: CostImpact;
   tasksById: Map<string, ScheduledTask>;
+  /** Task ids in the current baseline — decides if a reason is compulsory. */
+  baselinedTasks: Set<string>;
   onDiscard: () => void;
-  onApplied: () => void;
+  /**
+   * `all` is false when only some edits were written before something failed —
+   * the scenario must then STAY open, holding the ones that still have to be
+   * dealt with, rather than being thrown away with the work half done.
+   */
+  onApplied: (all: boolean) => void;
   onRemoveEdit: (taskId: string) => void;
 }) {
   const toast = useToast();
@@ -96,13 +104,37 @@ export default function ScenarioPanel({
     );
   });
 
+  /**
+   * Is a reason compulsory before this can be applied?
+   *
+   * The same rule the shift route enforces, applied to the same set: every task
+   * this scenario MOVES, knock-ons included, not just the ones that were
+   * dragged. It used to be optional here and required there, so a scenario
+   * touching a baselined task failed half way through the save with a message
+   * pointing at a field this sheet had never shown.
+   */
+  const needsReason = moved.some((t) => baselinedTasks.has(t.id));
+  const reasonMissing =
+    needsReason && (!reasonCode || (reasonCode === "other" && !reasonNote.trim()));
+
+  /**
+   * Apply the scenario for real.
+   *
+   * Each edit is its own request and a Route Handler cannot span them in one
+   * transaction, so this CANNOT be all-or-nothing across the set. What it can
+   * be is honest about it: the edits that landed are named, the ones that did
+   * not are kept in the scenario so they can be corrected and re-applied, and
+   * the live schedule is refreshed either way. Silently reporting "could not
+   * apply" after writing three of five was the real problem — not the absence
+   * of a transaction, but the absence of a true account of one.
+   */
   async function apply() {
     setApplying(true);
+    const applied: string[] = [];
     try {
-      // One ordinary shift request per edited task, in the order they were
-      // made. Sequential rather than parallel on purpose: each one recomputes
-      // the schedule server-side from what the previous one wrote, which is
-      // exactly how the draft was built.
+      // Sequential rather than parallel on purpose: each one recomputes the
+      // schedule server-side from what the previous one wrote, which is exactly
+      // how the draft was built.
       for (const edit of edits) {
         await apiFetch(`/api/projects/${projectId}/schedule/shift`, {
           method: "POST",
@@ -115,15 +147,27 @@ export default function ScenarioPanel({
             confirm: true,
           }),
         });
+        applied.push(edit.task_id);
       }
       toast("Scenario applied to the live schedule", "success");
       setConfirmOpen(false);
-      onApplied();
+      onApplied(true);
     } catch (err) {
-      toast(
-        err instanceof Error ? err.message : "Could not apply the scenario",
-        "error"
-      );
+      const message =
+        err instanceof Error ? err.message : "Could not apply the scenario";
+      if (applied.length === 0) {
+        toast(`${message} — nothing was applied`, "error");
+      } else {
+        // Drop the edits that are now live, so what is left on screen is
+        // exactly what still has to be dealt with.
+        for (const id of applied) onRemoveEdit(id);
+        toast(
+          `${applied.length} of ${edits.length} applied, then stopped: ${message}. The rest are still in the scenario.`,
+          "error"
+        );
+        setConfirmOpen(false);
+        onApplied(false);
+      }
     } finally {
       setApplying(false);
     }
@@ -252,12 +296,12 @@ export default function ScenarioPanel({
             </button>
             <button
               type="button"
-              disabled={applying}
+              disabled={applying || reasonMissing}
               onClick={apply}
               className="btn-primary flex-1"
             >
               {applying ? <Spinner /> : null}
-              Apply
+              {reasonMissing ? "Pick a reason first" : "Apply"}
             </button>
           </div>
         }
@@ -267,15 +311,22 @@ export default function ScenarioPanel({
             Every task that moves is logged, and the knocked-on ones carry the
             same reason as the change that caused them.
           </p>
+          {needsReason ? (
+            <p className="rounded-2xl bg-amber-50 px-3.5 py-2.5 text-[0.8125rem] leading-relaxed text-amber-900 ring-1 ring-inset ring-amber-600/20">
+              This moves dates that are in the baseline, so a reason is
+              required before it can be saved.
+            </p>
+          ) : null}
           <div>
             <label className="label" htmlFor="scenario-reason">
-              Reason
+              Reason{needsReason ? <span className="text-red-500"> *</span> : null}
             </label>
             <Select
               id="scenario-reason"
               title="Reason"
               placeholder="Pick a reason"
-              clearable
+              clearable={!needsReason}
+              invalid={reasonMissing && !reasonCode}
               value={reasonCode}
               onChange={setReasonCode}
               options={REASON_CODES.map((c) => ({
@@ -287,10 +338,17 @@ export default function ScenarioPanel({
           <div>
             <label className="label" htmlFor="scenario-note">
               Note
+              {needsReason && reasonCode === "other" ? (
+                <span className="text-red-500"> *</span>
+              ) : null}
             </label>
             <input
               id="scenario-note"
-              className="input"
+              // 'other' with no note is a reason code that explains nothing —
+              // the same rule validateShiftReason applies on the server.
+              className={`input ${
+                reasonMissing && reasonCode === "other" ? "input-invalid" : ""
+              }`}
               value={reasonNote}
               onChange={(e) => setReasonNote(e.target.value)}
               placeholder="e.g. modelling a two-week steel delay"

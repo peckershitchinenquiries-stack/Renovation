@@ -1365,6 +1365,11 @@ export interface ShiftPreview {
   completion_after: string | null;
   completion_days: number;
   cost_impact: CostImpact;
+  // True when ANY task this move touches — the edited one or a knock-on — is in
+  // the current baseline, and a reason code is therefore compulsory to save.
+  // Computed by the server and read by the dialog, so the field the user is
+  // shown and the rule the handler enforces can never disagree.
+  needs_reason: boolean;
   // Populated when the edit would create a dependency loop. Nothing is saved.
   cycle: string[] | null;
 }

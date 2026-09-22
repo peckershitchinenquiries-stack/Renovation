@@ -219,6 +219,111 @@ export function docTypeIcon(
   }
 }
 
+/**
+ * What the document store accepts — ONE list, read by both ends.
+ *
+ * It used to be two lists that disagreed. The route's `ALLOWED` held eight
+ * types; the file picker said `accept="image/*,application/pdf,.doc,.docx,.txt"`,
+ * which is every image format a browser knows. So a GIF, a BMP or a TIFF
+ * passed the picker happily and came back a 415 — after the whole form had
+ * been filled in. A picker that offers a file the server will refuse is worse
+ * than one that does not offer it at all.
+ *
+ * **This list is mirrored on the bucket itself by migration 0025, and the two
+ * change together** (about.md §9.2). The route never sees the file, so only
+ * the bucket actually enforces anything; this is the first line, kept because
+ * it can say *why* under the right field where a 400 from Storage cannot.
+ *
+ * `image/svg+xml` is deliberately absent from all three places. An SVG is a
+ * scripted document, not a picture, and these are served inline through a
+ * redirect to a signed URL. Nothing here needs one — drawings arrive as PDFs.
+ */
+export const DOCUMENT_MIME_TYPES: readonly string[] = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  // Both spellings of the same iPhone container. The route accepted `heic`
+  // alone, but iOS and Windows hand over `image/heif` often enough that the
+  // difference was a guaranteed 415 on a photo the user was entitled to add.
+  "image/heic",
+  "image/heif",
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/msword",
+  "text/plain",
+];
+
+/**
+ * Filename extension → type, for files the BROWSER cannot type.
+ *
+ * `file.type` is empty surprisingly often — it is on some iOS versions for
+ * HEIC, which is exactly the case this store has to handle. The old code sent
+ * `file.type || "application/octet-stream"`, and octet-stream is on no list
+ * anywhere, so those uploads were a certain 415.
+ *
+ * Deriving from the extension is a guess, but it is a guess about a file the
+ * person chose out of their own photo library, and it is only ever allowed to
+ * produce a type that is on the list above. Substituting something that lets
+ * anything through would be a different thing entirely.
+ */
+const EXTENSION_MIME: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heif",
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  txt: "text/plain",
+};
+
+/**
+ * What to send as a file's `mime_type`, or null if it is not something this
+ * store takes.
+ *
+ * Null is the honest answer and the caller says so at the moment the file is
+ * chosen, rather than letting the server refuse it at the end of the form.
+ */
+export function documentMimeType(file: {
+  name: string;
+  type: string;
+}): string | null {
+  const declared = (file.type || "").trim().toLowerCase();
+  if (DOCUMENT_MIME_TYPES.includes(declared)) return declared;
+
+  const extension = file.name.includes(".")
+    ? file.name.split(".").pop()!.toLowerCase()
+    : "";
+  const derived = EXTENSION_MIME[extension];
+  if (!derived) return null;
+
+  // Nothing said, or `application/octet-stream`, which is the browser saying
+  // exactly that — this is the case the fallback exists for, so the extension
+  // decides on its own.
+  if (!declared || declared === "application/octet-stream") return derived;
+
+  // Something WAS said and it is not on the list. The extension is allowed to
+  // settle a near miss of the same kind — `image/jpg` for a .jpg is a real
+  // thing some systems send — but not to overrule the browser outright: a file
+  // named .jpg that the browser says is a video is not a photograph, and
+  // hunting through the filename for a friendlier answer is precisely the
+  // "silently substitute a type that lets anything through" this must not do.
+  return declared.split("/")[0] === derived.split("/")[0] ? derived : null;
+}
+
+/**
+ * The `accept` attribute for the file picker, built from the same list.
+ *
+ * Extensions as well as types, because a picker matching on type alone hides
+ * exactly the untyped files `documentMimeType` exists to rescue.
+ */
+export const DOCUMENT_FILE_ACCEPT = [
+  ...DOCUMENT_MIME_TYPES,
+  ...Object.keys(EXTENSION_MIME).map((e) => `.${e}`),
+].join(",");
+
 /** Human file size. Null size renders as an em dash by the caller. */
 export function formatBytes(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) return "—";

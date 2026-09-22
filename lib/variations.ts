@@ -109,12 +109,23 @@ export function variationRollup(variations: Variation[]): VariationRollup {
  * Returns null when there are no variations, so the screen shows nothing at all
  * rather than "£0 of variations" — which reads as a claim that none were needed
  * rather than as a claim that none were recorded.
+ *
+ * It says **ex VAT**, because it has to. `cost_impact` matches `budget_amount`
+ * and `line_net` (rule 7 of about.md §2), and the figures it sits next to on
+ * the Overview are incl VAT. A number whose basis is not on screen beside it
+ * is how the double-VAT error of 2026-08-06 happened.
+ *
+ * Signs are explicit for the same reason: an omission is a negative variation —
+ * taking the second bathroom out of the scope is worth −£6,000 — and "worth
+ * £6,000" would read as the opposite of what happened.
  */
 export function variationSentence(
   rollup: VariationRollup,
   formatCurrency: (n: number) => string
 ): string | null {
   if (rollup.approved_count === 0 && rollup.proposed_count === 0) return null;
+
+  const signed = (n: number) => `${n > 0 ? "+" : ""}${formatCurrency(n)}`;
 
   const parts: string[] = [];
   if (rollup.approved_count > 0) {
@@ -125,16 +136,52 @@ export function variationSentence(
     parts.push(
       `${rollup.approved_count} approved ${
         rollup.approved_count === 1 ? "variation" : "variations"
-      } worth ${formatCurrency(rollup.approved_cost)}${days}`
+      } worth ${signed(rollup.approved_cost)} ex VAT${days}`
     );
   }
   if (rollup.proposed_count > 0)
     parts.push(
-      `${rollup.proposed_count} still proposed (${formatCurrency(
+      `${rollup.proposed_count} still proposed (${signed(
         rollup.proposed_cost
-      )} not committed)`
+      )} ex VAT, not committed)`
     );
   return `${parts.join("; ")}.`;
+}
+
+/**
+ * The budget with the variations that were actually AGREED added to it.
+ *
+ * `projects.target_budget` is the figure somebody typed when the job was set
+ * up. A £12,000 variation approved in month four does not change that number,
+ * and nothing was writing it anywhere else — so the project read as £12,000
+ * over budget with nothing on any screen saying why. This is the derived
+ * answer; the stored one is left exactly as it was typed, because a target
+ * that silently moves is not a target.
+ *
+ * Three things it deliberately does NOT do:
+ *
+ *   • **It does not include proposed variations.** An approved variation is a
+ *     commitment; a proposed one is a conversation, and a budget that quietly
+ *     includes conversations is a forecast that is fiction. The proposed
+ *     figure is reported beside this one, never inside it.
+ *   • **It does not assume variations only add.** `approved_cost` is signed,
+ *     so an omission subtracts, which is the whole reason the column is
+ *     signed.
+ *   • **It does not convert anything.** `cost_impact` is ex VAT and
+ *     `target_budget` has VAT in it wherever the person setting it put VAT in
+ *     it. Inventing a rate to gross the variation up would be a guess dressed
+ *     as arithmetic — so the agreed figure is added AS AGREED, and every
+ *     screen showing this says on which basis each half is. That is the
+ *     honest option, not a tidy one.
+ */
+export function budgetWithApprovedVariations(
+  targetBudget: number,
+  rollup: VariationRollup | null
+): number {
+  const budget = Number(targetBudget) || 0;
+  if (!rollup) return round2(budget);
+  const approved = Number(rollup.approved_cost);
+  return round2(budget + (Number.isFinite(approved) ? approved : 0));
 }
 
 /**

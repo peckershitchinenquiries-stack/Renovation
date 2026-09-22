@@ -26,11 +26,13 @@
  *    It is the standard constraint every real scheduler calls SNET, and it is
  *    the one thing to understand before reading `forwardPass`.
  *
- * 3. **Float is in WORKING days; drift is in CALENDAR days.** They are read by
- *    different people for different reasons. Float answers "how many days on
- *    site could I lose here" — a weekend is not one of them. Drift answers "how
- *    late are we" — and a builder who is a week late is seven days late, not
- *    five. Both are labelled on screen.
+ * 3. **Float is in WORKING days; drift and LAG are in CALENDAR days.** They are
+ *    read by different people for different reasons. Float answers "how many
+ *    days on site could I lose here" — a weekend is not one of them. Drift
+ *    answers "how late are we" — and a builder who is a week late is seven days
+ *    late, not five. Lag answers "how long must we wait" — and screed dries at
+ *    the weekend too, which is why a 7-day lag means a week, not nine days.
+ *    All three are labelled on screen. See `addLag` below.
  *
  * 4. **Cycles are refused, not survived.** Postgres cannot express "this graph
  *    is acyclic" cheaply, so nothing in the database guards it. `detectCycle`
@@ -241,6 +243,51 @@ export function startFromDuration(
   calendar?: WorkCalendar | null
 ): string {
   return shiftWorkingDays(end, -(Math.max(1, Math.round(duration)) - 1), calendar);
+}
+
+/**
+ * Apply a dependency lag — in CALENDAR days — and land on a working day.
+ *
+ * Rule 3. A lag is a WAIT, not work: screed dries over the weekend, concrete
+ * cures over a bank holiday, and a merchant's quoted week is seven days. Before
+ * this was fixed the lag was walked in working days, so the commonest lag on a
+ * domestic site — "leave it seven days" — silently became nine. It is the same
+ * unit `orderByDate` already uses for lead times, and now the two agree.
+ *
+ * `direction` is which way to snap once the wait is over: forward for a
+ * constraint that pushes a task later (the forward pass), backwards for one
+ * that pulls a deadline earlier (the backward pass).
+ */
+export function addLag(
+  iso: string,
+  lagDays: number,
+  calendar?: WorkCalendar | null,
+  direction: 1 | -1 = 1
+): string {
+  return snapToWorkingDay(
+    addCalendarDays(iso, Math.round(lagDays)),
+    calendar,
+    direction
+  );
+}
+
+/**
+ * The duration implied by a pair of typed dates, or `undefined`.
+ *
+ * Exists because `duration_days` is authoritative (rule 1), which means a
+ * screen that lets somebody type an END date has to convert it into a duration
+ * or the edit does nothing at all. Both the shift route and the scenario
+ * preview call this, so a dragged bar, a typed date and the saved row can
+ * never disagree about how long the task now is.
+ */
+export function durationFromDates(
+  start: string | null | undefined,
+  end: string | null | undefined,
+  calendar?: WorkCalendar | null
+): number | undefined {
+  if (!isISODate(start) || !isISODate(end)) return undefined;
+  if (toDayNumber(end) < toDayNumber(start)) return undefined;
+  return inclusiveWorkingDays(start, end, calendar);
 }
 
 // ============================================================
@@ -483,32 +530,29 @@ export function forwardPass(
       // Only possible when a cycle left a predecessor unscheduled; the caller
       // has already refused to trust this result.
       if (!pred) continue;
+      // Calendar days, per rule 3 — a wait is a wait whether or not anybody is
+      // on site for it.
       const lag = Number(dep.lag_days ?? 0);
       switch (dep.dep_type) {
         case "FS":
-          // The day AFTER the predecessor finishes, plus the lag.
+          // The day AFTER the predecessor finishes, plus the lag. With no lag
+          // that is simply the next working day.
           minStart = laterOf(
             minStart,
-            shiftWorkingDays(pred.early_finish, 1 + lag, calendar)
+            addLag(pred.early_finish, 1 + lag, calendar)
           );
           break;
         case "SS":
-          minStart = laterOf(
-            minStart,
-            shiftWorkingDays(pred.early_start, lag, calendar)
-          );
+          minStart = laterOf(minStart, addLag(pred.early_start, lag, calendar));
           break;
         case "FF":
           minFinish = laterOf(
             minFinish,
-            shiftWorkingDays(pred.early_finish, lag, calendar)
+            addLag(pred.early_finish, lag, calendar)
           );
           break;
         case "SF":
-          minFinish = laterOf(
-            minFinish,
-            shiftWorkingDays(pred.early_start, lag, calendar)
-          );
+          minFinish = laterOf(minFinish, addLag(pred.early_start, lag, calendar));
           break;
       }
     }
@@ -568,31 +612,34 @@ export function backwardPass(
     for (const dep of successors.get(task.id) ?? []) {
       const succ = rows.get(dep.successor_id);
       if (!succ) continue;
+      // The mirror of the forward pass, and in the same unit: calendar days,
+      // snapped BACKWARDS because these are deadlines, not start dates.
       const lag = Number(dep.lag_days ?? 0);
       switch (dep.dep_type) {
         case "FS":
-          // Must finish the working day before the successor's latest start.
+          // Must finish the day before the successor's latest start, less the
+          // lag it has to wait through.
           maxFinish = earlierOf(
             maxFinish,
-            shiftWorkingDays(succ.late_start, -(1 + lag), calendar)
+            addLag(succ.late_start, -(1 + lag), calendar, -1)
           );
           break;
         case "SS":
           maxStart = earlierOf(
             maxStart,
-            shiftWorkingDays(succ.late_start, -lag, calendar)
+            addLag(succ.late_start, -lag, calendar, -1)
           );
           break;
         case "FF":
           maxFinish = earlierOf(
             maxFinish,
-            shiftWorkingDays(succ.late_finish, -lag, calendar)
+            addLag(succ.late_finish, -lag, calendar, -1)
           );
           break;
         case "SF":
           maxStart = earlierOf(
             maxStart,
-            shiftWorkingDays(succ.late_finish, -lag, calendar)
+            addLag(succ.late_finish, -lag, calendar, -1)
           );
           break;
       }
@@ -713,16 +760,19 @@ export function scheduleProject(bundle: ScheduleBundle): ScheduleResult {
     for (const dep of edges) {
       const succ = rows.get(dep.successor_id);
       if (!succ) continue;
+      // The lag is applied exactly as the forward pass applied it — calendar
+      // days — or the slack measured here would not be the slack the engine
+      // actually left.
       const lag = Number(dep.lag_days ?? 0);
       const slack =
         dep.dep_type === "SS" || dep.dep_type === "SF"
           ? workingDaysBetween(
-              shiftWorkingDays(row.early_start, lag, calendar),
+              addLag(row.early_start, lag, calendar),
               succ.early_start,
               calendar
             )
           : workingDaysBetween(
-              shiftWorkingDays(row.early_finish, 1 + lag, calendar),
+              addLag(row.early_finish, 1 + lag, calendar),
               succ.early_start,
               calendar
             );

@@ -39,6 +39,7 @@ import AnalysisTab, {
 } from "./AnalysisTab";
 import ScheduleTab from "@/components/schedule/ScheduleTab";
 import { projectCostRollup, taskCostRows } from "@/lib/scheduleCosts";
+import { budgetWithApprovedVariations } from "@/lib/variations";
 import type {
   Contact,
   Project,
@@ -50,6 +51,7 @@ import type {
   ProjectWeek,
   PurchaseTotals,
   ScheduleBundle,
+  VariationRollup,
 } from "@/types";
 
 type Tab = "overview" | "expenses" | "invoices" | "analysis" | "schedule";
@@ -137,6 +139,7 @@ export default function ProjectDetail({
   openSnagCount = 0,
   openSafetySnagCount = 0,
   contacts = [],
+  variationRollup = null,
 }: {
   project: Project;
   initialEntries: ExpenseEntryComputed[];
@@ -168,6 +171,13 @@ export default function ProjectDetail({
    * picker. Empty when 0020 has not been run — the picker does not appear.
    */
   contacts?: Contact[];
+  /**
+   * Approved and proposed variation cost and days (migration 0024), counted
+   * separately and never added. Null when 0024 has not been run — which is
+   * "say nothing", not "no variations". See OverviewTab for what is done with
+   * it, and lib/variations.ts for why the two halves stay apart.
+   */
+  variationRollup?: VariationRollup | null;
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -311,9 +321,27 @@ export default function ProjectDetail({
     [scheduleBundle, invoiceLines, purchases, diaryEntries]
   );
 
+  /**
+   * The budget the bar is measured against, with approved variations in it.
+   *
+   * `projects.target_budget` is left exactly as it was typed — a target that
+   * silently moves is not a target — so this is derived, never stored. Only
+   * APPROVED variations count: a proposed one is a conversation, and a bar
+   * that quietly widened for conversations would read as headroom that does
+   * not exist. The figure is signed, so an omission narrows it.
+   *
+   * The two halves are on different VAT bases (variations are agreed ex VAT,
+   * Cost is incl VAT) and the caption below says so rather than pretending
+   * otherwise — the Overview cards say it at greater length.
+   */
+  const approvedVariations = variationRollup?.approved_cost ?? 0;
+  const adjustedBudget = budgetWithApprovedVariations(
+    summary.target_budget,
+    variationRollup
+  );
   const budgetPct =
-    summary.target_budget > 0
-      ? Math.round((summary.forecast_total / summary.target_budget) * 100)
+    adjustedBudget > 0
+      ? Math.round((summary.forecast_total / adjustedBudget) * 100)
       : 0;
   const over = summary.variance > 0;
   const currentWeek = byWeek.length ? byWeek[byWeek.length - 1].week_number : 0;
@@ -443,8 +471,20 @@ export default function ProjectDetail({
             </div>
             <p className="mt-2 text-xs text-white/70">
               <span className="font-bold text-white">{budgetPct}%</span> of{" "}
-              {formatCurrency(summary.target_budget)} budget
+              {formatCurrency(adjustedBudget)} budget
               {over ? " — over" : ""}
+              {/* Said here rather than only on Overview, because this bar is
+                  above the tabs and is the figure most people read. A budget
+                  that had grown with no explanation on screen is exactly the
+                  gap this closes. */}
+              {Math.abs(approvedVariations) > 0.001 ? (
+                <>
+                  {" "}
+                  (incl. {approvedVariations > 0 ? "+" : ""}
+                  {formatCurrency(approvedVariations)} approved variations,
+                  agreed ex VAT)
+                </>
+              ) : null}
             </p>
           </div>
         ) : null}
@@ -501,6 +541,10 @@ export default function ProjectDetail({
           retentionHeld={retention.held}
           retentionDueCount={retention.dueCount}
           onViewInvoicesForRetention={() => setTab("invoices")}
+          variationRollup={variationRollup}
+          onViewVariations={() =>
+            router.push(`/projects/${project.id}/variations`)
+          }
         />
       )}
       {tab === "expenses" && (

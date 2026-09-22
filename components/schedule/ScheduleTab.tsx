@@ -9,9 +9,13 @@ import {
   addCalendarDays,
   applyShift,
   calendarDaysBetween,
+  durationFromDates,
+  endFromDuration,
   isISODate,
   leadTimeAlerts,
   scheduleProject,
+  snapToWorkingDay,
+  taskDurationDays,
   taskProgressRollup,
 } from "@/lib/schedule";
 import {
@@ -164,14 +168,22 @@ export default function ScheduleTab({
    */
   const draftBundle = useMemo(() => {
     if (!scenario || scenario.length === 0) return null;
-    return scenario.reduce<ScheduleBundle>(
-      (acc, edit) =>
-        applyShift(acc, edit.task_id, {
-          planned_start: edit.planned_start,
-          planned_end: edit.planned_end,
-        }).bundle,
-      bundle
-    );
+    return scenario.reduce<ScheduleBundle>((acc, edit) => {
+      // The duration is derived from the pair of dates for exactly the reason
+      // the shift route derives it — `duration_days` is authoritative, so a
+      // scenario that only moved the dates would preview a task at its old
+      // length and disagree with what Apply then saves.
+      const duration = durationFromDates(
+        edit.planned_start,
+        edit.planned_end,
+        acc.calendar
+      );
+      return applyShift(acc, edit.task_id, {
+        planned_start: edit.planned_start,
+        planned_end: edit.planned_end,
+        ...(duration !== undefined ? { duration_days: duration } : {}),
+      }).bundle;
+    }, bundle);
   }, [scenario, bundle]);
 
   const draftSchedule = useMemo(
@@ -292,29 +304,49 @@ export default function ScheduleTab({
    */
   function handleDrag(task: ScheduledTask, days: number, edge: string) {
     if (!isISODate(task.computed_start)) return;
+
+    // Where the drag put the bar. One calculation for both branches below, so
+    // a scenario drag and a live drag can never mean different things:
+    //   • "end"   — resized from the right, the start stays put
+    //   • "start" — resized from the left, the end stays put
+    //   • "move"  — both ends travel together, and the task keeps its LENGTH
+    //
+    // That last point is why a move does not simply add the same offset to both
+    // dates. A bar dragged across a weekend would then span a different number
+    // of WORKING days, and since the end date is now read as the task's
+    // duration, a plain move would quietly make the task a day longer.
+    const calendar = bundle.calendar;
+    const nextStart =
+      edge === "end"
+        ? task.computed_start
+        : snapToWorkingDay(addCalendarDays(task.computed_start, days), calendar);
+    const nextEnd =
+      edge === "start" || !isISODate(task.computed_end)
+        ? task.computed_end
+        : edge === "move"
+          ? endFromDuration(nextStart, taskDurationDays(task, calendar), calendar)
+          : snapToWorkingDay(
+              addCalendarDays(task.computed_end, days),
+              calendar,
+              -1
+            );
+
     // In scenario mode a drag is a draft edit, not a request. Nothing leaves
     // the browser until Apply.
+    //
+    // Both dates are carried. Sending a null end used to collapse any task
+    // whose length came from its dates rather than a stored duration down to a
+    // single day, which made the whole what-if optimistic by however long that
+    // task really was.
     if (scenario) {
       addScenarioEdit({
         task_id: task.id,
-        planned_start: addCalendarDays(task.computed_start, days),
-        planned_end: null,
+        planned_start: nextStart,
+        planned_end: nextEnd,
       });
       return;
     }
-    setShifting({
-      ...task,
-      // Seed the dialog with where the drag put it. `edge === "end"` resized
-      // rather than moved, so the start stays where it was.
-      computed_start:
-        edge === "end"
-          ? task.computed_start
-          : addCalendarDays(task.computed_start, days),
-      computed_end:
-        edge === "start" || !isISODate(task.computed_end)
-          ? task.computed_end
-          : addCalendarDays(task.computed_end, days),
-    });
+    setShifting({ ...task, computed_start: nextStart, computed_end: nextEnd });
   }
 
   if (schedule.cycle)
@@ -480,9 +512,13 @@ export default function ScheduleTab({
           draft={draftSchedule ?? schedule}
           costImpact={scenarioCost}
           tasksById={new Map(schedule.tasks.map((t) => [t.id, t]))}
+          baselinedTasks={baselinedTasks}
           onDiscard={() => setScenario(null)}
-          onApplied={() => {
-            setScenario(null);
+          onApplied={(all) => {
+            // A partial apply keeps the scenario open, holding whatever did not
+            // get written — closing it would throw away the only record of what
+            // is still outstanding.
+            if (all) setScenario(null);
             reload();
           }}
           onRemoveEdit={(taskId) =>
@@ -644,7 +680,6 @@ export default function ScheduleTab({
         open={shifting !== null}
         projectId={projectId}
         task={shifting}
-        baselined={shifting ? baselinedTasks.has(shifting.id) : false}
         onClose={() => setShifting(null)}
         onApplied={reload}
       />

@@ -83,6 +83,11 @@ export async function POST(
     .select()
     .single();
 
+  if (dbError?.code === "42P01")
+    return error(
+      "The schedule tables are not installed — run 0016_schedule_core.sql",
+      503
+    );
   // ux_task_dependencies_pair: one link per pair. Saying so beats a 500.
   if (dbError?.code === "23505")
     return error("Those two tasks are already linked", 409, {

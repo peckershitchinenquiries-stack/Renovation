@@ -34,15 +34,12 @@ export default function ShiftDialog({
   open,
   projectId,
   task,
-  baselined,
   onClose,
   onApplied,
 }: {
   open: boolean;
   projectId: string;
   task: ScheduledTask | null;
-  /** Whether this task has a baseline — decides if a reason is compulsory. */
-  baselined: boolean;
   onClose: () => void;
   onApplied: () => void;
 }) {
@@ -133,6 +130,21 @@ export default function ShiftDialog({
   const moved = preview?.rows ?? [];
   const knockOns = moved.filter((r) => r.knock_on);
   const completionDays = preview?.completion_days ?? 0;
+  /**
+   * Whether a reason is compulsory — the SERVER's answer, not a guess.
+   *
+   * It is true when any task this move touches is baselined, including the
+   * knocked-on ones, which the browser cannot know without running the
+   * scheduler itself. Asking the handler that computed the preview means the
+   * field the user sees and the rule that rejects the save are one decision.
+   */
+  const needsReason = Boolean(preview?.needs_reason);
+  // Mirrors validateShiftReason: a code is required, and 'other' on its own
+  // explains nothing so it needs the note too.
+  const reasonMissing =
+    needsReason &&
+    moved.length > 0 &&
+    (!reasonCode || (reasonCode === "other" && !reasonNote.trim()));
 
   return (
     <Sheet
@@ -148,14 +160,18 @@ export default function ShiftDialog({
           </button>
           <button
             type="button"
-            disabled={saving || moved.length === 0}
+            // The same three conditions the handler checks, so the button is
+            // never live for a save that is going to come back a 422.
+            disabled={saving || moved.length === 0 || reasonMissing}
             onClick={apply}
             className="btn-primary flex-1"
           >
             {saving ? <Spinner /> : null}
             {moved.length === 0
               ? "Nothing to apply"
-              : `Apply ${moved.length} ${moved.length === 1 ? "change" : "changes"}`}
+              : reasonMissing
+                ? "Pick a reason first"
+                : `Apply ${moved.length} ${moved.length === 1 ? "change" : "changes"}`}
           </button>
         </div>
       }
@@ -277,7 +293,7 @@ export default function ShiftDialog({
             {/* Compulsory once a baseline exists, and the same rule the server
                 applies — so the two can never disagree about whether this save
                 is allowed. */}
-            {baselined && moved.length > 0 ? (
+            {needsReason && moved.length > 0 ? (
               <fieldset className="rounded-2xl bg-amber-50 p-4 ring-1 ring-inset ring-amber-600/20">
                 <legend className="eyebrow mb-2.5 text-amber-800">
                   Why is it moving?

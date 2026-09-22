@@ -36,7 +36,22 @@ export async function GET(
 
   // `?download=1` asks the browser to save rather than display. Inline is the
   // default because most of these are looked at, not filed.
-  const download = new URL(req.url).searchParams.get("download") === "1";
+  const asked = new URL(req.url).searchParams.get("download") === "1";
+
+  /**
+   * An SVG is never rendered inline, whatever was asked for.
+   *
+   * SVG is a scripted document dressed as a picture. It is no longer an
+   * accepted upload type (see the upload route, and migration 0025 which
+   * enforces that on the bucket), but rows created before that stay readable,
+   * and "we stopped accepting them" is not the same as "none exist". Forcing a
+   * download means an old one is saved to disk rather than executed in a tab
+   * on the storage origin.
+   */
+  const isSvg =
+    document.mime_type === "image/svg+xml" ||
+    /\.svgz?$/i.test(document.storage_path);
+  const download = asked || isSvg;
 
   const { data: signed, error: signError } = await auth.supabase.storage
     .from(BUCKET)

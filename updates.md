@@ -5599,3 +5599,490 @@ entries of £300 and £1,100), 4 extra tasks visible on the Schedule tab,
 completion date pushed out by ~2 days. After cleanup: everything reverts
 to exactly what it was before this entry, including the completion date and
 Cost to date figure.
+
+### 2026-09-22 — Eight bugs fixed in the new schedule, scenario and purchase-order features
+
+**What changed (in plain English):**
+A review of the features added in the last commit turned up eight things that
+were genuinely broken. All eight are now fixed. No money figure moved and no
+migration was needed — every one of these was a logic or wiring fault in code
+that had already shipped.
+
+In plain terms, what was wrong and what now happens:
+
+1. **Typing a new end date on the Gantt did nothing.** A task's length is held
+   in `duration_days`, and the "move this task" dialog only ever sent the two
+   dates — so the engine kept using the old length, the preview said "those are
+   the dates it already has", and if the start had also moved, saving wrote the
+   old end date back over the one just typed. The same fault meant dragging a
+   bar's right-hand handle to make a task longer did nothing at all, and
+   dragging its left-hand handle moved the whole bar instead of resizing it.
+   Now the end date is turned into a duration before anything else happens, so
+   both handles and the date fields do what they look like they do.
+2. **A "what if" drag shrank some tasks to one day.** In scenario mode a drag
+   sent the start date and cleared the end. For any task whose length came from
+   its dates rather than a stored duration, that made it one day long — so the
+   scenario showed everything after it finishing earlier than it really would.
+   Both dates are now carried.
+3. **Applying a scenario could half-work and then claim it had failed.** Each
+   edit is a separate save, and if one was rejected the earlier ones had
+   already been written while the message just said "could not apply the
+   scenario". It now says how many were applied, keeps the ones that were not
+   so they can be corrected and retried, and refreshes the schedule either way.
+   The reason box in that sheet was also optional here but compulsory on the
+   server, which is what made it fail half way — it is now required in both.
+4. **A failed multi-task shift left the schedule half-moved.** Moving one task
+   can move a dozen. If one of those writes failed, the ones already written
+   stayed moved. They are now put back, and the "why did it move" log is only
+   written once every task has saved.
+5. **The "say why this moved" rule asked the wrong question.** It checked only
+   the task being dragged. Moving an un-baselined task that pushes six
+   baselined ones moved six baselined dates with no reason recorded. It now
+   covers every task the move touches, and the dialog is told by the server
+   whether a reason is needed rather than guessing.
+6. **A missing migration looked like an empty schedule.** On a database where
+   `0016` had not been run, the Schedule tab drew a normal empty schedule
+   instead of saying "run the migration", and adding a task failed with a raw
+   database error. Both now say plainly what needs running.
+7. **Waiting time was counted in working days.** A 7-day wait between two tasks
+   — screed drying, concrete curing — was being stretched to nine calendar days
+   because weekends were skipped. Screed dries at the weekend. Waits are now
+   counted in calendar days, which is what the lead-time feature already did.
+8. **A delivery could be silently lost.** Editing a purchase order rebuilds its
+   lines from scratch, so their internal ids change. If somebody had the
+   "record a delivery" sheet open at the time, the quantities they typed
+   matched nothing, nothing was saved, and it reported success. It now says the
+   order changed and asks for the sheet to be reopened. Separately, clearing a
+   quantity back to zero on a draft order used to mark it as sent; it now
+   leaves the status alone.
+
+**Why:**
+The user asked for a review of the recently added features and then asked for
+the bugs found to be fixed. Items 1, 2 and 7 were producing wrong dates on
+screen with nothing to indicate it; 3, 4 and 8 could lose work or leave records
+half-written; 5 undermined the revision log, which is the whole point of
+baselining; 6 is the "an empty result is ambiguous" trap that has caused a real
+incident in this project before.
+
+The loopholes found in the same review — the advisory-only file size and type
+limits on document upload, SVG being an accepted upload type, and the one
+interpolated PostgREST filter — were deliberately **not** touched. The user
+asked for the bugs first and to wait for a separate instruction on those.
+
+**Where the information came from:**
+Reading the code — no spreadsheet or screen involved. Each fault was confirmed
+by tracing the path end to end: the form or drag handler, the route, and
+`lib/schedule.ts`, before anything was changed.
+
+**Files used (read, not changed):**
+- `components/forms/TaskForm.tsx` — confirmed the task form keeps duration and
+  end date in step, which is why bug 1 was limited to the shift path
+- `components/schedule/GanttBar.tsx` — the drag handles and their edges
+- `components/documents/DocumentsScreen.tsx`, `components/orders/OrdersScreen.tsx`
+- `lib/purchases.ts`, `lib/variations.ts`, `lib/certifications.ts`
+- `supabase/migrations/0021_documents.sql`, `0022_activity_snags.sql`
+- `app/(app)/projects/[id]/page.tsx`, `components/project/ProjectDetail.tsx`
+
+**Files changed:**
+- `lib/schedule.ts` — new `addLag()` (waits in calendar days), used by the
+  forward pass, the backward pass and the free-float calculation; new
+  `durationFromDates()`; the file header's rule 3 now says lag is calendar days
+- `lib/schedule.test.mts` — 7 new tests: a 7-day lag is a week, a lag landing
+  on a Saturday, `addLag` in both directions, `durationFromDates` and its
+  refusals, an end date only resizing once it is a duration, and a task keeping
+  its length when both dates travel. **58 → 65 tests**
+- `app/api/projects/[id]/schedule/shift/route.ts` — derives the duration from
+  the dates; validates the dates instead of letting a reversed pair become a
+  silently ignored duration; the reason gate now covers every moved task and
+  reads the current baseline; returns `needs_reason`; rolls the tasks back if a
+  write fails part way; writes the revision log only after all rows are saved
+- `types/index.ts` — `needs_reason` on `ShiftPreview`
+- `components/schedule/ShiftDialog.tsx` — uses the server's `needs_reason`
+  instead of a `baselined` prop (prop removed); Apply is disabled until the
+  reason is given
+- `components/schedule/ScheduleTab.tsx` — a drag carries both dates and, for a
+  plain move, preserves the task's length across a weekend; the scenario
+  preview derives the duration the same way the route does; passes the
+  baselined-task set to the scenario panel; a partial apply keeps the scenario
+  open
+- `components/schedule/ScenarioPanel.tsx` — a reason is required when the
+  scenario moves a baselined task; honest partial-apply reporting;
+  `onApplied(all)`
+- `components/schedule/DependencyEditor.tsx` — the wait field says "calendar
+  days" and the hint explains why
+- `lib/validation.ts` — the lag message says calendar days
+- `lib/data.ts` — `getScheduleBundle` returns null when the schedule tables are
+  missing, so the tab says "run the migration"
+- `app/api/projects/[id]/schedule/tasks/route.ts`,
+  `.../tasks/[taskId]/route.ts`, `.../phases/route.ts`,
+  `.../dependencies/route.ts`, `.../baseline/route.ts` — answer `42P01` with a
+  503 naming `0016_schedule_core.sql`
+- `lib/purchaseOrderWrite.ts` — a receipt update that matches no row is now an
+  error; a receipt of nothing leaves the order's status alone
+- `about.md` — §16 float/drift/lag, the auto-shift and reason-gate sections,
+  the migration note about detecting missing schedule tables, the dependency
+  table row, the purchase-order delivery section, and the test count (40 → 65)
+- `CLAUDE.md` — its Commands section said "There is no test suite", which was
+  already wrong and would have been actively misleading now that this change
+  leans on `npm test` as a verification step. It now names the 65 scheduling
+  tests and says to run them after touching the engine
+- `updates.md` — this entry
+
+**Database:**
+**None.** No migration was written and none was run. Nothing in this change
+alters a table, a column, a constraint or a policy, and no existing row was
+read or rewritten.
+
+**Result / numbers after:**
+
+**No money figure moved, anywhere.** Nothing here touches invoices, payments,
+retention, budgets or any total: Committed, Cost, Paid, Owed and Retention held
+are unchanged to the penny on every screen, which is why §13 of `about.md` is
+untouched.
+
+Dates are a different matter, and two of these fixes **will** change what the
+Schedule tab shows — correctly:
+
+- **Any dependency with a non-zero wait now schedules differently.** A 7-day
+  wait that was being applied as 9 calendar days is now applied as 7, so the
+  task after it — and everything after that — moves **earlier by up to 2 days
+  per weekend the wait spanned**. Dependencies with a wait of 0, which is the
+  default and most of them, are completely unaffected. Worth a look at the
+  Schedule tab after this: if a task moved earlier, this is why, and the new
+  date is the right one.
+- **A project's computed completion date may come in slightly**, for the same
+  reason, if any waiting time sat on its critical path.
+- Baselines, drift and variance figures are **not** recomputed or rewritten —
+  they are stored snapshots. Drift against an existing baseline will therefore
+  read a day or two smaller wherever a wait was involved, which is the point:
+  the old figure counted days that were never really needed.
+
+Verification: `npm run build` **passes**, `npm run lint` is **clean**, and
+`npm test` is **65 of 65 passing** (58 before). These fixes were not clicked
+through in a browser — the Schedule tab is behind the owner's Supabase login —
+so the seven new tests pin the corrected behaviour instead, and the two changes
+that move dates on screen are called out above so they can be recognised rather
+than mistaken for a new fault.
+
+### 2026-09-22 — The three upload and query loopholes closed (migration 0025 NOT yet run)
+
+**What changed (in plain English):**
+The same review that found the eight bugs also found three ways the app could
+be misused by somebody who was already signed in. All three are now dealt with.
+One of them needs a migration that **has not been run yet** — see Database
+below, because until it is run that fix is not actually in force.
+
+1. **The 25MB limit and the list of allowed file types on document upload were
+   not real.** When you add a document or an invoice, the file does not go
+   through the app at all — the app hands the browser a one-time link and the
+   browser sends the file straight to storage. The app only ever sees a note
+   saying "this is a 2MB PNG", and that is what it was checking. Somebody could
+   say "1KB, a PNG" and then send half a gigabyte of anything. The limits are
+   now set on the storage buckets themselves, where they are checked against
+   the actual file. The check in the app stays as well, because it can explain
+   what is wrong underneath the right field, which storage cannot.
+2. **SVG files were accepted as pictures, and opened in the browser.** An SVG
+   is not really a picture — it is a document that can contain scripts. It has
+   been removed from the accepted types. Nothing in the app needs one; drawings
+   come in as PDFs. Any SVG uploaded before today still opens, but it now
+   downloads rather than opening in a tab.
+3. **One database query built its filter by pasting the project id into it.**
+   Everywhere else in the app, values are passed to the database separately
+   from the query, so they cannot be mistaken for part of it. One query — the
+   one that lists a project's documents — could not do that, because it asks a
+   two-part question ("this project's documents, or the ones that belong to no
+   project"). It now refuses anything that is not a proper id before it gets
+   that far.
+
+**Why:**
+The user asked, after the bug fixes, for the loopholes to be closed too. None
+of these had been exploited and none is reachable by a stranger — everything
+here needs a working login, and this is a workspace where signing in is the
+whole of the permission model. They are worth closing anyway: 1 is what turns a
+renovation tracker into somebody's free file host, 2 is a way to serve a
+scripted file from a link that looks like part of the app, and 3 is the kind of
+thing that is harmless right up until the query next to it is edited.
+
+**A fourth thing was found while fixing these, and it would have been a bad
+bug.** The `invoices` bucket has **two** things writing to it: the manual
+upload screen, which allows JPEG/PNG/WebP/PDF, and the Gmail invoice collector,
+which allows PDF/JPEG/PNG/**HEIC** — the format an iPhone photo arrives in.
+Setting the bucket to the upload screen's list, which is the obvious thing to
+do, would have rejected every iPhone photo emailed in — and per CLAUDE.md,
+Gmail ingestion fails **silently**: the message is marked done, the mailbox
+cursor moves past it, and that invoice is lost for good. It has happened twice
+before for other reasons. The bucket is therefore set to the union of both
+lists, and the migration refuses to commit if `image/heic` is missing.
+
+**Where the information came from:**
+Reading the code. The two upload routes, the three bucket-creation statements
+in migrations `0001`, `0010` and `0021`, and `ATTACHMENT_MIME_TYPES` in the
+Gmail drain were compared against each other to work out what each bucket
+actually has to accept.
+
+**Files used (read, not changed):**
+- `app/api/gmail/drain/route.ts` — `ATTACHMENT_MIME_TYPES`, the second writer
+  to the `invoices` bucket
+- `app/api/invoices/upload-url/route.ts` — the manual invoice list
+- `app/api/expenses/[eid]/receipt/route.ts` — confirmed `receipts` posts the
+  file through the handler and so was never exposed
+- `supabase/migrations/0001_init.sql`, `0010_invoice_upload.sql`,
+  `0021_documents.sql` — the three bucket-creation statements
+- `components/documents/DocumentUpload.tsx` — what the browser actually PUTs
+
+**Files changed:**
+- `supabase/migrations/0025_storage_limits.sql` — **NEW, and not yet run.**
+  Sets `file_size_limit` and `allowed_mime_types` on `documents` (25MB),
+  `invoices` (20MB) and `receipts` (10MB). Asserts before committing that no
+  bucket is left unlimited, that `invoices` still accepts `image/heic`, and
+  that `documents` does not accept SVG
+- `app/api/documents/upload-url/route.ts` — `image/svg+xml` removed from
+  `ALLOWED`; a comment records that this list and the bucket's change together
+- `app/api/documents/[id]/file/route.ts` — an SVG is served as a download
+  whatever was asked for, so rows created before the change cannot render
+  inline
+- `lib/data.ts` — new `isUuid()` guard; `getDocumentBundle` refuses a non-UUID
+  before its `.or()` filter is built
+- `about.md` — new §9.2 (upload limits are enforced by the bucket, with the
+  limits table and the HEIC warning) and §9.3 (the one interpolated filter);
+  §9's claim that `createServiceClient()` does "storage MIME validation"
+  corrected — it never has, it is used only by the three Gmail routes, and that
+  wording read as though uploaded files were being inspected when nothing was;
+  `0025` added to the migration table; §24's document notes updated
+- `CLAUDE.md` — the same `createServiceClient()` correction, plus a short note
+  that uploads are limited by the bucket and that the `invoices` list must keep
+  `image/heic`
+- `updates.md` — this entry
+
+**Database:**
+`supabase/migrations/0025_storage_limits.sql` — **written, NOT run.** It has to
+be pasted into the Supabase SQL editor and run by hand, after `0024`, like
+every migration in this project. It is re-runnable and it touches **no table,
+no row, no policy and no column** — it only updates three rows in
+`storage.buckets`. **Until it is run, loophole 1 is still open**: the code
+changes above remove SVG and guard the query, but nothing enforces the size or
+type of an uploaded file until the buckets have the limits on them.
+
+Note that `0019` through `0024` are also still marked not yet run. `0025` does
+not depend on any of them — it only needs the three buckets to exist, which
+they do — but filename order is execution order in this project, so run it
+last.
+
+**Result / numbers after:**
+
+**No money figure moved and no data changed.** Nothing here reads or writes a
+project, an expense, an invoice, a payment or a document row. §13 of
+`about.md` is untouched.
+
+What is different once `0025` has been run:
+
+- **Uploads over the limit are rejected by storage**, not merely discouraged:
+  documents 25MB, invoices 20MB, receipts 10MB. Before → after on what a client
+  could actually store: **unlimited → capped**.
+- **A file whose declared type is not on the list is rejected by storage.**
+  Note honestly what this does *not* do: storage checks the type the uploader
+  declares, it does not examine the file's contents. Somebody determined can
+  still store other bytes labelled `image/png`. The size hole closes
+  completely; the type hole narrows to "you have to lie about it on purpose".
+  Inspecting content would mean reading every uploaded object back with the
+  service-role key, which is separate work and has not been done.
+- **SVG: accepted → refused**, in both the route and the bucket. Existing SVG
+  documents, if any: still readable, but downloaded rather than rendered.
+- **Existing files are untouched.** Bucket limits apply to new uploads; nothing
+  already stored is deleted, re-checked or made unreadable.
+
+Verification: `npm run build` **passes**, `npm run lint` is **clean**, and
+`npm test` is **65 of 65 passing**. The migration itself has not been executed,
+so its asserts have not run — they are there to stop it committing a half-
+applied state when it is run.
+
+---
+
+### 2026-09-22 — Five things that shipped but did not work
+
+**What changed (in plain English):**
+Five features from the 2026-09-19 release were finished off. Documents can now
+be **corrected** without deleting and re-uploading them; an upload that is
+abandoned halfway no longer leaves a **document that cannot be opened**; the
+file chooser now offers exactly the files the app will actually accept, and
+copes with a photo the phone cannot name; **approved variations now show up on
+the project's budget** instead of only on the variations screen; and pressing
+"Set baseline" twice says "that was just captured" rather than showing a
+database error.
+
+**Why:**
+A code review found eight bugs and three security loopholes, which were fixed
+first. These five were the remainder: features that were built, shipped, and
+then could not be reached, or reached the user as a raw error. Taken in order:
+
+1. **Documents could not be edited at all.** The edit endpoint existed and was
+   carefully written, and nothing called it. A typo'd title or a certificate
+   added without its expiry date could only be "fixed" by deleting the document
+   and uploading it again — which quietly breaks version history, because a
+   re-upload starts a brand new chain at version 1 and the old revisions stop
+   being linked to it.
+2. **An abandoned upload left a broken row.** The document row was created
+   first and the file uploaded second, with the browser deleting the row again
+   if the upload failed. That only works while the browser is still open. Close
+   the tab during a slow upload on a phone and the row survived with nothing
+   behind it: it appeared in the list and failed every single time anybody
+   opened it.
+3. **The file chooser offered files the server refuses.** It said "any image",
+   so a GIF, a BMP or a TIFF could be picked and was then rejected — *after*
+   the whole form had been filled in. Worse, any file the browser could not put
+   a name to (which on some iPhones includes ordinary HEIC photos) was sent as
+   "unknown", which is on no accepted list anywhere, so it was a guaranteed
+   rejection of a photograph the person was perfectly entitled to add.
+4. **Approved variations never reached the budget.** The figures were being
+   calculated and only the variations screen showed them. A £12,000 change that
+   everybody had agreed to left the project reading as £12,000 over budget with
+   nothing anywhere on screen explaining why.
+5. **A double-click on "Set baseline" showed a database error.** Two quick
+   clicks both worked out the same next name ("Baseline 3") and the second one
+   lost. The database was right to refuse it and the whole losing capture was
+   rolled back cleanly — the only thing wrong was that the user was shown a raw
+   Postgres unique-violation message.
+
+Item 5 turned out to be **narrower than reported**. The brief wondered whether
+the button should be disabled while a capture is in flight; it already is. So
+the only change there is the wording of the error. No migration was needed and
+none was written — the index that catches this has been in `0016` all along.
+
+**Where the information came from:**
+User request, following a code review of commit `c2d0fa8`. No spreadsheet was
+read and no imported data was touched.
+
+**Files used (read, not changed):**
+- `CLAUDE.md`, `about.md` — the project's own rules
+- `lib/summary.ts`, `lib/vocabulary.ts`, `lib/contactWrite.ts`,
+  `lib/validation.ts` — to match existing shapes
+- `components/variations/VariationsScreen.tsx` — the house style for showing a
+  variation figure
+- `app/api/projects/[id]/schedule/dependencies/route.ts`,
+  `app/api/projects/[id]/variations/route.ts`,
+  `app/api/projects/[id]/orders/route.ts` — the house style for a 23505
+- `components/snags/LogScreen.tsx` — the other caller of the upload component
+
+**Files changed:**
+
+*Documents — editing (item 1)*
+- `app/api/documents/[id]/route.ts` — the edit endpoint now **merges** instead
+  of replacing. It reads the existing row and overlays only what was actually
+  sent. Without that, a form posting three fields would silently blank the
+  other nine — including the project it belongs to, which does not error
+  anywhere. It simply makes the document "not specific to a project", and it
+  then shows up on **every** project's list.
+- `components/documents/DocumentFields.tsx` — **new.** The fields shared by the
+  add form and the edit form, so the two cannot drift apart.
+- `components/documents/DocumentEdit.tsx` — **new.** The edit form. It sends
+  the complete document, every field, not just the changed ones. The file
+  itself is deliberately not editable: a new file is a new *version*, which is
+  what keeps the earlier revision readable.
+- `components/documents/DocumentsScreen.tsx` — a pencil button on every file
+  row and every photo, opening the edit form.
+
+*Documents — abandoned uploads (item 2)*
+- `app/api/documents/upload-url/route.ts` — now hands back a place to put the
+  file and **creates nothing**.
+- `app/api/documents/route.ts` — **new.** Creates the row, and only after
+  **looking in the storage bucket and finding the file**. It also takes the
+  file's real size and type from the stored object rather than believing what
+  the browser claimed. A missing file is a clear "the upload did not finish"
+  message, not a document.
+- `components/documents/DocumentUpload.tsx` — upload first, create second.
+  Abandoning halfway now leaves an unreferenced file in a private bucket, which
+  nobody ever sees, instead of a broken entry in the list. There is still no
+  half-finished "pending" state to get stuck in, so the note in the upload
+  route saying as much is still true, and is still there.
+
+*Documents — file types (item 3)*
+- `lib/documents.ts` — **one** list of accepted types, `DOCUMENT_MIME_TYPES`,
+  read by the server *and* used to build the chooser's filter, so they cannot
+  disagree again. Plus `documentMimeType()`, which works a file's type out from
+  its filename when the browser will not say — and can only ever produce a type
+  that is already on the list. A file it cannot place is refused **at the
+  moment it is chosen**, with the reason, rather than after the form is filled
+  in. `image/heif` was added alongside `image/heic`: same iPhone format, other
+  name, and accepting only one of the two was a certain rejection.
+  `image/svg+xml` stays out, deliberately — see `about.md` §9.2.
+- `app/api/documents/upload-url/route.ts`, `app/api/documents/route.ts` — both
+  read that one list.
+
+*Variations on the budget (item 4)*
+- `lib/variations.ts` — `budgetWithApprovedVariations()`, **new**, and
+  `variationSentence()` rewritten rather than deleted (it was written for the
+  Overview and had never been called; it now says "ex VAT" and prints the sign,
+  because an omission is a **negative** variation).
+- `lib/data.ts` — `getVariationRollup()`, **new**: a small, cheap read of just
+  the variation figures for the project page. The existing loader re-reads the
+  whole schedule and the whole project to build per-task figures the project
+  page does not show.
+- `app/(app)/projects/[id]/page.tsx` — fetches it alongside everything else.
+- `components/project/ProjectDetail.tsx` — the budget bar at the top of the
+  project is now a percentage of the **adjusted** budget, and says so.
+- `components/project/OverviewTab.tsx` — a second "Budget + variations" card
+  beside the original budget, and one sentence linking to the variations log.
+
+*Baseline (item 5)*
+- `app/api/projects/[id]/schedule/baseline/route.ts` — a duplicate capture is
+  now a 409 saying it was just captured, instead of a raw database message.
+
+*Documentation*
+- `supabase/migrations/0025_storage_limits.sql` — `image/heif` added to the
+  `documents` bucket, and the comments updated to point at the single list in
+  code.
+- `about.md` — §9.2 (the accepted-types table and where the list lives), §15's
+  baseline row, §24 (rewritten: upload order, editing, the merge, the type
+  list) and a new §27.1 on the adjusted budget.
+- `CLAUDE.md` — the upload section now names the single list and the
+  bytes-first order.
+- `updates.md` — this entry.
+
+**Database:**
+**One migration touched, and it has NOT been run:**
+`supabase/migrations/0025_storage_limits.sql`. It was already written and
+waiting, so it was **edited in place** rather than superseded — `image/heif`
+added to the `documents` bucket's accepted types, to match the list in code.
+Everything from `0019` to `0025` is still waiting to be pasted into the
+Supabase SQL editor, in filename order.
+
+**No new migration was written, and none is needed.** Nothing here adds a
+column, a table, a constraint or a policy. In particular:
+
+- The adjusted budget is **derived on read** and stored nowhere.
+  `projects.target_budget` is left exactly as it was typed — a target that
+  moves on its own is not a target.
+- The duplicate-baseline fix needed no index. The one that catches it,
+  `ux_task_baselines_task_name`, has been in `0016` since the schedule shipped
+  and was already doing its job.
+
+**Result / numbers after:**
+
+**No money figure moved and no stored data changed.** `about.md` §13 is
+untouched — nothing here reads or writes an expense, an invoice or a payment.
+
+What is different on screen:
+
+- **Editing a document: impossible → a pencil on every row.** The version chain
+  survives a corrected title, where before the only route to one was delete and
+  re-upload, which started the chain again at v1.
+- **An abandoned upload: a broken document in the list → nothing at all.** The
+  cost of abandoning is now an invisible unreferenced file in a private bucket.
+- **The file chooser: every image format a browser knows → the nine the app
+  accepts**, and a file the browser cannot name is now typed from its extension
+  instead of being sent as "unknown" and refused. A rejection that used to
+  arrive after the form was filled in now arrives when the file is picked.
+- **Approved variations: on one screen → on the budget.** A project with, say,
+  £12,000 of approved variations against a £100,000 budget now reads
+  `£100,000 → £112,000` on the header bar and on a second Overview card, with
+  the basis printed on both: the budget includes VAT, a variation is agreed
+  **ex** VAT, nothing is regrossed, and proposed variations are reported beside
+  the figure and are **never** inside it.
+- **Two clicks on "Set baseline": a raw Postgres error → "was captured a moment
+  ago — reload to see it".** The button was already disabled during a capture,
+  so this only affects two genuinely simultaneous requests.
+
+Verification: `npm test` is **65 of 65 passing**, `npm run lint` is **clean**,
+and `npm run build` **passes** (which is the full typecheck). The change was
+not exercised against a live database or in a browser — `0025` and everything
+from `0019` has still not been run, and there is no signed-in session here.
