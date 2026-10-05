@@ -1,7 +1,6 @@
 import { notFound } from "next/navigation";
 import { getPurchaseFormBundle } from "@/lib/data";
 import PurchaseForm from "@/components/forms/PurchaseForm";
-import { InvoiceScopeNote } from "@/components/purchases/SourceNote";
 import { PageHeader } from "@/components/ui/PageHeader";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +21,6 @@ export default async function NewInvoicePage() {
         backHref="/invoices"
         backLabel="Back to invoices"
       />
-      <InvoiceScopeNote className="mb-4" />
       <PurchaseForm bundle={bundle} />
     </div>
   );

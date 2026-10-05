@@ -193,9 +193,14 @@ export async function resolveItemIds(
 // ============================================================
 
 // The header fields the form owns. Deliberately NOT here: origin,
-// entry_source, legacy_entry_id and quoted_gross. Editing a purchase must not
-// silently reclassify it — a backfilled ledger row stays a ledger row, and
-// what a job was quoted at is not something this form asks about.
+// entry_source and legacy_entry_id. Editing a purchase must not silently
+// reclassify it — a backfilled ledger row stays a ledger row.
+//
+// quoted_gross used to be on that excluded list too, with the note that "what
+// a job was quoted at is not something this form asks about". It does now: a
+// column with no write path meant Committed was never a real figure anywhere,
+// and two screens filled the hole with two different fallbacks. See
+// committedGross() in lib/purchases.ts.
 function headerFields(input: PurchaseInput, category: ExpenseCategory | null) {
   const week = String(input.week_no ?? "").trim();
   return {
@@ -207,6 +212,13 @@ function headerFields(input: PurchaseInput, category: ExpenseCategory | null) {
     location_room: text(input.location_room),
     notes: text(input.notes),
     entry_status: input.entry_status,
+    // NULL and not 0 when blank, the same distinction retention needs below:
+    // "nobody recorded what this was agreed at" is a different statement from
+    // "it was agreed at nothing", and only the first may be hidden on screen.
+    quoted_gross:
+      text(input.quoted_gross) === null
+        ? null
+        : round2(Number(input.quoted_gross) || 0),
     // ---- retention (migration 0019) ----
     // NULL and not 0 when the field is blank. `text()` already collapses ""
     // to null, which is exactly the distinction the column needs: "no

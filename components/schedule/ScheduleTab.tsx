@@ -41,6 +41,7 @@ import ScenarioPanel, {
 import ShiftDialog from "./ShiftDialog";
 import TaskSheet from "./TaskSheet";
 import { UntaggedNote, VarianceChip } from "./VarianceChip";
+import WorkCalendarPanel from "./WorkCalendarPanel";
 import type {
   Contact,
   ExpenseEntryComputed,
@@ -430,6 +431,19 @@ export default function ScheduleTab({
           </p>
         ) : null}
       </div>
+
+      {/* Which days this job actually works, directly above the dates it
+          governs. Every figure in the card above — the completion date, the
+          drift, the float behind each bar — counts WORKING days, and until
+          2026-10-01 the calendar behind that could not be set from the app at
+          all: every project was silently scheduled Mon–Fri with no bank
+          holidays. See the note at the top of WorkCalendarPanel. */}
+      <WorkCalendarPanel
+        projectId={projectId}
+        calendar={bundle.calendar}
+        holidays={bundle.holidays}
+        onChanged={reload}
+      />
 
       <UntaggedNote rollup={rollup} onShow={onShowUntagged} />
 

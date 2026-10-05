@@ -97,6 +97,13 @@ export interface ProjectSummary {
   total_quoted: number;
   forecast_total: number; // Σ actual incl VAT (non-cancelled)
   variance: number; // forecast_total − total_quoted (overrun vs quote)
+  // How much of the cost is actually backed by an agreed figure: Σ cost of
+  // rows carrying a non-zero quoted_amount ÷ Σ cost of all active rows, 0…1.
+  // `variance` is only a budget check when this is 1 — at 0.2 it compares one
+  // quoted job against the cost of five, which reads as a huge overrun and is
+  // arithmetic about nothing. The screens use it to decide whether to show the
+  // figure at all; see OverviewTab.
+  quoted_coverage: number;
   contingency_amount: number; // max(variance, 0)
   forecast_plus_contingency: number;
   paid_to_date: number;
@@ -118,65 +125,20 @@ export interface CategoryTotal {
   total: number;
 }
 
-export interface TradeSummary {
-  trade: string;
-  quoted: number;
-  actual: number;
-  paid: number;
-  remaining: number;
-  status: "Paid" | "Partial" | "Pending";
-}
-
-export interface MaterialSummary {
-  supplier: string;
-  cost: number; // Σ actual_amount
-  paid: number;
-  remaining: number;
-  vat: number;
-  total: number;
-  payment_methods: string[];
-  entries: number;
-}
-
-// Per-purchase materials ledger row (mirrors the "Materials & Suppliers" sheet).
-// Derived directly from expense entries with category = Materials.
-export interface MaterialLedgerRow {
-  id: string;
-  week_number: number;
-  item: string; // description
-  supplier: string;
-  unit_cost: number;
-  qty: number;
-  total: number; // total incl. VAT
-  paid: number;
-  remaining: number;
-  paid_date: string | null;
-  payment_method: PaymentMethod | null;
-  notes: string | null;
-}
-
-// Price-over-time tracking — "did the same item cost more this time?"
+// Which way a unit price moved — "did the same item cost more this time?"
+//
+// The only survivor of the Trades / Materials / Price-history shapes that used
+// to sit here. `TradeSummary`, `MaterialSummary`, `MaterialLedgerRow`,
+// `PricePurchase` and `PriceHistoryItem` were the output of the expense-entry
+// builders deleted from lib/summary.ts on 2026-10-01 — they assumed a category
+// and a unit cost on every cost row, which invoice-derived rows do not have, and
+// they were what made the Excel and PDF exports disagree with the app. Their
+// replacements are `TradeInvoiceRow`, `SupplierInvoiceRow`, `InvoiceLineView`
+// and `ItemPriceRow` below, all built from purchase LINES. See about.md §6.10.
+//
+// This type stays because `PriceMove` extends it and the line-level price types
+// use it.
 export type PriceDirection = "up" | "down" | "same" | "first";
-
-export interface PricePurchase {
-  date: string | null;
-  supplier: string | null;
-  unit_cost: number;
-  qty: number;
-  total: number;
-  delta_pct: number; // vs the previous purchase's unit_cost (0 for first)
-  direction: PriceDirection;
-}
-
-export interface PriceHistoryItem {
-  item: string; // display label (original-cased description)
-  purchase_count: number;
-  first_price: number;
-  latest_price: number;
-  latest_delta_pct: number; // latest vs previous purchase
-  trend: PriceDirection;
-  purchases: PricePurchase[]; // sorted oldest → newest
-}
 
 // ============================================================
 // Transaction core (migration 0008) — suppliers, items, purchases.
@@ -521,6 +483,11 @@ export interface PurchaseInput {
   location_room: string | null;
   notes: string | null;
   entry_status: ExpenseStatus;
+  // What the job was agreed at before the money went out, incl VAT. Blank
+  // means nobody recorded one, which is honest and is what nearly every
+  // existing row says — it must stay distinguishable from an agreed £0, so
+  // blank saves NULL and never 0.
+  quoted_gross?: number | string | null;
   // ---- retention (migration 0019) ----
   // Blank means no retention, which is what almost every invoice says. The
   // form only shows the two dates once a percentage has been typed.
@@ -616,6 +583,11 @@ export interface PurchaseOrderRef {
   supplier_name: string | null;
   raised_on: string;
   status: PoStatus;
+  // Σ qty × unit price + VAT over the order's lines, incl VAT so it can be
+  // offered straight into the invoice form's agreed figure. Derived on read
+  // like every other order total (lib/purchaseOrders.ts); 0 on an order with
+  // no lines, and 0 on a database where 0023 has not been run.
+  ordered_gross: number;
 }
 
 // Just enough of a project to name it in a dropdown.
@@ -1184,6 +1156,11 @@ export interface ScheduleBundle {
   // who signed what.
   signoffs: TaskSignoff[];
   calendar: WorkCalendar;
+  // The holiday ROWS, alongside the bare date list inside `calendar` that the
+  // engine wants. The engine only needs to know which dates are shut; the
+  // Working-calendar panel needs the name somebody typed and the id to delete
+  // by, and deriving one from the other is not possible in that direction.
+  holidays: ProjectHoliday[];
 }
 
 // ---- Phase 2: cost tied to the schedule (lib/scheduleCosts.ts) ----
@@ -1308,6 +1285,25 @@ export interface TaskInput {
   // baseline — the log is worthless if it is optional.
   reason_code?: ReasonCode | "" | null;
   reason_note?: string | null;
+}
+
+/**
+ * The working-calendar form's two bodies (migration 0018).
+ *
+ * Separate inputs because they are separate writes to separate tables: the
+ * weekday set is a column on `projects`, a holiday is a row in
+ * `project_holidays`. One combined "save the calendar" body would have to
+ * diff the holiday list to work out what to insert and delete, which is how a
+ * half-applied save loses a date.
+ */
+export interface WorkCalendarInput {
+  /** ISO weekday numbers, 1 = Monday … 7 = Sunday. At least one. */
+  working_weekdays: (number | string)[];
+}
+
+export interface HolidayInput {
+  holiday_date: string;
+  name?: string | null;
 }
 
 export interface PhaseInput {
@@ -1757,6 +1753,17 @@ export interface SnagInput {
 export interface CommunicationBundle {
   project: Project;
   activity: ActivityView[];
+  /**
+   * How many activity rows this project has in total, against how many of them
+   * `activity` actually holds (`ACTIVITY_LIMIT`).
+   *
+   * The list has always been capped — a year of a busy job is thousands of rows
+   * and nobody scrolls them — but nothing said so, so the 301st entry simply
+   * was not there and the screen looked complete. These two numbers are what
+   * lets it admit it.
+   */
+  activity_total: number;
+  activity_limit: number;
   snags: SnagView[];
   phases: { id: string; name: string }[];
   tasks: { id: string; name: string }[];

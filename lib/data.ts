@@ -10,7 +10,9 @@ import {
   purchaseOrderKey,
   purchasesToSyntheticEntries,
   retentionIsDue,
+  round2,
   totalsBySource,
+  SPENDABLE_ENTRY,
 } from "@/lib/purchases";
 import { buildInvoiceLines } from "@/lib/invoiceViews";
 import { projectHealth } from "@/lib/portfolio";
@@ -22,7 +24,7 @@ import {
   worstState,
 } from "@/lib/certifications";
 import { documentViews } from "@/lib/documents";
-import { computeOrder } from "@/lib/purchaseOrders";
+import { computeOrder, orderLineTotals } from "@/lib/purchaseOrders";
 import { variationRollup, variationViews } from "@/lib/variations";
 import { scheduleProject } from "@/lib/schedule";
 import { taskCostRows } from "@/lib/scheduleCosts";
@@ -567,6 +569,14 @@ export async function getPurchaseFormBundle(
     .select("id, po_number, supplier_id, raised_on, status, project_id")
     .order("raised_on", { ascending: false });
 
+  // The order's own lines, so the picker can offer what was ordered as the
+  // invoice's agreed figure. Totals are arithmetic and are never stored
+  // (lib/purchaseOrders.ts), so they have to be summed here. Tolerant for the
+  // same reason as the header read above: no 0023, no lines, no picker.
+  const { data: orderLineRows } = await supabase
+    .from("purchase_order_lines")
+    .select("purchase_order_id, qty_ordered, unit_price, vat_rate");
+
   // A named project that doesn't exist (or isn't the caller's) is still a 404;
   // no project asked for is not.
   if (projectId && !project) return null;
@@ -696,8 +706,31 @@ export async function getPurchaseFormBundle(
   // Draft and cancelled orders are left out: an invoice cannot answer an order
   // that was never sent or that was called off, and offering them would let a
   // price variance be computed against a document nobody acted on.
+  const orderedGross = new Map<string, number>();
+  for (const line of (orderLineRows ?? []) as {
+    purchase_order_id: string;
+    qty_ordered: number;
+    unit_price: number;
+    vat_rate: number;
+  }[]) {
+    // qty ORDERED, not received: this is what was committed to, and a delivery
+    // that has not arrived yet does not reduce what was agreed.
+    const { line_gross } = orderLineTotals(
+      line.qty_ordered,
+      line.unit_price,
+      line.vat_rate
+    );
+    orderedGross.set(
+      line.purchase_order_id,
+      round2((orderedGross.get(line.purchase_order_id) ?? 0) + line_gross)
+    );
+  }
+
   const ordersByProject: Record<string, PurchaseOrderRef[]> = {};
-  for (const row of (orderRows ?? []) as (PurchaseOrderRef & {
+  for (const row of (orderRows ?? []) as (Omit<
+    PurchaseOrderRef,
+    "ordered_gross"
+  > & {
     project_id: string;
   })[]) {
     if (row.status === "draft" || row.status === "cancelled") continue;
@@ -710,6 +743,7 @@ export async function getPurchaseFormBundle(
         : null,
       raised_on: row.raised_on,
       status: row.status,
+      ordered_gross: orderedGross.get(row.id) ?? 0,
     });
   }
 
@@ -956,6 +990,10 @@ export async function getScheduleBundle(
       ),
       holidays: ((holidays ?? []) as ProjectHoliday[]).map((h) => h.holiday_date),
     },
+    // The same rows again, unflattened, for the Working-calendar panel: it needs
+    // the name somebody typed and the id to delete by, neither of which survives
+    // the reduction to a date list above.
+    holidays: (holidays ?? []) as ProjectHoliday[],
   };
 }
 
@@ -1027,10 +1065,9 @@ export async function getPortfolio(): Promise<PortfolioData> {
     supplierNames,
     itemNames
   );
-  // 'ledger' rows overlap the diary and summing both double-counts (about.md
-  // §5) — the same filter the dashboard and ProjectDetail already apply.
+  // The same rule the dashboard and ProjectDetail apply — see SPENDABLE_ENTRY.
   const allEntries = computeEntries((rawEntries ?? []) as ExpenseEntry[]).filter(
-    (e) => e.source !== "ledger"
+    SPENDABLE_ENTRY
   );
 
   const group = <T extends { project_id: string }>(rows: T[]) => {
@@ -1072,6 +1109,7 @@ export async function getPortfolio(): Promise<PortfolioData> {
         working_weekdays: (project.working_weekdays ?? [1, 2, 3, 4, 5]).map(Number),
         holidays: (holidaysBy.get(project.id) ?? []).map((h) => h.holiday_date),
       },
+      holidays: holidaysBy.get(project.id) ?? [],
     };
     bundles.push(bundle);
     return projectHealth({
@@ -1510,6 +1548,15 @@ export async function getDocumentBundle(
 }
 
 /** The activity log and the snagging list, in one pass (migration 0022). */
+/**
+ * How many activity rows the log screen is given.
+ *
+ * Exported because the screen says the number out loud when it is hit — a cap
+ * nobody is told about is a list that silently stops being the truth. See
+ * `CommunicationBundle.activity_total`.
+ */
+export const ACTIVITY_LIMIT = 300;
+
 export async function getCommunicationBundle(
   projectId: string
 ): Promise<CommunicationBundle | null> {
@@ -1521,16 +1568,21 @@ export async function getCommunicationBundle(
     .single();
   if (!project) return null;
 
-  const [{ data: activity, error: activityError }, { data: snags }] =
-    await Promise.all([
+  const [
+    { data: activity, error: activityError, count: activityCount },
+    { data: snags },
+  ] = await Promise.all([
       supabase
+        // `count: "exact"` rides along on the same request, so knowing the real
+        // total costs nothing extra. Without it the screen cannot tell a
+        // project with exactly 300 entries from one with 3,000.
         .from("activity_log")
-        .select("*")
+        .select("*", { count: "exact" })
         .eq("project_id", projectId)
         .order("occurred_at", { ascending: false })
         // Read, not audited: a year of a busy job is thousands of rows and
         // nobody scrolls them. Same reasoning as the revision log's limit.
-        .limit(300),
+        .limit(ACTIVITY_LIMIT),
       supabase
         .from("snags")
         .select("*")
@@ -1587,6 +1639,11 @@ export async function getCommunicationBundle(
       task_name: nameOf(taskNames, entry.task_id),
       phase_name: nameOf(phaseNames, entry.phase_id),
     })),
+    // `count` is null if PostgREST did not return one; falling back to the
+    // number of rows in hand makes the screen say nothing rather than claim a
+    // total it does not have.
+    activity_total: activityCount ?? (activity ?? []).length,
+    activity_limit: ACTIVITY_LIMIT,
     snags: snagRows.map((snag) => ({
       ...snag,
       contact_name: nameOf(contactNames, snag.contact_id),

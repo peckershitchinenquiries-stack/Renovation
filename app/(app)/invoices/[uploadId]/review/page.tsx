@@ -3,7 +3,6 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getPurchaseFormBundle } from "@/lib/data";
 import PurchaseForm, { type PurchaseFormPrefill } from "@/components/forms/PurchaseForm";
-import { InvoiceScopeNote } from "@/components/purchases/SourceNote";
 import { EmptyState } from "@/components/ui/States";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Icon } from "@/components/ui/Icon";
@@ -225,7 +224,6 @@ export default async function ReviewInvoicePage({
         Everything below was read automatically — check it against the original
         and correct anything that&rsquo;s wrong. Nothing here blocks saving.
       </p>
-      <InvoiceScopeNote className="mb-4" />
 
       {/* The document is the reference, the form is the work — so the form
           gets the larger share. The preview is capped short enough that the

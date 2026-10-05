@@ -9,7 +9,7 @@ import {
   PAID_TOLERANCE,
   type PaidState,
 } from "@/lib/calculations";
-import { round2 } from "@/lib/purchases";
+import { round2, SPENDABLE_ENTRY } from "@/lib/purchases";
 import { MONEY } from "@/lib/vocabulary";
 import { Badge } from "@/components/ui/Badge";
 import { Drawer } from "@/components/ui/Drawer";
@@ -17,6 +17,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { EmptyState } from "@/components/ui/States";
 import { useToast } from "@/components/ui/Toast";
 import { Icon } from "@/components/ui/Icon";
+import { SearchInput } from "@/components/ui/SearchInput";
 import { Sheet } from "@/components/ui/Sheet";
 import { Select } from "@/components/ui/Select";
 import { DatePicker } from "@/components/ui/DatePicker";
@@ -274,6 +275,7 @@ export default function ExpensesTab({
   addRequested = false,
   onAddConsumed,
   onChanged,
+  onViewInvoices,
 }: {
   project: Project;
   entries: ExpenseEntryComputed[];
@@ -294,6 +296,11 @@ export default function ExpensesTab({
   addRequested?: boolean;
   onAddConsumed?: () => void;
   onChanged: () => Promise<void>;
+  /**
+   * Switch to the Invoices tab — for the caption that says how many of the rows
+   * below are invoices. Optional, so this tab still renders without it.
+   */
+  onViewInvoices?: () => void;
 }) {
   const toast = useToast();
 
@@ -344,7 +351,7 @@ export default function ExpensesTab({
   // (File 1 + anything added in-app). Imported 'ledger' rows (File 2) live in
   // the Analysis tab's pivots instead.
   const diaryEntries = useMemo(
-    () => entries.filter((e) => e.source !== "ledger"),
+    () => entries.filter(SPENDABLE_ENTRY),
     [entries]
   );
 
@@ -408,6 +415,15 @@ export default function ExpensesTab({
     setFilters((f) => ({ ...f, [key]: "" }));
     setShown((s) => s.filter((k) => k !== key));
   }
+
+  // How many of the rows on this tab are invoices rather than diary entries.
+  // Counted over the whole tab, not the filtered view: the caption describes
+  // what this list contains, so narrowing a filter must not change what it
+  // claims.
+  const invoiceCount = useMemo(
+    () => diaryEntries.filter(isInvoice).length,
+    [diaryEntries]
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -832,33 +848,13 @@ export default function ExpensesTab({
               single least app-like thing a phone screen can show. Each pill now
               opens the app's own sheet (components/ui/Select.tsx). */}
           <div className="space-y-2.5">
-            <div className="relative">
-              <label className="sr-only" htmlFor="costs-search">
-                Search
-              </label>
-              <Icon
-                name="search"
-                size={18}
-                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400"
-              />
-              <input
-                id="costs-search"
-                className="input pl-10 pr-10"
-                placeholder="Search description, supplier or trade"
-                value={query}
-                onChange={(ev) => setQuery(ev.target.value)}
-              />
-              {query ? (
-                <button
-                  type="button"
-                  aria-label="Clear search"
-                  onClick={() => setQuery("")}
-                  className="btn-icon absolute right-1 top-1/2 h-9 min-h-0 w-9 min-w-0 -translate-y-1/2 text-gray-400"
-                >
-                  <Icon name="close" size={16} />
-                </button>
-              ) : null}
-            </div>
+            <SearchInput
+              id="costs-search"
+              value={query}
+              onChange={setQuery}
+              label="Search costs"
+              placeholder="Search description, supplier or trade"
+            />
 
             {/* The question actually asked every day: what still needs
                 paying? Full width on a phone, so all three are equally easy
@@ -1008,6 +1004,44 @@ export default function ExpensesTab({
               ))}
             </div>
           </Sheet>
+
+          {/* Why the same invoice appears on two tabs, said out loud.
+              -------------------------------------------------------------
+              This list is diary rows AND invoices: anything whose id starts
+              `inv:` is a document from `purchases`, shown here because it is
+              money spent on this job in that week. The Invoices tab lists the
+              same documents, one per row.
+
+              Nothing on either tab used to say so, which is a trap for exactly
+              the person who is being careful: you reconcile the two lists, you
+              find the same invoice in both, and you conclude the totals are
+              double-counting. They are not — this is one list containing them
+              and one list of them, not two pots that get added up. Only one
+              number is ever summed, and it is this one.
+
+              Worth saying it is NOT a count of filtered rows: it describes what
+              the tab contains, so narrowing a filter must not make the sentence
+              change its meaning. */}
+          {invoiceCount > 0 ? (
+            <p className="px-1 text-xs leading-relaxed text-gray-500">
+              Includes the{" "}
+              {onViewInvoices ? (
+                <button
+                  type="button"
+                  className="font-semibold text-brand-700 underline decoration-brand-200 underline-offset-2"
+                  onClick={onViewInvoices}
+                >
+                  {invoiceCount} {invoiceCount === 1 ? "invoice" : "invoices"}
+                </button>
+              ) : (
+                <span className="font-semibold text-gray-700">
+                  {invoiceCount} {invoiceCount === 1 ? "invoice" : "invoices"}
+                </span>
+              )}{" "}
+              filed against this project — the Invoices tab is the same documents
+              one per row, not a separate total. Tap a row to open one.
+            </p>
+          ) : null}
 
           {filtered.length === 0 ? (
             /* An empty table under a totals row of £0.00 reads as a project
@@ -1438,7 +1472,8 @@ export default function ExpensesTab({
           editing ? "Edit expense" : template ? "Repeat expense" : "Add expense"
         }
       >
-        {/* Same white ground the standalone /expenses/new route gives it. */}
+        {/* The form's own fieldsets are sunken grey panels, so it needs a
+            white card to sit on. */}
         <div className="card">
           <ExpenseForm
             key={editing?.id ?? template?.id ?? "new"}

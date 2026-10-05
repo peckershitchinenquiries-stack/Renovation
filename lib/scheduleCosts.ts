@@ -43,7 +43,7 @@
  * `net`, `gross` and `line_count` are NOT apportioned. They are exact.
  */
 
-import { round2 } from "@/lib/purchases";
+import { committedGross, round2 } from "@/lib/purchases";
 import type {
   CostImpact,
   ExpenseEntryComputed,
@@ -146,7 +146,10 @@ export function taskCostRows(
     a.net += line.line_net;
     a.gross += line.line_gross;
     a.paid += (purchase?.paid ?? 0) * share;
-    a.committed += Number(purchase?.quoted_gross ?? 0) * share;
+    // 0 when the document carries no agreed figure, which is most of them.
+    // Same single definition the Overview and Analysis use — see
+    // committedGross() in lib/purchases.ts.
+    a.committed += (purchase ? committedGross(purchase) ?? 0 : 0) * share;
     a.line_count += 1;
   }
 

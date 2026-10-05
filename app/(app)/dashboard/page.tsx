@@ -5,7 +5,11 @@ import {
   getRetentionsDue,
 } from "@/lib/data";
 import { computeEntries } from "@/lib/calculations";
-import { computePurchases, ACTIVE_PURCHASE } from "@/lib/purchases";
+import {
+  computePurchases,
+  ACTIVE_PURCHASE,
+  SPENDABLE_ENTRY,
+} from "@/lib/purchases";
 import DashboardScreen, {
   type ProjectSpend,
 } from "@/components/project/DashboardScreen";
@@ -40,12 +44,11 @@ export default async function DashboardPage() {
     getRetentionsDue().catch(() => []),
   ]);
 
-  // 'ledger' rows are the imported reference set that overlapped the diary, so
-  // they are excluded — summing both double-counts the same spend (about.md
-  // §5). Mirrors the filter in ProjectDetail.tsx so this card and the project's
-  // Overview agree.
+  // One shared rule, so this card and the project's Overview cannot disagree —
+  // see SPENDABLE_ENTRY in lib/purchases.ts for why the ledger side is excluded
+  // and why the filter stays although that bucket is empty.
   const entries = computeEntries((rawEntries ?? []) as ExpenseEntry[]).filter(
-    (e) => e.source !== "ledger"
+    SPENDABLE_ENTRY
   );
   const spentByProject: Record<string, number> = {};
   const addSpend = (projectId: string, amount: number) => {

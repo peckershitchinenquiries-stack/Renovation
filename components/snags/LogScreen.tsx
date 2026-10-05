@@ -57,18 +57,33 @@ export default function LogScreen({
   bundle,
   project,
   initialView,
+  autoAdd = false,
 }: {
   // Null means migration 0022 has not been run.
   bundle: CommunicationBundle | null;
   project: Project;
   initialView: View;
+  /**
+   * Open the add form for `initialView` straight away (`?add=1`).
+   *
+   * Set by the project header's "+ Add → Snag" and "+ Add → Log entry". The
+   * point of those entries is to record something while standing in front of
+   * it, so arriving on a list and having to find the button again defeats
+   * them. It is read once, as the initial state — not watched — so closing the
+   * form does not reopen it and the URL is left alone.
+   */
+  autoAdd?: boolean;
 }) {
   const router = useRouter();
   const toast = useToast();
   const [view, setView] = useState<View>(initialView);
   const [filter, setFilter] = useState<string>("open");
-  const [addingActivity, setAddingActivity] = useState(false);
-  const [addingSnag, setAddingSnag] = useState(false);
+  const [addingActivity, setAddingActivity] = useState(
+    autoAdd && initialView === "activity"
+  );
+  const [addingSnag, setAddingSnag] = useState(
+    autoAdd && initialView === "snags"
+  );
   const [editingSnag, setEditingSnag] = useState<SnagView | null>(null);
   const [photoFor, setPhotoFor] = useState<SnagView | null>(null);
   const [deletingEntry, setDeletingEntry] = useState<ActivityView | null>(null);
@@ -264,7 +279,26 @@ export default function LogScreen({
             ))}
           </ListCard>
         )
-      ) : (
+      ) : null}
+
+      {/* The log has always been capped at 300 rows, and until 2026-10-01
+          nothing said so: the 301st entry simply was not there and the list
+          looked complete. On a year-long job that is the oldest third of the
+          record quietly missing from the screen people go to in order to
+          remember what was agreed.
+
+          Only rendered when the cap is actually reached, so a normal project
+          never sees a sentence about a limit it has not hit. */}
+      {view === "activity" &&
+      bundle.activity_total > bundle.activity.length ? (
+        <p className="mt-3 px-1 text-xs leading-relaxed text-gray-500">
+          Showing the most recent {bundle.activity.length} of{" "}
+          {bundle.activity_total} entries. Older ones are still stored — they
+          are not shown here.
+        </p>
+      ) : null}
+
+      {view === "snags" ? (
         <div className="space-y-3">
           <ChipRow
             label="Filter snags"
@@ -420,7 +454,7 @@ export default function LogScreen({
             </div>
           )}
         </div>
-      )}
+      ) : null}
 
       <Sheet
         open={addingActivity}

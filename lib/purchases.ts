@@ -21,8 +21,10 @@ import type {
   PriceMove,
 } from "@/types";
 
-// Float-rounding tolerance, not a business rule. Same value buildTrades uses in
-// lib/summary.ts, so the two always agree on what counts as settled.
+// Float-rounding tolerance, not a business rule. The one value for "close
+// enough to settled" and "no change in price", shared by purchaseStatus() below
+// and the trade and supplier rows in lib/invoiceViews.ts, so no two screens
+// disagree about whether something is paid off.
 export const SETTLED_TOLERANCE = 0.001;
 
 // Σ of what was actually handed over. Payment amounts are incl-VAT, so they are
@@ -205,6 +207,36 @@ export function lineArithmeticGap(
 }
 
 // ============================================================
+// Committed — the one definition of it
+// ============================================================
+/**
+ * What this document was agreed at, or null when nobody ever said.
+ *
+ * There is exactly one rule and this is it. Three places used to answer the
+ * question separately and two of them disagreed: the synthetic expense entries
+ * below fell back to `gross_total` when `quoted_gross` was null, while
+ * lib/invoiceViews.ts and lib/scheduleCosts.ts fell back to 0. Since
+ * `quoted_gross` is null on nearly everything, the Overview's Committed card
+ * equalled its Cost card to the penny — making Variance structurally £0.00 and
+ * "Within Committed" a sentence that could never be false — at the same moment
+ * as Analysis showed Committed as "—". One word, two numbers, two tabs of the
+ * same project, which is the exact failure lib/vocabulary.ts exists to stop.
+ *
+ * Null, never a substituted cost. A commitment that was never recorded is an
+ * absence, and the screens say so by hiding the figure (OverviewTab) or
+ * rendering "—" (AnalysisTab) rather than by quoting the invoice back as
+ * though it had been agreed in advance.
+ *
+ * `quoted_gross` is incl-VAT, like `gross_total` and unlike `net_total` — see
+ * migration 0008 and about.md §3.1.
+ */
+export function committedGross(purchase: {
+  quoted_gross: number | null;
+}): number | null {
+  return purchase.quoted_gross == null ? null : Number(purchase.quoted_gross);
+}
+
+// ============================================================
 // Phase 1 — ordering, unit handling and per-source totals
 // ============================================================
 
@@ -212,6 +244,31 @@ export function lineArithmeticGap(
 // as ACTIVE does for expense entries in lib/summary.ts. entry_status is the
 // lifecycle flag, not a payment state (about.md §4.6).
 export const ACTIVE_PURCHASE = (p: Purchase) => p.entry_status !== "Cancelled";
+
+/**
+ * The rows a screen is allowed to add up: everything except `source: 'ledger'`.
+ *
+ * `expense_entries.source` is `'diary'` (hand-entered and File-1 imported),
+ * `'invoice'` (synthesised from `purchases`, see `purchasesToSyntheticEntries`)
+ * or `'ledger'` (the File-2 import). The ledger OVERLAPPED the diary, so adding
+ * the two counts the same spend twice — and it has been **empty since migration
+ * 0009** (2026-08-14), because the workbook that filled it turned out to be a
+ * different job (about.md §3.0, §5).
+ *
+ * Why this exists as a named thing rather than six copies of
+ * `e.source !== "ledger"`: it was six copies — ProjectDetail, ExpensesTab, the
+ * dashboard, `getPortfolio`, and both export routes — and every new screen that
+ * totals expenses has to know the rule to be correct, from a string it has to
+ * have heard about. Now it imports the rule. The predicate is identical, so no
+ * figure moves.
+ *
+ * The filter stays even though the bucket is empty. It costs one comparison per
+ * row and it is the only thing standing between the app and a double-count on
+ * the day a second dataset is imported. **Do not delete it because it currently
+ * matches everything** — the column is provenance and is meant to keep working.
+ */
+export const SPENDABLE_ENTRY = (e: { source: ExpenseEntry["source"] }) =>
+  e.source !== "ledger";
 
 // What to sort a purchase by on a timeline.
 //
@@ -264,7 +321,8 @@ export function comparePrice(
     return { delta_pct: null, move: "unit_change" };
   const delta_pct =
     ((current.unit_price - previous.unit_price) / previous.unit_price) * 100;
-  // Same 0.001 tolerance buildPriceHistory uses for "no change".
+  // SETTLED_TOLERANCE again: below this, a price did not move. Reusing the one
+  // constant keeps "no change" meaning the same thing everywhere.
   if (Math.abs(delta_pct) < SETTLED_TOLERANCE)
     return { delta_pct, move: "same" };
   return { delta_pct, move: delta_pct > 0 ? "up" : "down" };
@@ -338,7 +396,7 @@ export function buildMaterialPriceIndex(
     if (e.id === excludeEntryId) continue;
     if (e.category !== "Materials") continue;
     if (e.status === "Cancelled") continue;
-    if (e.source === "ledger") continue;
+    if (!SPENDABLE_ENTRY(e)) continue;
     const unit_price = Number(e.unit_cost);
     if (unit_price <= 0) continue;
     const dateStr = e.paid_date || e.created_at;
@@ -477,12 +535,13 @@ export function buildItemTimeline(
 // ============================================================
 // Convert purchases (the transaction core) into synthetic ExpenseEntryComputed
 // objects so they can be merged into the entries array that every calculation
-// function already consumes. Nothing changes in buildSummary / buildTrades /
-// buildMaterialLedger / buildPriceHistory — they all just see more rows.
+// function already consumes. buildSummary and the Overview's weekly chart and
+// donut (lib/summary.ts) change not at all — they just see more rows.
 //
 // Mapping rationale
 //   • gross_total (net + vat generated column) → total_incl_vat / actual_amount
-//   • quoted_gross                             → quoted_amount (may be null)
+//   • quoted_gross                             → quoted_amount, 0 when unset
+//     (via committedGross — never substituted with the invoice's own total)
 //   • paid (Σ payments)                        → paid_amount
 //   • balance (gross − paid)                   → remaining
 //   • vat_total                                → vat_amount
@@ -490,10 +549,13 @@ export function buildItemTimeline(
 //   • category / trade / week_no / supplier    → forwarded as-is
 //   • source                                   → "invoice" (new union member)
 //
-// Price Tracker (buildPriceHistory) only fires for entries where
-// unit_cost > 0 AND category = "Materials". A purchase-level synthetic entry
-// has no unit cost (that lives on the lines), so it will not appear in the
-// Price Tracker — which is the correct, honest behaviour.
+// `unit_cost` and `qty` are 0 on every row built here, and that is correct: a
+// quantity and a price per unit are facts about a LINE, and a document-level row
+// has neither. Nothing reads them any more. The Price Tracker and the Materials
+// and Labour lists are built from purchase lines in lib/invoiceViews.ts for
+// exactly this reason — and the Excel and PDF exports, which used to be built
+// from these synthetic rows and so reported no prices at all, now read those
+// same line-level builders (about.md §6.10).
 
 export function purchasesToSyntheticEntries(
   purchases: PurchaseComputed[],
@@ -512,7 +574,10 @@ export function purchasesToSyntheticEntries(
       const vat = Number(p.vat_total);
       const net = Number(p.net_total);
       const paid = Number(p.paid);
-      const quoted = p.quoted_gross != null ? Number(p.quoted_gross) : gross;
+      // Zero when nothing was agreed in advance, which is most of it. It used
+      // to fall back to `gross` — see committedGross() for why that one line
+      // made the Overview's Variance card incapable of ever firing.
+      const quoted = committedGross(p) ?? 0;
       const supplierName = p.supplier_id
         ? (supplierNames.get(p.supplier_id) ?? null)
         : null;

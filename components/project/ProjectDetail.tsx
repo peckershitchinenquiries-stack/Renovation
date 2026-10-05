@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch } from "@/lib/fetcher";
 import { formatCurrency } from "@/lib/calculations";
-import { ACTIVE_PURCHASE, retentionIsDue } from "@/lib/purchases";
+import { ACTIVE_PURCHASE, SPENDABLE_ENTRY, retentionIsDue } from "@/lib/purchases";
 import { MONEY } from "@/lib/vocabulary";
 import {
   buildSummary,
@@ -33,11 +34,39 @@ import AddMenu, { type AddItem } from "./AddMenu";
 import OverviewTab from "./OverviewTab";
 import ExpensesTab from "./ExpensesTab";
 import InvoicesTab from "./InvoicesTab";
-import AnalysisTab, {
-  type AnalysisView,
-  type LineCategory,
-} from "./AnalysisTab";
-import ScheduleTab from "@/components/schedule/ScheduleTab";
+import { ListSkeleton } from "@/components/ui/States";
+import type { AnalysisView, LineCategory } from "./AnalysisTab";
+
+/*
+ * The two big tabs are code-split.
+ *
+ * This page was 150 kB of client JavaScript against 100–120 kB for every other
+ * route in the app, and the two largest contributors are tabs that are usually
+ * not the one you are looking at: `AnalysisTab` is ~1,430 lines and
+ * `ScheduleTab` ~940, and at most one of them is on screen at a time. Before
+ * this they were both in the page's own bundle, so opening a project to glance
+ * at the Overview downloaded the Gantt chart and four pivot tables as well.
+ *
+ * `ssr` is left ON (the default). These are rendered conditionally on `tab`, so
+ * the server still renders whichever one the URL asked for — arriving at
+ * `?tab=schedule` is no slower than it was — and the OTHER one's JavaScript is
+ * simply never fetched. Turning SSR off would have traded a bundle problem for
+ * a blank first paint, which is not a trade worth making.
+ *
+ * The types are imported separately with `import type`, so they are erased at
+ * compile time rather than dragging the module back into the graph.
+ *
+ * `ListSkeleton` is the fallback rather than a spinner: on a fast connection the
+ * chunk is already there and neither is seen, and on a slow one a shape the
+ * size of the list that is coming is less jarring than a spinner in the middle
+ * of the page.
+ */
+const AnalysisTab = dynamic(() => import("./AnalysisTab"), {
+  loading: () => <ListSkeleton count={6} />,
+});
+const ScheduleTab = dynamic(() => import("@/components/schedule/ScheduleTab"), {
+  loading: () => <ListSkeleton count={6} />,
+});
 import { projectCostRollup, taskCostRows } from "@/lib/scheduleCosts";
 import { budgetWithApprovedVariations } from "@/lib/variations";
 import type {
@@ -218,11 +247,12 @@ export default function ProjectDetail({
     router.refresh();
   }, [project.id, router]);
 
-  // Overview reflects the week-by-week Expenses diary only (source !== 'ledger'),
-  // so its analytics cover the 15 diary weeks — not the imported File 2 ledger.
-  // The Analysis pivots still use the full data set.
+  // Overview reflects the week-by-week diary plus invoices, never the imported
+  // File 2 ledger — see SPENDABLE_ENTRY for why, and why the filter stays even
+  // though that bucket has been empty since migration 0009. The Analysis pivots
+  // still receive the full set and drop the ledger side themselves.
   const diaryEntries = useMemo(
-    () => entries.filter((e) => e.source !== "ledger"),
+    () => entries.filter(SPENDABLE_ENTRY),
     [entries]
   );
   const summary = useMemo(
@@ -343,7 +373,12 @@ export default function ProjectDetail({
     adjustedBudget > 0
       ? Math.round((summary.forecast_total / adjustedBudget) * 100)
       : 0;
-  const over = summary.variance > 0;
+  // Over the BUDGET, which is what the bar below is a bar of. It used to read
+  // `summary.variance > 0` — the overrun against quote — so a project could sit
+  // at 140% of budget with a white bar and no "— over", and (because the quote
+  // figure was derived from cost) usually did. Guarded on there being a budget
+  // at all: the bar only renders when there is one.
+  const over = adjustedBudget > 0 && summary.forecast_total > adjustedBudget;
   const currentWeek = byWeek.length ? byWeek[byWeek.length - 1].week_number : 0;
 
   /**
@@ -362,6 +397,12 @@ export default function ProjectDetail({
    *     pivot builds, so saving lands back on the lines you just added to.
    *     That route used to be reachable ONLY from the Labour empty state,
    *     which meant it disappeared as soon as the project had any labour.
+   *   • Photo or document, Snag, Log entry — each is a route that already
+   *     exists and already has the right form on it; all that was missing was
+   *     a door from here. Each is sent `add=1`, which those screens read as
+   *     "open the add form on arrival" rather than landing the user on a list
+   *     and asking them to find the button again. The snag and log entries
+   *     share one route and differ only by `view`.
    */
   function handleAdd(item: AddItem) {
     if (item === "cost") {
@@ -371,6 +412,18 @@ export default function ProjectDetail({
     }
     if (item === "invoice") {
       router.push("/invoices");
+      return;
+    }
+    if (item === "document") {
+      router.push(`/projects/${project.id}/documents?add=1`);
+      return;
+    }
+    if (item === "snag") {
+      router.push(`/projects/${project.id}/log?view=snags&add=1`);
+      return;
+    }
+    if (item === "log") {
+      router.push(`/projects/${project.id}/log?view=activity&add=1`);
       return;
     }
     router.push(
@@ -420,7 +473,7 @@ export default function ProjectDetail({
             <button
               type="button"
               onClick={() => setMoreOpen(true)}
-              aria-label="Project actions"
+              aria-label="Manage project"
               className="btn-icon text-gray-600"
             >
               <Icon name="more" size={20} />
@@ -523,6 +576,7 @@ export default function ProjectDetail({
 
       {tab === "overview" && (
         <OverviewTab
+          projectId={project.id}
           summary={summary}
           byWeek={byWeek}
           byCategory={byCategory}
@@ -545,6 +599,10 @@ export default function ProjectDetail({
           onViewVariations={() =>
             router.push(`/projects/${project.id}/variations`)
           }
+          // `% built` lives in project_weeks, which only the server reads
+          // (initialWeeks feeds buildByWeek above), so a save has to go back
+          // through the page rather than through local state.
+          onWeekSaved={() => router.refresh()}
         />
       )}
       {tab === "expenses" && (
@@ -557,6 +615,7 @@ export default function ProjectDetail({
           addRequested={addCostPending}
           onAddConsumed={() => setAddCostPending(false)}
           onChanged={reloadEntries}
+          onViewInvoices={() => setTab("invoices")}
         />
       )}
       {tab === "invoices" && (
@@ -614,47 +673,30 @@ export default function ProjectDetail({
       )}
       </div>
 
-      {/* Export / Edit / Delete. Rare, so they live one tap away rather than in
-          the header — and Delete is last, quiet, and still gated by the
-          type-the-name confirmation. */}
+      {/*
+        Manage: Edit, Export, Delete. Nothing else.
+
+        This sheet used to carry the four Track B DESTINATIONS as well — Log &
+        snags, Documents & photos, Orders, Variations — and that was the only
+        place in the app they could be reached from. Two faults in one: four
+        built modules were invisible behind an unlabelled "⋯", and the menu
+        itself meant two different things at once, so a list of places read as
+        a settings menu and was skipped by anyone not looking for settings.
+
+        The destinations are now named on the Overview tab, in the body of the
+        page (see PROJECT_LINKS in OverviewTab.tsx). What is left here is only
+        what this menu was for: three rare actions on the project itself, one of
+        which destroys it. They are NOT duplicated on Overview — the point of
+        moving them was to give this control one meaning.
+      */}
       <Sheet
         open={moreOpen}
         onClose={() => setMoreOpen(false)}
         title={project.name}
-        description="Project actions"
+        description="Settings, export and delete"
         size="sm"
       >
         <div className="-mx-2">
-          {/* The four Track B screens. They are routes rather than tabs on
-              purpose: five tabs is already one more than the 2026-08-28
-              collapse settled on, and none of these is another way of looking
-              at the spend — which is what earns a tab. They are browsed
-              occasionally, so one tap away is the right distance. */}
-          <SheetAction
-            icon="list"
-            label="Log & snags"
-            hint="Calls, site visits, decisions — and what needs putting right"
-            href={`/projects/${project.id}/log`}
-          />
-          <SheetAction
-            icon="receipt"
-            label="Documents & photos"
-            hint="Planning, certificates, drawings, the site timeline"
-            href={`/projects/${project.id}/documents`}
-          />
-          <SheetAction
-            icon="truck"
-            label="Orders"
-            hint="What you have ordered, and whether it arrived as billed"
-            href={`/projects/${project.id}/orders`}
-          />
-          <SheetAction
-            icon="edit"
-            label="Variations"
-            hint="What changed, why, and what it cost"
-            href={`/projects/${project.id}/variations`}
-          />
-          <div className="my-1.5 mx-3 divider" />
           <SheetAction
             icon="settings"
             label="Edit project"

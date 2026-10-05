@@ -22,9 +22,13 @@ export default async function LogPage({
   searchParams,
 }: {
   params: { id: string };
-  searchParams: { view?: string };
+  searchParams: { view?: string; add?: string };
 }) {
   const bundle = await getCommunicationBundle(params.id);
+  // `?add=1` opens the add form for whichever segment was asked for, so the
+  // project header's "+ Add → Snag" / "+ Add → Log entry" land on the form
+  // rather than on the list. See LogScreen's `autoAdd`.
+  const autoAdd = searchParams?.add === "1";
 
   if (!bundle) {
     const project = await getProject(params.id);
@@ -39,6 +43,7 @@ export default async function LogPage({
       // `?view=snags` so the snag count in the project header can link
       // straight to the list it is counting.
       initialView={searchParams?.view === "snags" ? "snags" : "activity"}
+      autoAdd={autoAdd}
     />
   );
 }

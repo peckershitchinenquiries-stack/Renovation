@@ -19,6 +19,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { SegmentedControl, ChipRow } from "@/components/ui/SegmentedControl";
 import { Sheet } from "@/components/ui/Sheet";
 import { Icon } from "@/components/ui/Icon";
+import { SearchInput } from "@/components/ui/SearchInput";
 import { IconTile, ListCard, ListRow } from "@/components/ui/List";
 import { formatDisplayDate } from "@/components/ui/DatePicker";
 import { useToast } from "@/components/ui/Toast";
@@ -44,18 +45,25 @@ type View = "files" | "photos";
 export default function DocumentsScreen({
   bundle,
   project,
+  autoAdd = false,
 }: {
   // Null means migration 0021 has not been run — which is a different thing
   // from an empty store, and the screen says which.
   bundle: DocumentBundle | null;
   project: Project;
+  /**
+   * Open the upload sheet straight away (`?add=1`), set by the project
+   * header's "+ Add → Photo or document". Read once as the initial state, not
+   * watched, so closing the sheet does not reopen it.
+   */
+  autoAdd?: boolean;
 }) {
   const router = useRouter();
   const toast = useToast();
   const [view, setView] = useState<View>("files");
   const [type, setType] = useState<string>("all");
   const [room, setRoom] = useState<string>("all");
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(autoAdd);
   const [newVersionOf, setNewVersionOf] = useState<DocumentView | null>(null);
   const [chainOf, setChainOf] = useState<DocumentView | null>(null);
   const [deleting, setDeleting] = useState<DocumentView | null>(null);
@@ -70,6 +78,35 @@ export default function DocumentsScreen({
   // recompute every time any unrelated bit of state moved.
   const documents = useMemo(() => bundle?.documents ?? [], [bundle]);
 
+  /*
+   * Search, added 2026-10-01.
+   *
+   * Both halves of this screen needed it for different reasons. Files is a
+   * store you LOOK THINGS UP IN — you know you want the gas certificate and
+   * you want it in five seconds — and the type chips only narrow to a kind,
+   * not to a document. Photos grows fastest of anything here, a dozen a day
+   * on a busy week, and the room chips are the only handle on it.
+   *
+   * The haystack is only what the row shows: title, reference, room and the
+   * type's own label. Matching on notes that are not on screen gives results
+   * whose reason is invisible, which reads as a broken filter.
+   *
+   * The chips, the room list and the photo count are deliberately NOT filtered
+   * by this — they are controls, not results, and a chip row that loses options
+   * as you type takes away the way out.
+   */
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const matches = useMemo(() => {
+    if (!q) return () => true;
+    return (d: DocumentView) =>
+      `${d.title} ${d.reference ?? ""} ${d.location_room ?? ""} ${
+        DOC_TYPE_LABELS[d.doc_type] ?? ""
+      }`
+        .toLowerCase()
+        .includes(q);
+  }, [q]);
+
   // Only current versions in the list. Superseded ones are reachable through
   // the version history of the one that replaced them, which is the whole
   // point of the chain: rev B does not vanish, it stops being the answer.
@@ -78,6 +115,7 @@ export default function DocumentsScreen({
       documents
         .filter((d) => d.doc_type !== "photo" && d.is_current)
         .filter((d) => type === "all" || d.doc_type === type)
+        .filter(matches)
         .sort((a, b) => {
           // Anything expiring or expired first — the only documents here with
           // any urgency — then newest.
@@ -87,18 +125,18 @@ export default function DocumentsScreen({
             rank(a) - rank(b) || b.created_at.localeCompare(a.created_at)
           );
         }),
-    [documents, type]
+    [documents, type, matches]
   );
 
   const rooms = useMemo(() => photoRooms(documents), [documents]);
   const groups = useMemo(
     () =>
       photoTimeline(
-        documents,
+        documents.filter(matches),
         bundle?.phases ?? [],
         room === "all" ? null : room
       ),
-    [documents, bundle?.phases, room]
+    [documents, bundle?.phases, room, matches]
   );
 
   const typesPresent = useMemo(() => {
@@ -176,6 +214,22 @@ export default function DocumentsScreen({
         }
       />
 
+      {/* One box above both views, hidden until there is something to search.
+          `documents.length` rather than the filtered count, or clearing the
+          query would take the box away with it. */}
+      {documents.length > 0 ? (
+        <div className="mb-3">
+          <SearchInput
+            id="documents-search"
+            className="sm:max-w-sm"
+            value={query}
+            onChange={setQuery}
+            label="Search documents and photos"
+            placeholder="Title, reference, room or type"
+          />
+        </div>
+      ) : null}
+
       {view === "files" ? (
         <div className="space-y-3">
           {typesPresent.length > 1 ? (
@@ -193,7 +247,25 @@ export default function DocumentsScreen({
             />
           ) : null}
 
-          {files.length === 0 ? (
+          {files.length === 0 && q ? (
+            /* A search that matches nothing is not an empty store, and the two
+               must not read the same — say which happened. */
+            <EmptyState
+              icon="search"
+              compact
+              title="Nothing matches"
+              description="No document matches that search. The type chips above still apply."
+              action={
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setQuery("")}
+                >
+                  Clear search
+                </button>
+              }
+            />
+          ) : files.length === 0 ? (
             <EmptyState
               icon="receipt"
               title="No documents yet"
@@ -327,6 +399,8 @@ export default function DocumentsScreen({
           onRoom={setRoom}
           onAdd={() => setAdding(true)}
           onEdit={setEditing}
+          searching={Boolean(q)}
+          onClearSearch={() => setQuery("")}
         />
       )}
 
@@ -450,12 +524,18 @@ function PhotoTimelineView({
   onRoom,
   onAdd,
   onEdit,
+  searching = false,
+  onClearSearch,
 }: {
   groups: { phase_id: string | null; phase_name: string; photos: DocumentView[] }[];
   rooms: string[];
   room: string;
   onRoom: (value: string) => void;
   onAdd: () => void;
+  /** True when a search is narrowing the timeline — so an empty result can say
+   *  "nothing matches" rather than "no photos yet", which would be a lie. */
+  searching?: boolean;
+  onClearSearch?: () => void;
   /**
    * A photo needs editing more often than anything else here: `taken_at` and
    * the room are what put it in the right place on the timeline, and both are
@@ -463,6 +543,21 @@ function PhotoTimelineView({
    */
   onEdit: (photo: DocumentView) => void;
 }) {
+  if (groups.length === 0 && searching)
+    return (
+      <EmptyState
+        icon="search"
+        compact
+        title="Nothing matches"
+        description="No photo matches that search. The room chips above still apply."
+        action={
+          <button type="button" className="btn-secondary" onClick={onClearSearch}>
+            Clear search
+          </button>
+        }
+      />
+    );
+
   if (groups.length === 0)
     return (
       <EmptyState

@@ -29,6 +29,7 @@
 
 import {
   ACTIVE_PURCHASE,
+  committedGross,
   comparePrice,
   normaliseName,
   purchaseOrderKey,
@@ -199,10 +200,12 @@ function accumulate(
 ): void {
   bucket.invoice_count += 1;
   bucket.line_count += lineCount;
-  // quoted_gross is null on everything that was invoiced without a quote
+  // committedGross() is null on everything that was invoiced without a quote
   // first, which is most of it. Treated as 0 so the column adds up; the
   // screens say "—" when the whole column is zero rather than "£0.00".
-  bucket.quoted += Number(purchase.quoted_gross ?? 0);
+  // Routed through that one helper rather than reading the column directly, so
+  // this column and the Overview's Committed card can never diverge again.
+  bucket.quoted += committedGross(purchase) ?? 0;
   bucket.net += Number(purchase.net_total);
   bucket.vat += Number(purchase.vat_total);
   bucket.gross += Number(purchase.gross_total);

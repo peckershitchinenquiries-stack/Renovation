@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { formatCurrency } from "@/lib/calculations";
@@ -13,6 +13,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { Select } from "@/components/ui/Select";
 import { Sheet } from "@/components/ui/Sheet";
 import { Icon } from "@/components/ui/Icon";
+import { SearchInput } from "@/components/ui/SearchInput";
 import { IconTile } from "@/components/ui/List";
 import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
 import { combineTotals } from "@/components/purchases/totals";
@@ -81,12 +82,66 @@ export default function DirectoryScreen({
 }) {
   const router = useRouter();
   const [adding, setAdding] = useState(false);
+  const [query, setQuery] = useState("");
+
+  /*
+   * Search, added 2026-10-01.
+   *
+   * All three segments were plain lists with no way to narrow them, and all
+   * three are registers that only ever grow: every invoice logged can mint a
+   * new supplier and new items (lib/purchaseWrite.ts), so "find Lawsons" was
+   * a scroll. It filters here rather than inside the three sub-components
+   * because the filter is the same act on all three and only the haystack
+   * differs — one input above the list, not three.
+   *
+   * Each haystack is only what is ON the row. Searching a field the row does
+   * not show produces matches the user cannot see the reason for, which reads
+   * as a broken filter rather than a clever one.
+   */
+  const q = query.trim().toLowerCase();
+  const visibleSuppliers = useMemo(() => {
+    if (!q || !suppliers) return suppliers;
+    return suppliers.filter((r) =>
+      `${r.supplier.name} ${r.supplier.notes ?? ""}`.toLowerCase().includes(q)
+    );
+  }, [suppliers, q]);
+  const visibleItems = useMemo(() => {
+    if (!q || !items) return items;
+    return items.filter((r) =>
+      `${r.item.canonical_name} ${r.item.category ?? ""} ${
+        r.item.default_unit ?? ""
+      }`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [items, q]);
+  const visibleContacts = useMemo(() => {
+    if (!q || !contacts) return contacts;
+    return contacts.filter((r) =>
+      `${r.contact.name} ${r.contact.company ?? ""} ${r.contact.trades.join(
+        " "
+      )} ${r.contact.phone ?? ""}`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [contacts, q]);
+
+  // The subtitle counts the whole register, not the filtered view: it says
+  // what the directory holds, and a count that shrinks as you type is a
+  // different statement from the one the heading is making. The result count
+  // goes under the search box instead.
   const count =
     view === "suppliers"
       ? suppliers?.length ?? 0
       : view === "items"
         ? items?.length ?? 0
         : contacts?.length ?? 0;
+  const shownCount =
+    view === "suppliers"
+      ? visibleSuppliers?.length ?? 0
+      : view === "items"
+        ? visibleItems?.length ?? 0
+        : visibleContacts?.length ?? 0;
   const [singular, plural] = NOUN[view];
 
   return (
@@ -154,12 +209,55 @@ export default function DirectoryScreen({
         </div>
       ) : null}
 
-      {view === "suppliers" ? (
-        <SupplierDirectory rows={suppliers ?? []} />
+      {/* Only once there is something to search. On People the register can
+          legitimately be null (migration 0020 not run), and a search box above
+          that amber "the tables are not there yet" panel would be nonsense. */}
+      {count > 0 ? (
+        <div className="mb-3 space-y-1.5">
+          <SearchInput
+            id="directory-search"
+            className="sm:max-w-sm"
+            value={query}
+            onChange={setQuery}
+            label={`Search ${plural}`}
+            placeholder={
+              view === "suppliers"
+                ? "Supplier name"
+                : view === "items"
+                  ? "Item, category or unit"
+                  : "Name, company, trade or phone"
+            }
+          />
+          {q ? (
+            <p className="hint">
+              {shownCount} of {count} {count === 1 ? singular : plural}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {q && shownCount === 0 ? (
+        <EmptyState
+          icon="search"
+          compact
+          title="Nothing matches"
+          description={`No ${singular} matches that search.`}
+          action={
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setQuery("")}
+            >
+              Clear search
+            </button>
+          }
+        />
+      ) : view === "suppliers" ? (
+        <SupplierDirectory rows={visibleSuppliers ?? []} />
       ) : view === "items" ? (
-        <ItemDirectory rows={items ?? []} />
+        <ItemDirectory rows={visibleItems ?? []} />
       ) : (
-        <PeopleDirectory rows={contacts} onAdd={() => setAdding(true)} />
+        <PeopleDirectory rows={visibleContacts} onAdd={() => setAdding(true)} />
       )}
 
       <Sheet

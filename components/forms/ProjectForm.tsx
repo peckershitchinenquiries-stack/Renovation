@@ -7,6 +7,7 @@ import { validateProject, hasErrors } from "@/lib/validation";
 import { useToast } from "@/components/ui/Toast";
 import { Spinner } from "@/components/ui/States";
 import { Select } from "@/components/ui/Select";
+import { DatePicker } from "@/components/ui/DatePicker";
 import { PROJECT_STATUSES, type Project } from "@/types";
 
 export default function ProjectForm({ project }: { project?: Project }) {
@@ -104,12 +105,12 @@ export default function ProjectForm({ project }: { project?: Project }) {
               Start date{" "}
               <span className="font-normal text-gray-400">— optional</span>
             </label>
-            <input
+            <DatePicker
               id="start_date"
-              type="date"
-              className={`input ${errors.start_date ? "input-invalid" : ""}`}
+              title="Project start date"
               value={form.start_date}
-              onChange={(e) => set("start_date", e.target.value)}
+              onChange={(value) => set("start_date", value)}
+              invalid={Boolean(errors.start_date)}
             />
             {errors.start_date ? (
               <p className="field-error">{errors.start_date}</p>
@@ -120,12 +121,12 @@ export default function ProjectForm({ project }: { project?: Project }) {
               Finish date{" "}
               <span className="font-normal text-gray-400">— optional</span>
             </label>
-            <input
+            <DatePicker
               id="planned_end_date"
-              type="date"
-              className={`input ${errors.planned_end_date ? "input-invalid" : ""}`}
+              title="Planned finish date"
               value={form.planned_end_date}
-              onChange={(e) => set("planned_end_date", e.target.value)}
+              onChange={(value) => set("planned_end_date", value)}
+              invalid={Boolean(errors.planned_end_date)}
             />
             {errors.planned_end_date ? (
               <p className="field-error">{errors.planned_end_date}</p>

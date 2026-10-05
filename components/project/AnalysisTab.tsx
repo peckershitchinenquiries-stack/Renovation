@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/States";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { Icon } from "@/components/ui/Icon";
+import { SearchInput } from "@/components/ui/SearchInput";
 import { PriceMoveBadge } from "@/components/purchases/PriceMoveBadge";
 import PivotTable, { type PivotColumn } from "./PivotTable";
 import { fmtDate, fmtQty, fmtUnitPrice } from "./format";
@@ -128,41 +129,22 @@ export default function AnalysisTab({
         />
       )}
 
-      <div className="relative">
-        <label className="sr-only" htmlFor="analysis-search">
-          Search
-        </label>
-        <Icon
-          name="search"
-          size={18}
-          className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400"
-        />
-        <input
-          id="analysis-search"
-          className="input pl-10 pr-10 sm:max-w-sm"
-          placeholder={
-            view === "trade"
-              ? "Trade or supplier"
-              : view === "supplier"
-                ? "Supplier"
-                : view === "price"
-                  ? "Item or supplier"
-                  : "Item, supplier or invoice number"
-          }
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        {query ? (
-          <button
-            type="button"
-            aria-label="Clear search"
-            onClick={() => setQuery("")}
-            className="btn-icon absolute right-1 top-1/2 h-9 min-h-0 w-9 min-w-0 -translate-y-1/2 text-gray-400 sm:left-[19rem] sm:right-auto"
-          >
-            <Icon name="close" size={16} />
-          </button>
-        ) : null}
-      </div>
+      <SearchInput
+        id="analysis-search"
+        className="sm:max-w-sm"
+        value={query}
+        onChange={setQuery}
+        placeholder={
+          view === "trade"
+            ? "Trade or supplier"
+            : view === "supplier"
+              ? "Supplier"
+              : view === "price"
+                ? "Item or supplier"
+                : "Item, supplier or invoice number"
+        }
+      />
+
 
       {/* The cross-project half of the same question. Directory answers
           "what have I ever spent with this merchant / on this item"; this

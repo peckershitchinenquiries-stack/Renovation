@@ -33,7 +33,7 @@ export default async function EditPurchasePage({
   // The two-level breadcrumb is gone: on a phone it wrapped to two lines above
   // every heading. The header's back arrow goes to the invoice list, which is
   // where this screen is opened from.
-  const backHref = returnTo ?? `/projects/${project.id}/purchases`;
+  const backHref = returnTo ?? `/projects/${project.id}?tab=invoices`;
 
   // The same rule the API enforces: a purchase copied from the week-by-week
   // sheet is the same money as its expense row, and that row is what the

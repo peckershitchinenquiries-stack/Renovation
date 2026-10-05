@@ -108,6 +108,11 @@ interface HeaderState {
   location_room: string;
   notes: string;
   entry_status: string;
+  // What the job was agreed at before any money went out, incl VAT. Blank
+  // means nobody recorded one, and blank is the common and honest answer — it
+  // saves NULL, and the Overview hides its Committed card rather than showing
+  // a £0.00 that was never agreed. See committedGross() in lib/purchases.ts.
+  quoted_gross: string;
   // ---- retention (migration 0019) ----
   // Blank means no retention, which is what almost every invoice says. Blank
   // and "0" are different answers and the validator says so.
@@ -279,6 +284,7 @@ export default function PurchaseForm({
     location_room: purchase?.purchase.location_room ?? prefill?.location_room ?? "",
     notes: purchase?.purchase.notes ?? prefill?.notes ?? "",
     entry_status: purchase?.purchase.entry_status ?? "Planned",
+    quoted_gross: purchase?.purchase.quoted_gross?.toString() ?? "",
     retention_pct: purchase?.purchase.retention_pct?.toString() ?? "",
     retention_release_due: purchase?.purchase.retention_release_due ?? "",
     retention_released_on: purchase?.purchase.retention_released_on ?? "",
@@ -369,6 +375,36 @@ export default function PurchaseForm({
             .join(" · ") || undefined,
       }));
   }, [bundle.orders_by_project, projectId, header.supplier_name]);
+
+  // What each listed order was ordered at, incl VAT, so picking one can offer
+  // its total as the agreed figure below.
+  const orderedGrossById = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const o of bundle.orders_by_project?.[projectId] ?? [])
+      map.set(o.id, o.ordered_gross);
+    return map;
+  }, [bundle.orders_by_project, projectId]);
+
+  /**
+   * Picking an order offers what it was ordered at as the agreed figure.
+   *
+   * Only into a BLANK field, and never cleared again when the order is
+   * unpicked. An order total is the best evidence of what was agreed and it is
+   * the only place in the app that figure already exists — but it is still a
+   * suggestion the reviewer can type over, in keeping with the match itself
+   * being a suggestion, and overwriting something somebody had already typed
+   * would be the form arguing with them.
+   *
+   * This is also what connects the Orders module to the number it exists to
+   * serve: before it, `quoted_gross` had no write path at all and Committed was
+   * a figure derived from the invoice it was supposed to be checked against.
+   */
+  const chooseOrder = (orderId: string) => {
+    setField("purchase_order_id", orderId);
+    const ordered = orderedGrossById.get(orderId) ?? 0;
+    if (orderId !== "" && ordered > 0 && header.quoted_gross.trim() === "")
+      setField("quoted_gross", String(ordered));
+  };
 
   const [payments, setPayments] = useState<PaymentState[]>(() => {
     if (purchase)
@@ -499,6 +535,23 @@ export default function PurchaseForm({
       }),
     [totals.gross_total, header.retention_pct, header.retention_released_on]
   );
+  /**
+   * What this invoice is over or under the figure that was agreed, or null.
+   *
+   * Null — not 0 — when no agreed figure has been typed, and null when the two
+   * are within a penny of each other: "on quote" and "nothing to compare" are
+   * different statements and neither is improved by printing £0.00. Both sides
+   * are incl VAT, which is the whole reason the field is labelled that way;
+   * comparing an agreed total against a net one would repeat the double-VAT
+   * error in the one figure the field exists for.
+   */
+  const quotedGap = useMemo(() => {
+    const quoted = asNumber(header.quoted_gross);
+    if (header.quoted_gross.trim() === "" || quoted <= 0) return null;
+    const gap = round2(totals.gross_total - quoted);
+    return Math.abs(gap) < 0.005 ? null : gap;
+  }, [header.quoted_gross, totals.gross_total]);
+
   const payableNow = round2(totals.gross_total - retention);
   const balance = round2(payableNow - paid);
   const status = purchaseStatus(payableNow, paid);
@@ -709,6 +762,7 @@ export default function PurchaseForm({
       // Retention (0019). Blank stays blank all the way to the column, where
       // NULL means "no retention on this invoice" — a different statement from
       // "0% was held", and what keeps every pre-0019 figure identical.
+      quoted_gross: header.quoted_gross || null,
       retention_pct: header.retention_pct || null,
       retention_release_due: header.retention_release_due || null,
       retention_released_on: header.retention_released_on || null,
@@ -813,7 +867,7 @@ export default function PurchaseForm({
         // choosing one here is to end up looking at that job's invoices.
         // (The review screen never sends a returnTo, so safeTarget is always
         // null here — this always falls through to that default.)
-        router.push(safeTarget ?? `/projects/${projectId}/purchases`);
+        router.push(safeTarget ?? `/projects/${projectId}?tab=invoices`);
         router.refresh();
         return;
       }
@@ -829,12 +883,12 @@ export default function PurchaseForm({
       );
       toast(editing ? "Invoice updated" : "Invoice logged", "success");
       // Back where the caller asked, e.g. the Expenses tab this was opened
-      // from — or the project's invoice list, as before, when nobody asked.
+      // from — or the project's Invoices TAB when nobody asked.
       // router.refresh() forces the target route's server data to be
       // refetched rather than served from the router cache, so the Expenses
       // list shows this invoice's new values immediately rather than what it
       // said before the edit.
-      router.push(safeTarget ?? `/projects/${projectId}/purchases`);
+      router.push(safeTarget ?? `/projects/${projectId}?tab=invoices`);
       router.refresh();
     } catch (err) {
       // The form is left alone on failure so the typing can be retried.
@@ -852,7 +906,7 @@ export default function PurchaseForm({
         { method: "DELETE" }
       );
       toast("Invoice deleted", "success");
-      router.push(`/projects/${projectId}/purchases`);
+      router.push(`/projects/${projectId}?tab=invoices`);
       router.refresh();
     } catch (err) {
       toast(err instanceof Error ? err.message : "Delete failed", "error");
@@ -860,11 +914,11 @@ export default function PurchaseForm({
   }
 
   // Back where you came from: the caller's returnTo target if it gave one,
-  // else the project's invoice list, else the invoice menu when this form was
+  // else the project's Invoices tab, else the invoice menu when this form was
   // reached from the nav bar with no project chosen yet.
   const cancel = () =>
     router.push(
-      safeTarget ?? (projectId ? `/projects/${projectId}/purchases` : "/invoices")
+      safeTarget ?? (projectId ? `/projects/${projectId}?tab=invoices` : "/invoices")
     );
 
   return (
@@ -1151,7 +1205,7 @@ export default function PurchaseForm({
               placeholder="Not against an order"
               clearable
               value={header.purchase_order_id}
-              onChange={(v) => setField("purchase_order_id", v)}
+              onChange={chooseOrder}
               options={orderOptions}
             />
             <p className="hint">
@@ -1161,6 +1215,56 @@ export default function PurchaseForm({
             </p>
           </div>
         ) : null}
+
+        {/* The agreed figure. On the main form rather than behind the
+            collapsible, unlike retention: this is the only input anywhere that
+            writes `quoted_gross`, and with no write path at all the Overview's
+            Committed card had nothing to show and fell back to this invoice's
+            own total — so it reported every job as exactly on quote, for ever.
+            See committedGross() in lib/purchases.ts.
+
+            Blank is a perfectly good answer and saves NULL. The screens hide
+            Committed entirely rather than print a £0.00 nobody agreed to. */}
+        <div className="mt-3">
+          <label className="label" htmlFor="quoted_gross">
+            Agreed / quoted total
+          </label>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-gray-500">£</span>
+            <input
+              id="quoted_gross"
+              type="number"
+              inputMode="decimal"
+              step="0.01"
+              min="0"
+              className={`input flex-1 ${
+                errors.quoted_gross ? "input-invalid" : ""
+              }`}
+              value={header.quoted_gross}
+              onChange={(e) => setField("quoted_gross", e.target.value)}
+              placeholder="Not quoted"
+            />
+          </div>
+          {errors.quoted_gross && (
+            <p className="field-error">{errors.quoted_gross}</p>
+          )}
+          <p className="hint">
+            What this job was agreed at before the work started,{" "}
+            <strong>incl VAT</strong> — the same basis as the invoice total, so
+            the two can be subtracted. Leave it blank if it was never quoted.
+            {quotedGap !== null ? (
+              <>
+                {" "}
+                This invoice is{" "}
+                <strong>
+                  {formatCurrency(Math.abs(quotedGap))}{" "}
+                  {quotedGap > 0 ? "over" : "under"}
+                </strong>{" "}
+                it.
+              </>
+            ) : null}
+          </p>
+        </div>
 
         {duplicateInvoice && (
           <p className="field-warning">

@@ -127,6 +127,16 @@ export function validatePurchase(data: Record<string, unknown>): ValidationError
   if (!EXPENSE_STATUSES.includes(data.entry_status as never))
     errors.entry_status = "Invalid status";
 
+  // Mirrors the quoted_gross >= 0 CHECK from migration 0008. Blank is valid
+  // and means "nobody recorded an agreed figure" — which is what nearly every
+  // row says, and what the screens hide the Committed card for.
+  const quoted = String(data.quoted_gross ?? "").trim();
+  if (quoted !== "") {
+    const n = num(quoted);
+    if (!Number.isFinite(n) || n < 0)
+      errors.quoted_gross = "Must be a non-negative amount";
+  }
+
   // Retention (migration 0019). Folded in here rather than called separately
   // by each route, so the form and the handler can never disagree about it.
   Object.assign(errors, validateRetention(data));
@@ -249,6 +259,58 @@ export function validateLabourEntry(
 // Every rule below mirrors a CHECK constraint in 0016. Those reject rather
 // than coerce (about.md §2 rule 4), so anything missed here becomes a 500
 // instead of a message under the field it belongs to.
+
+/**
+ * The working calendar (migration 0018) — which weekdays count as working days.
+ *
+ * Mirrors `projects_working_weekdays_valid`: between one and seven ISO weekday
+ * numbers, every one of them in 1…7. An empty set is refused by the database
+ * because it would mean no day is a working day, which makes every task
+ * infinitely long — the forward pass would never terminate. Saying that under
+ * the field beats a 500 from the CHECK.
+ *
+ * Duplicates are rejected here rather than silently collapsed. `{1,1,2}` is
+ * somebody's mistake, and a form that accepts it and stores something else has
+ * lied about what it saved.
+ */
+export function validateWorkCalendar(
+  data: Record<string, unknown>
+): ValidationErrors {
+  const errors: ValidationErrors = {};
+  const raw = data.working_weekdays;
+
+  if (!Array.isArray(raw)) {
+    errors.working_weekdays = "Pick the days worked on this job";
+    return errors;
+  }
+
+  const days = raw.map((d) => Number(d));
+  if (days.length === 0)
+    errors.working_weekdays = "At least one day has to be a working day";
+  else if (days.length > 7)
+    errors.working_weekdays = "There are only seven days in a week";
+  else if (days.some((d) => !Number.isInteger(d) || d < 1 || d > 7))
+    errors.working_weekdays = "Days are numbered 1 (Monday) to 7 (Sunday)";
+  else if (new Set(days).size !== days.length)
+    errors.working_weekdays = "The same day is listed twice";
+
+  return errors;
+}
+
+/** One non-working date (migration 0018). The date is the whole of it. */
+export function validateHoliday(
+  data: Record<string, unknown>
+): ValidationErrors {
+  const errors: ValidationErrors = {};
+
+  if (!isDate(data.holiday_date))
+    errors.holiday_date = "Pick the day the site is shut";
+
+  if (String(data.name ?? "").trim().length > 120)
+    errors.name = "Max 120 characters";
+
+  return errors;
+}
 
 export function validatePhase(data: Record<string, unknown>): ValidationErrors {
   const errors: ValidationErrors = {};

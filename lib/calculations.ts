@@ -28,9 +28,10 @@ export function computeEntry(e: ExpenseEntry): ExpenseEntryComputed {
     vat_amount: vatAmount,
     total_incl_vat: totalInclVat,
     // Paid amounts are what was actually handed over, which includes VAT, so
-    // what is still owed is measured against the incl-VAT total. This matches
-    // buildTrades and buildMaterials, which already subtract paid from an
-    // incl-VAT figure.
+    // what is still owed is measured against the incl-VAT total. Every other
+    // Owed figure in the app subtracts paid from an incl-VAT total the same way
+    // — `balance` on a purchase, and the Owed column on Analysis's trade and
+    // supplier rows (lib/invoiceViews.ts).
     remaining: totalInclVat - Number(e.paid_amount),
   };
 }

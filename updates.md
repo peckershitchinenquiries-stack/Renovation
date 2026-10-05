@@ -6086,3 +6086,1468 @@ Verification: `npm test` is **65 of 65 passing**, `npm run lint` is **clean**,
 and `npm run build` **passes** (which is the full typecheck). The change was
 not exercised against a live database or in a browser — `0025` and everything
 from `0019` has still not been run, and there is no signed-in session here.
+
+---
+
+### 2026-10-01 — Four hidden modules got a visible door
+
+**What changed (in plain English):**
+The project's Overview tab now carries a row of four tiles headed **"More on
+this project"** — Log & snags · Documents & photos · Orders · Variations — each
+a link to the screen of that name. Those four screens already existed and were
+fully built; the only way to reach any of them was the small **`⋯`** button in
+the project header, which also holds Edit, Export and Delete. The four have been
+taken out of that menu, so `⋯` is now Edit project / Export as PDF / Export as
+Excel / Delete project and nothing else.
+
+**Why:**
+A review of the app found these four modules were effectively invisible.
+`/projects/[id]/documents` and `/projects/[id]/orders` each had **exactly one
+inbound link in the whole codebase**, and it was that menu. Snags announce
+themselves once one exists — the red banner above the tab strip — but there was
+no way to raise the *first* snag without finding an unlabelled `⋯` first.
+
+The menu was also doing two incompatible jobs at once: a list of *places* sitting
+alongside Edit, Export and a Delete that destroys the project reads as a settings
+menu, so anyone who was not looking for settings never opened it. Splitting the
+two gives the control one meaning — hence `aria-label="Manage project"` in place
+of "Project actions", and the sheet's description "Settings, export and delete"
+in place of "Project actions".
+
+They are deliberately **not** in both places. Leaving them in the sheet as well
+would have left it meaning two things, which was the fault being fixed.
+
+**Where the information came from:**
+User request, following a UX audit of the codebase in this session (finding
+"C1"). No spreadsheet, no screen, no database.
+
+**Files used (read, not changed):**
+- `components/ui/List.tsx` — `IconTile` and its tone names
+- `components/ui/PageHeader.tsx` — `SectionHeader`
+- `components/ui/Icon.tsx` — the available icon names
+- `app/(app)/projects/[id]/{log,documents,orders,variations}/page.tsx` — to
+  confirm each route exists and takes no query parameter
+- `lib/supabase/middleware.ts` — to work out why an unauthenticated preview
+  route kept landing on the login screen
+
+**Files changed:**
+- `components/project/OverviewTab.tsx` — new `PROJECT_LINKS` constant and a
+  "More on this project" section rendering it as a 2-up (phone) / 4-up
+  (desktop) grid of link cards; new required `projectId` prop, which is what
+  the hrefs are built from.
+- `components/project/ProjectDetail.tsx` — passes `projectId` to `OverviewTab`;
+  the four destination rows removed from the `⋯` sheet along with the divider
+  that separated them; sheet description and the button's `aria-label` reworded.
+- `about.md` — §8's route table gained the four project routes, which had been
+  missing from it since `0021`–`0024` built them, plus a new paragraph under it
+  explaining where they are reached from and why they are in one place rather
+  than two.
+- `updates.md` — this entry.
+
+**Two judgement calls worth recording:**
+
+- **No count badge on any tile.** The open-snag count is already a banner above
+  the tab strip and the variation position is already a sentence a few inches up
+  the same tab, so a badge would repeat them. And once two tiles carry a number,
+  a tile *without* one reads as "none" — which for Documents and Orders would be
+  a guess, because neither count is loaded on the project page. Adding two
+  queries to render two numbers nobody asked for was not worth it.
+- **`camera` as the Documents icon, not `receipt`.** `receipt` means *invoice*
+  everywhere else in this app — the nav item, the Invoices tab, the AddMenu —
+  and the `⋯` row for Documents was using it. The screen is mostly site photos.
+
+**Database:**
+**None.** No migration was written and none is needed. Nothing here reads or
+writes a table; the change is four `<Link>`s and the removal of four others.
+
+**Result / numbers after:**
+
+**No money figure moved and no stored data changed.** `about.md` §13 is
+untouched.
+
+What is different on screen:
+
+- **Documents & photos, and Orders: one inbound link each → two**, and the
+  second one is a named tile on the tab every project opens on rather than an
+  unlabelled icon. Log & snags and Variations likewise.
+- **Raising a first snag: find the `⋯` → a tile that says "Log & snags".**
+- **The `⋯` sheet: eight rows meaning two different things → four rows meaning
+  one.**
+- **Project page bundle: 141 kB → 141 kB.** Unchanged — the tiles are static
+  markup and `Link`/`IconTile` were already in the page.
+
+Verification: `npm run build` **passes** (the full typecheck) and `npm test` is
+**65 of 65 passing**. The tile row was also rendered in a browser at 375×812 and
+at desktop width through a temporary unauthenticated route, which has since been
+deleted: the grid is 2-up on a phone and 4-up on a desktop with even row heights,
+all four `href`s resolve to the right routes, and the console is clean. The
+`⋯` sheet itself was **not** seen in a browser — it is behind a login and there
+is no signed-in session here — so that half is verified by typecheck and by
+reading the diff only.
+
+---
+
+### 2026-10-01 — "Committed" was two different numbers on two tabs, and neither was real
+
+**What changed (in plain English):**
+The invoice form now has an **Agreed / quoted total** box, and that figure is
+what the word **Committed** means everywhere in the app. Where no figure was
+ever agreed, the Overview's **Committed** and **Variance** cards are now
+**hidden** rather than showing a number that was quietly made up from the
+invoice itself. Picking a purchase order on the invoice form offers that order's
+total as the agreed figure.
+
+**Why:**
+The column that holds the agreed figure, `purchases.quoted_gross`, had **no way
+of ever being filled in** — no screen in the app wrote to it. Three places in
+the code then guessed, and two of them guessed differently:
+
+- the Overview substituted **the invoice's own total**, so the **Committed card
+  equalled the Cost card to the penny**. **Variance was therefore always exactly
+  £0.00** and its caption always read *"Within Committed"* — on every project,
+  for ever. It looked like a budget check and could not fire. Anyone reading it
+  would reasonably conclude every single job had come in on quote.
+- the Analysis tab (**By trade** and **By supplier**) and the per-task figures
+  substituted **zero**, so Committed there showed as **"—"** at the same moment.
+
+So the same word meant two different numbers on two tabs of the same project,
+which is the exact confusion the money vocabulary (about.md §6.2.1) was written
+to stop. There is now **one rule, in one function**, and it is allowed to say
+"nobody recorded one" instead of inventing an answer.
+
+A second false reading was fixed with it: the big bar above the tabs says
+*"N% of £X budget — over"* and turned red off the **quote** overrun, not the
+**budget** — so a project could sit at 153% of budget with a white bar and no
+"— over" on it. It now compares against the budget it is a bar of.
+
+**Where the information came from:**
+User request — issue **C2** from a review of the app ("Committed is meaningless,
+and contradicts itself between tabs"). No spreadsheet was read and no data was
+imported.
+
+**Files used (read, not changed):**
+- `lib/vocabulary.ts` — the four money words and their one-line definitions
+- `lib/purchaseOrders.ts` — `orderLineTotals()`, reused for the order prefill
+- `supabase/migrations/0008_transaction_core.sql` — confirmed `quoted_gross`
+  already exists as `numeric(12,2)` with a `>= 0` CHECK
+- `supabase/migrations/0023_purchase_orders.sql` — `purchases.purchase_order_id`
+- `components/project/AnalysisTab.tsx`, `components/schedule/VarianceChip.tsx`,
+  `lib/portfolio.ts` — checked for other readers of these figures
+
+**Files changed:**
+- `lib/purchases.ts` — **new `committedGross()`**: the single definition of what
+  a document was agreed at. Returns the column, or **null** when it is null —
+  never the invoice's own total. The synthetic invoice entries now use it, which
+  is the line that was making Variance structurally zero.
+- `lib/invoiceViews.ts` — the by-trade / by-supplier Committed column reads
+  `committedGross()` instead of the column directly, so it cannot diverge again.
+- `lib/scheduleCosts.ts` — same, for the apportioned per-task Committed.
+- `lib/purchaseWrite.ts` — `quoted_gross` added to the header fields the form
+  owns. Blank saves **NULL, not 0**, and is rounded to the penny.
+- `lib/validation.ts` — `quoted_gross` must be non-negative when present; blank
+  is valid and means "never quoted".
+- `components/forms/PurchaseForm.tsx` — the **Agreed / quoted total** field, a
+  hint saying how far the invoice is over or under it, and the order-picker
+  prefill (blank field only, never overwrites what somebody typed).
+- `lib/data.ts` — reads the order lines and puts each order's **ordered gross**
+  on the picker's data, so the prefill has something to offer. Read tolerantly,
+  like the rest of `0023`: no orders, no field, no error.
+- `lib/summary.ts`, `types/index.ts` — **new `quoted_coverage`** on the summary:
+  how much of the cost actually has an agreed figure behind it. Plus
+  `PurchaseInput.quoted_gross` and `PurchaseOrderRef.ordered_gross`.
+- `components/project/OverviewTab.tsx` — Committed shown only when there is one;
+  Variance only when it covers **all** of the cost. Partial coverage is printed
+  in the Committed hint instead (*"— 38% of cost"*).
+- `components/project/ProjectDetail.tsx` — the hero bar's "over" now means over
+  **budget**.
+- `lib/export.ts`, `lib/pdf.tsx` — *Total Quoted* and *Variance vs Quote* print
+  **"—"** when nothing was agreed, so a downloaded figure and the screen agree.
+- `about.md` — new **§6.2.2 "Committed is one definition, and it can be
+  absent"**: the one rule, its three call sites, when each card appears, the new
+  form field, and the two false readings as fixed-notes. §6.2's card table,
+  §6.2.1's vocabulary table, §6.6's trades table and §10's validation list all
+  updated to match; §26 gained the order prefill and says why it does not
+  contradict "a PO is not spend".
+- `updates.md` — this entry.
+
+**One judgement call worth recording:**
+The review suggested deriving Committed from the matched purchase order. It is
+**offered into the form instead of summed behind the screens**, deliberately. An
+order can be answered by several invoices, so adding its total to each of them
+would count the same commitment two or three times — a new wrong number in place
+of the old one. A person confirming the figure onto the invoice keeps one
+commitment attached to one document, and keeps the rule "nothing in
+`purchase_orders` reaches a spend figure" (about.md §26) intact.
+
+**Database:**
+**None. No migration was written and none is needed.** `purchases.quoted_gross`
+has existed since `0008_transaction_core.sql`, with the `>= 0` CHECK this change
+mirrors in `validatePurchase`. What it never had was a write path. Nothing was
+inserted, updated or deleted.
+
+**Result / numbers after:**
+
+**No stored figure moved** — nothing was written to the database. about.md §13 is
+untouched, and it describes the spreadsheet import, whose `quoted_amount` values
+are real stored numbers on `expense_entries` and are not affected by any of this.
+
+What is different on screen, for a project whose spend arrived on invoices with
+no agreed figure recorded:
+
+- **Overview Committed: equal to Cost, to the penny → card not shown.**
+- **Overview Variance: £0.00 / "Within Committed" → card not shown.** It was
+  incapable of ever reporting anything else; now it appears only when it can.
+- **Excel + PDF *Total Quoted* and *Variance vs Quote*: a figure copied from
+  Cost, and £0.00 → "—".**
+- **Analysis By trade / By supplier Committed: "—" → "—"** — unchanged, which is
+  the point. The two tabs now agree instead of contradicting each other.
+- **Hero bar at 153% of budget: white, no "— over" → red, "— over".**
+- **Ways to record what a job was agreed at: 0 → 1.**
+
+Once an agreed figure is typed on even one invoice, Committed appears with the
+hint *"— N% of cost"*, and Variance stays hidden until every pound of cost has a
+quote behind it.
+
+Verification: `npm run build` **passes** (the full typecheck), `npm run lint` is
+**clean**, and the tests are **65 of 65 passing** for the scheduling engine plus
+**12 of 12** for `lib/purchases.test.mts`. **Not seen in a browser** — the
+screens are behind a login and there is no signed-in session here, so the card
+visibility rules and the new form field are verified by typecheck and by reading
+the diff only. Worth a look on the real project page before trusting the
+Committed hint's percentage.
+
+---
+
+### 2026-10-01 — The Excel and PDF exports did not match the app they were exported from
+
+**What changed (in plain English):**
+Every sheet in the **Export Excel** file and every table in the **Export PDF**
+report is now produced by the same code that produces the screen it is named
+after. Before, they were produced by a second, older set of functions — so the
+Materials sheet came out almost empty, the Prices sheet contained one row reading
+`—`, and the trade totals in the PDF did not add up to the figures on the Analysis
+tab they had been printed from. The workbook also gained two sheets it should
+always have had: **Labour**, and **Suppliers** as a sheet of its own.
+
+**Why:**
+The app grew a second way of recording money — invoices — and the screens moved
+over to it on 2026-08-20. The exports did not. They kept calling the original
+functions, which assume every cost is a hand-typed row and therefore require two
+things that an invoice-derived row does not have:
+
+- **a category of "Materials"** — the invoice extractor sets no category at all,
+  so almost nothing qualified and the Materials sheet came out nearly blank;
+- **a unit cost on the row** — on an invoice the quantity and the price per unit
+  are facts about a *line*, not about the whole document, so every invoice-derived
+  row has a unit cost of 0. The Prices sheet was therefore **always** exactly one
+  row reading `—`, on every project, on every export.
+
+On top of that the Trades sheet grouped whole documents by a different rule from
+the Analysis tab, so its totals did not reconcile with the screen.
+
+This is the file that gets handed to an accountant, a partner or a lender. A
+blank sheet reads as data loss. Two different trade totals read as either the
+export lying or the app lying, and the reader has no way to tell which — or to
+recover from either. The bug went unnoticed for about six weeks because nothing
+on screen was wrong; only the download was.
+
+Two smaller faults were fixed in the same pass:
+
+- **Both export routes passed unfiltered rows** into the Summary figures —
+  including `ledger` rows, which no screen counts. It made no difference today
+  because the ledger has been empty since `0009`, but it would have double-counted
+  the first time a ledger row existed again.
+- **Six API endpoints nobody could reach** returned figures from the same stale
+  functions. They were deleted rather than fixed.
+
+**Where the information came from:**
+User request — issue **C3** from a review of the app ("The Excel and PDF exports
+disagree with the app"). No spreadsheet was read and no data was imported.
+
+**Files used (read, not changed):**
+- `lib/invoiceViews.ts` — the builders the Analysis tab uses, now used by the
+  exports unchanged
+- `components/project/AnalysisTab.tsx` — read to match each exported column to
+  the column on screen, in the same order
+- `components/project/ProjectDetail.tsx` — read to confirm which rows each screen
+  covers (Overview and Costs: all cost rows; Analysis: invoice lines only)
+
+**Files changed:**
+- `lib/export.ts` — rewritten. **Seven sheets**: Week-by-Week, Summary, Trades,
+  Suppliers, Materials, Labour, Prices. Trades/Suppliers/Materials/Labour/Prices
+  now come from the Analysis tab's builders; Week-by-Week and Summary from the
+  Costs tab's and the Overview's. The function now takes one named object instead
+  of seven positional arguments, because there were too many to keep straight.
+- `lib/pdf.tsx` — Trades and Suppliers tables from the same Analysis builders,
+  each with a **total line** and a sentence underneath saying which rows it
+  covered, so the figure can be reconciled against the screen without adding the
+  rows up by hand. The budget cards now use the app's own words (Budget,
+  Committed, Cost, Paid, Owed) and show the Committed coverage percentage.
+- `app/api/projects/[id]/export/excel/route.ts`, `…/export/pdf/route.ts` —
+  repointed at the Analysis builders, and both now filter out `ledger` rows
+  exactly as the project page does.
+- `lib/summary.ts` — **deleted** `buildTrades`, `buildMaterials`,
+  `buildMaterialLedger`, `buildPriceHistory` and `buildPriceAlerts`, with a
+  header saying what belongs here and what belongs in `lib/invoiceViews.ts`. What
+  remains is the Overview's own arithmetic: the money cards, the weekly chart,
+  the Labour/Materials donut, and `priceKey`.
+- `types/index.ts` — **deleted** the five shapes those builders produced:
+  `TradeSummary`, `MaterialSummary`, `MaterialLedgerRow`, `PricePurchase`,
+  `PriceHistoryItem`. `PriceDirection` stays — the line-level price types are
+  built on it.
+- `lib/calculations.ts`, `lib/purchases.ts` — four comments that pointed at the
+  deleted functions now point at the live ones. A comment naming a function that
+  no longer exists is worse than no comment.
+- **Deleted entirely — six unreachable GET endpoints:**
+  `app/api/projects/[id]/trades/`, `…/materials/`, `…/prices/`, `…/summary/`,
+  `…/summary/by-week/`, `…/summary/by-category/`.
+- `about.md` — new **§6.10 "The exports read the screens' builders — nothing of
+  their own"**: the rule, the sheet-to-builder table, the two populations and why
+  they must not be added, and the fault as a fixed-note with the before → after
+  row counts. §5's dormant-inconsistency warning becomes a fixed-note; §6.6, §6.7
+  and §6.8 updated where they said the old builders "still exist"; §7's views
+  table rewritten; the API route table lost the six deleted rows and gained a
+  note. Nine stale `lib/summary.ts:NN` line references removed — they all moved
+  when the file shrank, which is why line numbers do not belong in prose.
+- `updates.md` — this entry.
+
+**One difference from the review's suggestion worth recording:**
+It said "five dead GET endpoints". There were **six**. Three of them (`/trades`,
+`/materials`, `/prices`) had the stale shape the review describes; the other
+three (`/summary`, `/summary/by-week`, `/summary/by-category`) were simply
+unreachable, and two of those three also passed the unfiltered rows. All six went,
+because each is a second code path to a question a screen already answers, and
+three of the six had already drifted.
+
+**Database:**
+**None. No migration was written and none is needed.** Nothing here reads or
+writes a table differently; the two export routes load the same project bundle
+they always did. Nothing was inserted, updated or deleted.
+
+**Result / numbers after:**
+
+**No stored figure moved.** about.md §13 is untouched.
+
+Measured on a test project of **three invoices and five lines, none of them
+categorised as "Materials"** — which is what a real uploaded invoice looks like:
+
+| Export Excel sheet | Before | After |
+|---|---|---|
+| Week-by-Week | 3 rows | 3 rows *(unchanged)* |
+| Summary | 9 metrics | 10 metrics (adds Committed coverage %) |
+| Trades | 2 rows, totals not matching the screen | **2 rows, matching the screen** |
+| Suppliers | *(did not exist as a sheet)* | **2 rows** |
+| Materials | **0 rows — one placeholder reading `—`** | **4 rows, with qty, unit and unit price** |
+| Labour | *(did not exist)* | **1 row** |
+| Prices | **0 rows — one placeholder reading `—`** | **5 rows, with the price change per buy** |
+
+- **Reconciliation, the whole point:** the Trades sheet's Cost total and the
+  Suppliers sheet's Cost total now both equal the Overview's **Cost** card to the
+  penny (measured: £1,800 = £1,800 = £1,800 on a two-invoice project, and
+  £3,120 on the three-invoice one). Before, the Trades total was built by a
+  different rule and there was no total line in the PDF at all.
+- **Excel sheets: 5 → 7.** "Trades & Labour" → **Trades**; "Materials &
+  Suppliers" → **Materials** and **Suppliers** as two sheets, because it was
+  trying to be both and succeeding at neither.
+- **PDF tables: "Trades Summary" and "Materials Summary" → "Trades — from
+  invoices" and "Suppliers — from invoices"**, each with a total line and a
+  basis note.
+- **API endpoints under `/api/projects/[id]`: 6 fewer.** None was reachable from
+  the app.
+- **Builders over expense entries: 9 → 4.** One set of builders per figure.
+- **`lib/summary.ts`: 282 → 137 lines.**
+
+Verification: `npm run build` **passes** (the full typecheck), `npm run lint` is
+**clean**, and the tests are **65 of 65** for the scheduling engine and **12 of
+12** for `lib/purchases.test.mts`. Beyond that, a temporary harness (since
+deleted) built three invoices and five uncategorised lines, ran them through the
+real builders and the real `buildWorkbook`, **read the resulting .xlsx back** and
+printed every sheet — that is where the row counts and the reconciliation figures
+above come from, and it also confirmed the old predicates would have passed **0**
+rows to Materials and **0** to Prices on the same data.
+
+**Not verified:** the PDF was **not rendered**. `@react-pdf/renderer` will not
+load in this environment (it fails on import outside Next's runtime), so its
+tables were checked by typecheck, by a successful production build, and by
+computing the same totals the document prints — not by looking at a page. Worth
+downloading one real PDF and one real Excel from the `⋯` menu on the project page
+before handing either to anyone.
+
+---
+
+### 2026-10-01 — The scheduling calendar could not be set from the app, so every date was quietly wrong
+
+**What changed (in plain English):**
+The Schedule tab now has a **working calendar**. A line above the chart says
+*"Working Mon–Fri · no non-working days"*, and a **Calendar** button beside it
+opens a panel with a row of day buttons — Mon to Sun — and a list of days the
+site is shut, with an Add box for bank holidays and the Christmas shutdown.
+Change any of it and every date on the tab recalculates immediately.
+
+**Why:**
+The database has had both of these since 3 September — `working_weekdays` on
+the project and a `project_holidays` table — and the scheduling engine read them
+from the day they arrived. **But nothing in the app could write either.** There
+was no form, no button and no API route; the only way to change the calendar was
+to type SQL into the Supabase editor by hand.
+
+So every project ran on the column's default: **Monday to Friday, no bank
+holidays, no Christmas**. For any job that works Saturdays, or stops for a
+fortnight in December, that made the following quietly wrong:
+
+- every forecast finish date
+- every float figure (the slack behind each bar)
+- the "days behind baseline" chip
+- the "order this by" lead-time warnings
+- the whole portfolio Gantt across all projects
+
+And none of it *looked* wrong. That is the point, and it is why the scheduling
+engine is the only part of this codebase with tests at all: a wrong total is
+visible on a screen, but a date that is wrong by a day a week is entirely
+plausible until the job is a fortnight late.
+
+**Where the information came from:**
+User request — issue **C4** from a review of the app ("The scheduling calendar
+cannot be configured from the app"). No spreadsheet was read and no data was
+imported.
+
+**Files changed:**
+- **New** `components/schedule/WorkCalendarPanel.tsx` — the summary line and the
+  editing panel. Day toggles, the holiday list with a delete per row, and an add
+  row with a date and a label.
+- `components/schedule/ScheduleTab.tsx` — mounts it directly above the chart it
+  governs, and reloads the whole schedule whenever it changes.
+- **New** `app/api/projects/[id]/schedule/calendar/route.ts` — `PATCH` for the
+  working days.
+- **New** `app/api/projects/[id]/schedule/holidays/route.ts` — `POST` to add a
+  non-working day.
+- **New** `app/api/projects/[id]/schedule/holidays/[holidayId]/route.ts` —
+  `DELETE` to put one back to work.
+- `lib/validation.ts` — `validateWorkCalendar` and `validateHoliday`, mirroring
+  the CHECK constraints in `0018`.
+- `lib/schedule.ts` — the weekday names and the `describeWeekdays` wording live
+  **in the engine**, beside the arithmetic that uses the same numbers, so a label
+  can never drift from the day it names.
+- `lib/data.ts`, `types/index.ts` — the schedule bundle now also carries the
+  holiday **rows** (not just the bare dates the engine needs), so the panel can
+  show the name somebody typed and delete by id.
+- `lib/schedule.test.mts` — **six new tests**, 65 → 71.
+- `about.md` — §16's "The working calendar" rewritten: where to set it, the fault
+  as a fixed-note with the measured figures, the three rules the panel holds to,
+  and why it is on the Schedule tab rather than Edit project. The API table gains
+  the three new routes.
+- `updates.md` — this entry.
+
+**One design decision worth recording:**
+The review offered Edit project **or** the Schedule tab. It is on the **Schedule
+tab only**, and only in one place. Everything in this panel moves the dates on
+the screen behind it: put it on Edit project and somebody ticks Saturday, saves,
+lands back on Overview and never sees the fortnight that just came off the
+finish date. Having it in two places would be worse again — two forms writing
+the same setting is how they come to disagree.
+
+A second one: the summary line shows **even when nothing has been configured**,
+and says *"— the default, not checked"*. "Mon–Fri, no bank holidays" is a claim
+about the job, not an absence, and it is wrong for plenty of real jobs. A panel
+that hid itself until somebody had set something would reproduce the exact
+silence that caused this bug.
+
+**Database:**
+**None. No migration was written and none is needed.**
+`0018_work_calendar.sql` created `projects.working_weekdays` and
+`project_holidays` on 2026-09-03 and has already been run. What they never had
+was anything in the app that could write to them. Nothing was inserted, updated
+or deleted by this change.
+
+**Result / numbers after:**
+
+**No stored figure moved** — nothing was written. about.md §13 is untouched, and
+every project still has the calendar it had this morning. What changed is that
+the calendar can now be corrected, and until somebody corrects it the app says
+out loud that it is a guess.
+
+- **Ways to set the working days: 0 → 1.** Before: hand-written SQL.
+- **Ways to record a bank holiday or a shutdown: 0 → 1.**
+- **Scheduling engine tests: 65 → 71.**
+
+What the calendar is actually worth, measured through the real forward pass (the
+new tests):
+
+| | Mon–Fri | Changed |
+|---|---|---|
+| A 10-day task from Mon 2 March | ends **Fri 13 Mar** | six-day week: ends **Thu 12 Mar** |
+| A 2-day task from Fri 6 March | ends **Mon 9 Mar** | six-day week: ends **Sat 7 Mar** |
+| A 3-day task + a 2-day successor | successor ends **Fri 6 Mar** | one midweek holiday: ends **Mon 9 Mar** |
+
+That last row is the one to remember: **one lost working day became three
+calendar days**, because it pushed the chain over a weekend. On a six-month job
+that compounds into the fortnight the migration's own header warned about.
+
+Verification: `npm run build` **passes**, `npm run lint` is **clean**, and the
+scheduling engine is **71 of 71 passing** (6 new), plus 12 of 12 for
+`lib/purchases.test.mts`.
+
+**Seen in a browser**, unlike the two changes before it. A temporary
+unauthenticated page (since deleted, along with the temporary entry in the
+middleware's public-path list — both reverted and verified clean) rendered the
+panel in three states at desktop width:
+
+- the **default** calendar reads *"Working Mon–Fri · no non-working days — the
+  default, not checked"*;
+- a **six-day week with three shutdown days** reads *"Working Mon–Sat · 3
+  non-working days"*, and the panel lists `25 Dec 2026 Christmas Day`,
+  `26 Dec 2026 Boxing Day` and `1 Jan 2027 —` for the one with no label;
+- **Mon, Wed, Fri** reads as *"Mon, Wed, Fri"* and **not** as "Mon–Fri", which
+  was the specific lie worth guarding against.
+
+The interactions were exercised too: unticking Saturday enabled **Save working
+days** and revealed **Undo**; unticking every day and pressing Save produced
+**"At least one day has to be a working day"** in red, under the toggles, with
+**no network request made**. The console was clean.
+
+**Not verified:** saving against the real database — the Schedule tab is behind a
+login and there is no signed-in session here, so the three new routes are covered
+by typecheck and build only. The panel was also only partly checked at phone
+width: the summary line wraps correctly, but the editing sheet was not reopened
+at 375px. Worth one pass on a real project before relying on it.
+
+> ⚠️ **The dev server was restarted during this work, with the owner's
+> agreement.** Running `npm run build` while `npm run dev` is up overwrites
+> `.next` with a production build, after which the dev server serves assets that
+> no longer match and the pages stop hydrating — they render but nothing is
+> clickable. It is not a code fault and it leaves nothing behind, but if the app
+> ever goes inert after a build: stop the dev server, delete `.next`, start it
+> again.
+
+---
+
+### 2026-10-01 — Deleted a sign-out API route nothing called
+
+**What changed (in plain English):**
+Removed `app/api/auth/signout/route.ts`. Signing out is unaffected — the
+sign-out button has always done it in the browser, through the Supabase client,
+and never went near this route.
+
+**Why:**
+It was dead code with zero references anywhere in the app. A route that exists
+but is never called is a trap: the next person to touch sign-out reads it,
+assumes it is the real path, and changes the wrong thing. It was the last of
+seven dead routes found in the 2026-10-01 UX audit (the other six —
+summary / trades / materials / prices GETs — were already gone).
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L1. Confirmed by searching the whole codebase
+for `auth/signout`: the only hits were Next.js's own generated type files under
+`.next/`.
+
+**Files used (read, not changed):**
+- `components/auth/SignOutButton.tsx` — to confirm it signs out client-side
+
+**Files changed:**
+- `app/api/auth/signout/route.ts` — deleted (the now-empty `app/api/auth/`
+  folder went with it)
+
+**Database:**
+None.
+
+**Result / numbers after:**
+Route count on the build's route table: `/api/auth/signout` no longer listed.
+`npm run build` passes, `npm run lint` clean.
+
+---
+
+### 2026-10-01 — An expired session now takes you to the sign-in page, not a red toast
+
+**What changed (in plain English):**
+When the app asks the server for something and the server says "you are not
+signed in", the browser is now sent to the sign-in page. Before, it showed a red
+`Unauthorized` toast on top of whatever you were doing, and there was no way
+onward from there except to know to reload the page yourself.
+
+**Why:**
+`apiFetch` in `lib/fetcher.ts` throws on any failed request, and every screen
+that calls it renders the error message in a toast. That is right for a real
+error ("Amount is required") and useless for a lapsed login, which is not
+something the user did wrong and not something a toast can fix. Fixed in the one
+place every client request passes through, so it holds on every screen —
+including ones not written yet.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L6.
+
+**Files used (read, not changed):**
+- every caller of `apiFetch` that inspects `ApiError` (14 forms), to confirm
+  none of them treats a 401 specially and so none loses behaviour
+
+**Files changed:**
+- `lib/fetcher.ts` — on HTTP 401, and only in the browser, set
+  `window.location.href = "/"` and return a promise that never settles. It
+  deliberately never resolves or rejects: the page is already being replaced,
+  and either outcome would hand the caller back control and let it show the
+  toast this change exists to prevent. Server-side calls are untouched —
+  `typeof window !== "undefined"` guards it — so anything calling `apiFetch`
+  outside a browser still sees the thrown `ApiError`.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+Behaviour on an expired session: red `Unauthorized` toast over the current
+screen → navigation to `/`. `npm run build` passes, `npm run lint` clean.
+Not exercised against a genuinely expired cookie — verified by typecheck and by
+reading the call sites, not in a browser.
+
+---
+
+### 2026-10-01 — The project form's two date fields now use the app's own date picker
+
+**What changed (in plain English):**
+The Start date and Finish date fields on the new/edit project form were the
+browser's own date boxes. They are now the same date picker used everywhere
+else in the app, with its Today / Yesterday shortcuts.
+
+**Why:**
+They were the last two raw `<input type="date">` in the codebase, and
+`about.md`'s design-system section flatly claimed there were none — so the
+documentation was wrong, and on a phone these two fields opened the operating
+system's date wheel while every other date in the app opened the app's own
+sheet.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L4.
+
+**Files used (read, not changed):**
+- `components/ui/DatePicker.tsx` — to confirm the API matches (`value` in,
+  `onChange(value)` out, ISO `yyyy-mm-dd`), so no form logic changed
+- `lib/validation.ts` — the two fields' validation, unchanged
+
+**Files changed:**
+- `components/forms/ProjectForm.tsx` — both `<input type="date">` swapped for
+  `DatePicker`; `invalid` replaces the hand-built `input-invalid` class, and
+  each gets a `title` for the picker's sheet heading
+- `about.md` — the design-system sentence now says that "none of either left"
+  has only been true since 2026-10-01, and that it is worth re-checking with a
+  grep rather than trusted. It had been wrong for months.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+Raw `<input type="date">` in the codebase: 2 → 0 (grep over `components/` and
+`app/` now returns only comments mentioning the control). `npm run build`
+passes, `npm run lint` clean.
+
+---
+
+### 2026-10-01 — The Analysis search box's clear button sits on the field again
+
+**What changed (in plain English):**
+On a desktop screen, the small × that clears the Analysis tab's search sat a
+long way to the right of the search box, floating in empty space. It now sits at
+the right-hand edge of the field, as it does on the Costs tab.
+
+**Why:**
+The search box is capped at 24rem wide on desktop, but the box the × was
+positioned inside was full width, so the × was being pushed to a hand-measured
+`left: 19rem` to compensate. That number only lined up at one window width.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L5.
+
+**Files used (read, not changed):**
+- `components/project/ExpensesTab.tsx` — the same search pattern done
+  correctly, used as the reference
+
+**Files changed:**
+- `components/project/AnalysisTab.tsx` — the width cap `sm:max-w-sm` moved from
+  the input to the wrapper that the icon and the × are positioned against, and
+  the hand-measured `sm:left-[19rem] sm:right-auto` deleted. The × is now
+  `right-1` at every width, mobile and desktop alike.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No figures. `npm run build` passes, `npm run lint` clean. Not checked in a
+browser — this is a CSS positioning change and is worth one look at desktop
+width before it is trusted.
+
+---
+
+### 2026-10-01 — Deleted a second, unreachable "Add expense" screen
+
+**What changed (in plain English):**
+There were two complete user interfaces for adding a cost: the drawer that
+opens from **+ Add → Cost** on the project page, and a whole separate page at
+`/projects/[id]/expenses/new`. Nothing anywhere linked to the page — no button,
+no menu, no redirect — so the only way to reach it was to type the address. It
+and its wrapper component have been deleted. Adding a cost is unchanged.
+
+**Why:**
+Two add-cost UIs is a maintenance trap: a field added to one quietly does not
+exist in the other, and the unreachable one is the one nobody notices is wrong.
+
+**Which option, and why:**
+The audit offered either (a) delete both, or (b) point **+ Add → Cost** at the
+full page on mobile and delete the drawer. **(a) was chosen**, because (b) is
+not actually available as written: the drawer inside `ExpensesTab` is not only
+the add form — it is also **Edit expense** and **Repeat expense**, reached from
+every row's menu. Deleting it would have taken editing with it, so (b) would
+have meant keeping the drawer anyway and ending up with the two UIs the audit
+set out to remove. Deleting the unreachable page leaves exactly one add-cost
+UI, which is the point.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L3.
+
+**Files used (read, not changed):**
+- `components/project/ExpensesTab.tsx` — to establish that its drawer also
+  serves Edit and Repeat (its title is
+  `editing ? "Edit expense" : template ? "Repeat expense" : "Add expense"`)
+- `components/project/AddMenu.tsx`, `components/project/ProjectDetail.tsx` —
+  to confirm **+ Add → Cost** opens the drawer and never the route
+
+**Files changed:**
+- `app/(app)/projects/[id]/expenses/new/page.tsx` — deleted
+- `components/forms/AddExpensePanel.tsx` — deleted (45 lines; it existed only
+  to serve that page, and did nothing but pass props to `ExpenseForm`)
+- `components/project/ExpensesTab.tsx` — one comment that referred to "the
+  standalone /expenses/new route" reworded, since that route no longer exists
+
+**Database:**
+None.
+
+**Result / numbers after:**
+Routes that can add a cost: 2 → 1. `/projects/[id]/expenses/new` is gone from
+the build's route table. `npm run build` passes, `npm run lint` clean.
+`ExpenseForm` itself was not touched, so the add/edit/repeat form is exactly
+what it was.
+
+---
+
+### 2026-10-01 — "% built" per week is now on screen, and editable
+
+**What changed (in plain English):**
+The Week-by-Week table on a project's Overview tab has a new **% built** column
+with a small editable box in each row. Typing a number and pressing Enter (or
+tapping away) saves it. It was already stored in the database and already had a
+working save route — it just had nowhere to be typed and nowhere to be seen, so
+it read 0 for all 23 weeks of the job.
+
+**Why:**
+`project_weeks.completion_pct` has existed since migration 0001 and
+`PATCH /api/projects/[id]/weeks` has been able to write it for just as long.
+`buildByWeek` in `lib/summary.ts` even read it into `WeekTotal.completion_pct`.
+But no screen rendered it and no part of the UI called the route, so the column,
+the route and the field were all dead. The choice was to surface it or delete
+all three; surfacing it won, because "how much of this week's work actually got
+done" is a judgement made on site on a Friday and is genuinely useful beside the
+Schedule tab's per-task `pct_complete` — which is a different thing, per task
+rather than per week.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L2.
+
+**Files used (read, not changed):**
+- `app/api/projects/[id]/weeks/route.ts` — the existing save route, used
+  unchanged. It upserts on `(project_id, week_number)` and already rejects
+  anything outside 0–100 with a 422.
+- `lib/summary.ts` — `buildByWeek`, which already supplied the value
+- `types/index.ts` — `WeekTotal.completion_pct`, `ProjectWeek`
+- `supabase/migrations/0001_init.sql` — the column and its
+  `check (completion_pct between 0 and 100)`
+- `supabase/migrations/0009_reimport_file1_only.sql` — which creates weeks 1–23
+  with `completion_pct = 0`, i.e. the reason every row reads 0
+
+**Files changed:**
+- `components/project/OverviewTab.tsx` — new `WeekCompletion` component (an
+  inline number field, saved on blur or Enter, abandoned on Escape, optimistic
+  on screen and reconciled from the server afterwards), plus a new
+  `onWeekSaved` prop. **The column is added in BOTH renders of the table** —
+  the mobile card list and the desktop table — because the desktop table is
+  `hidden` below `sm`, so a column added there alone would be invisible on a
+  phone, which is where this gets typed.
+- `components/project/ProjectDetail.tsx` — passes
+  `onWeekSaved={() => router.refresh()}`. The figure comes from the server via
+  `initialWeeks` into `buildByWeek`, so a save has to go back through the page;
+  local state alone would show the new number in the cell and the old one
+  everywhere else.
+
+**Database:**
+No migration. The column, the constraint and the save route all already
+existed — nothing was added and nothing needs pasting into the SQL editor.
+
+**Result / numbers after:**
+No money figure moves — `completion_pct` is not part of any total, and nothing
+derived from it is persisted. What changed is that it is now writable from the
+app at all: `% built` for every week was **0, with no way to change it → 0,
+editable in place**.
+
+Cost in client JavaScript, measured from the build output: the project page was
+**141 kB / 267 kB first load** at the start of this batch and is **148 kB /
+269 kB** after all six changes above, the % built editor being the only one of
+them that adds anything to that page. (That page is the subject of finding M6,
+which will address its size directly.)
+
+`npm run build` passes, `npm run lint` clean. **Not exercised against the real
+database** — the Overview tab is behind a login and there is no signed-in
+session here, so the editor is covered by typecheck and by reading the route,
+not by a round trip. Worth one save on a real project before relying on it.
+
+---
+
+### 2026-10-01 — "+ Add" now offers six things, not three
+
+**What changed (in plain English):**
+The **+ Add** button on a project page offered Cost, Invoice and Labour. It now
+also offers **Photo or document**, **Snag** and **Log entry**, arranged under two
+headings — *Money* and *On site*. Each of the three new ones takes you straight
+to the form, not to the list the form lives on.
+
+**Why:**
+The button says "Add to this project" and the sheet under it said "Three ways
+money gets recorded here". The button was telling the truth about its job and
+the list was not: a photo, a snag and a log entry could not be added from the
+one control named after adding things. Each was two taps away behind an Overview
+tile — and those three are exactly the ones done standing on site with one hand,
+which is the worst possible place to need two taps and a tile.
+
+Orders and Variations were deliberately left where they are. An order is lines
+and quantities copied off a supplier's confirmation and a variation is a written
+agreement; both are desk jobs with a screen of their own built for that work.
+Adding them would have made this list nine items long, which is a menu you read
+rather than a menu you use.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding M1.
+
+**Files used (read, not changed):**
+- `components/snags/LogScreen.tsx`, `components/documents/DocumentsScreen.tsx` —
+  to find the add forms already on those screens. Both already had exactly the
+  right form; all that was missing was a door from the project page.
+- `components/ui/Icon.tsx`, `components/ui/List.tsx` — the available icon names
+  and tile tones
+
+**Files changed:**
+- `components/project/AddMenu.tsx` — `AddItem` gains `document | snag | log`;
+  `ITEMS` gains a `group` field and the list renders under two headings, with a
+  divider. Six items is enough that they need the headings to be scannable.
+  The one `rows` rendering still serves both the desktop dropdown and the
+  mobile sheet, so the two cannot drift apart. The sheet's description now
+  reads "Money, and what you noted on site."
+- `components/project/ProjectDetail.tsx` — three new cases in `handleAdd`,
+  each pushing to the route that already exists with `add=1`:
+  `documents?add=1`, `log?view=snags&add=1`, `log?view=activity&add=1`.
+- `components/snags/LogScreen.tsx` — new `autoAdd` prop, which opens the add
+  form for whichever segment was asked for. Read **once, as the initial state**
+  and not watched, so closing the form does not reopen it and the URL is left
+  alone.
+- `app/(app)/projects/[id]/log/page.tsx` — reads `?add=1` and passes `autoAdd`
+- `components/documents/DocumentsScreen.tsx` — the same `autoAdd` prop, opening
+  the upload sheet
+- `app/(app)/projects/[id]/documents/page.tsx` — reads `?add=1` and passes
+  `autoAdd`; it had no `searchParams` argument before
+
+**Database:**
+None. No new tables, no new routes — the three new entries use the save routes
+and forms that already existed.
+
+**Result / numbers after:**
+Things addable from **+ Add**: 3 → 6. Taps to raise a snag from the project
+page: 3 (⋯ or Overview tile → Log & snags → Snags → Raise a snag) → 2 (+ Add →
+Snag, which arrives with the form open).
+
+`npm run build` passes, `npm run lint` clean. **Not checked in a browser** —
+the project page is behind a login and there is no signed-in session here, so
+the six-item menu and the three `?add=1` landings are covered by typecheck only.
+Both new sheets were confirmed by reading to render outside the `view ===`
+branches, so they do open regardless of which segment is showing, but that is
+read from the source rather than seen.
+
+---
+
+### 2026-10-01 — Saving an invoice now returns you to the project, not to a bare list
+
+**What changed (in plain English):**
+Saving, updating, deleting or cancelling an invoice used to land you on
+`/projects/[id]/purchases` — a page showing the same invoice list as the
+project's Invoices tab, but stripped of the project header, the hero figures and
+the tab strip, with its add button labelled "Log" instead of "Add". All four now
+go to `/projects/[id]?tab=invoices`, which is the project screen with the
+Invoices tab open. The old address still works: it is now a redirect to the same
+place, so bookmarks and browser history are unaffected.
+
+**Why:**
+Filing an invoice is something you do *about a job*, and it was dropping you
+somewhere that did not look like that job. Worse, it was a **second door to one
+list** — the same `InvoicesTab` component rendered two ways — so the same
+invoices appeared under two different-looking headings and the one you were sent
+to was the lesser of the two.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding M3.
+
+**Files used (read, not changed):**
+- `components/project/ProjectDetail.tsx` — to confirm `?tab=invoices` is read on
+  arrival (`initialTabFrom(searchParams.get("tab"))`), so the redirect target
+  genuinely opens on that tab
+- `lib/data.ts` — `getProjectPurchases`, which the deleted page body used and
+  which the project page already calls for the tab
+
+**Files changed:**
+- `components/forms/PurchaseForm.tsx` — four redirects changed from
+  `/projects/${projectId}/purchases` to `/projects/${projectId}?tab=invoices`:
+  after a commit from the review screen, after a save or update, after a delete,
+  and on cancel. The audit named three; the cancel path was the fourth and went
+  to the same wrong place.
+- `app/(app)/projects/[id]/purchases/page.tsx` — now a `redirect()` to
+  `/projects/[id]?tab=invoices` and nothing else. A nonexistent project id 404s
+  on the project page instead of here, which is the same answer one step later.
+- `app/(app)/projects/[id]/purchases/[pid]/edit/page.tsx` — the edit screen's
+  default back link points at the tab too, so Back does not make a redirect hop
+- `components/project/InvoicesTab.tsx` — the `chrome` prop and its
+  `chrome === "page"` branch (a `PageHeader` with its own title, breadcrumb and
+  "Log" button) are deleted, along with the now-unused `PageHeader` import.
+  Nothing passes `chrome` any more, so the component has one render.
+- `about.md` — four passages corrected: the route table row for
+  `/projects/[id]/purchases`, the §"where you land after saving" sentence, the
+  list of screens `combineTotals` feeds, and the claim that the standalone route
+  is one of two places still carrying its own add button. It no longer exists to
+  carry one.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+Ways to reach the project invoice list: 2 → 1 (one redirects to the other).
+Build output for `/projects/[id]/purchases`: **6.16 kB route / 105 kB first
+load → 193 B / 87.7 kB**, since the route no longer ships the list component at
+all.
+
+No money figure moves — this changes where you are sent, not what is counted.
+
+`npm run build` passes, `npm run lint` clean. **Not checked in a browser** — the
+redirect and the four destinations are covered by typecheck only.
+
+---
+
+### 2026-10-01 — The Costs tab now says that invoices are in it
+
+**What changed (in plain English):**
+The Costs tab has a new one-line note above the list: *"Includes the N invoices
+filed against this project — the Invoices tab is the same documents one per row,
+not a separate total. Tap a row to open one."* The invoice count is a button that
+switches to the Invoices tab.
+
+**Why:**
+The Costs tab lists diary rows **and** invoices (any row whose id starts
+`inv:`). The Invoices tab lists the same documents, one per row. Neither tab
+said so, which is a trap set specifically for the person being careful: you
+reconcile the two lists, you find the same invoice on both, and you conclude the
+totals are double-counting. They are not — one list *contains* them and the
+other is a list *of* them. Only one of those is ever summed.
+
+**Which option, and why:**
+The audit offered either a caption on Costs or a fourth "Diary only" chip beside
+All / Owed / Paid. The **caption** was chosen. That chip row is a
+`SegmentedControl` labelled "Payment filter" and its three options are all
+answers to one question — *what still needs paying?* "Diary only" is a different
+dimension entirely (what kind of row it is, not whether it is paid), so putting
+it there would have made the control mean two things at once, and it would have
+put four `fill` segments across a 375px phone. The problem being solved is also
+one of *explanation*, not of filtering — the user does not want the invoices
+gone, they want to know why they are there twice.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding M4.
+
+**Files used (read, not changed):**
+- `components/project/InvoicesTab.tsx` — to confirm it lists the same
+  `purchases` documents, one per row
+- `lib/data.ts` / `lib/invoiceViews.ts` — where the `inv:` rows merged into the
+  diary come from
+
+**Files changed:**
+- `components/project/ExpensesTab.tsx` — new `invoiceCount` memo and the
+  caption, rendered above the list. The count is taken over **the whole tab,
+  not the filtered view**, deliberately: the sentence describes what this list
+  contains, so narrowing a filter must not quietly change what it claims. New
+  optional `onViewInvoices` prop; the count renders as plain text rather than a
+  button when it is not supplied.
+- `components/project/ProjectDetail.tsx` — passes
+  `onViewInvoices={() => setTab("invoices")}`
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No figure moves — this adds a sentence and changes nothing that is counted. The
+count shown is the number of `inv:` rows already in the Costs list, which on
+this project is whatever `getProjectBundle` merges in; it is read from the rows
+on screen, not computed separately, so it cannot disagree with them.
+
+Screens that explain the overlap: 0 → 1 (Costs). The Invoices tab still says
+nothing about Costs; that was not asked for and the caption is on the side where
+the double-counting mistake is actually made.
+
+`npm run build` passes, `npm run lint` clean. **Not checked in a browser.**
+
+---
+
+### 2026-10-01 — Search on five screens instead of two, from one component
+
+**What changed (in plain English):**
+Search existed on the Costs tab and the Analysis tab and nowhere else. It is now
+also on the **Invoices tab**, the **Directory** (all three of Suppliers, Items
+and People) and the **Documents** screen (both Files and Photos). All five now
+use one new shared component, `components/ui/SearchInput.tsx`, instead of each
+screen writing its own.
+
+**Why:**
+The three screens that gained it are the ones that grow without bound and had no
+handle on them at all:
+
+- **Invoices** grows fastest of the money screens — every project ends with more
+  invoices than weeks — and unlike Costs it has no week headings to navigate by.
+- **Directory** was three plain lists, and every invoice logged can mint a new
+  supplier and new items as a side effect (`lib/purchaseWrite.ts`), so "find
+  Lawsons" was a scroll.
+- **Documents** needed it for two different reasons in its two halves. Files is
+  a store you *look things up in* — you know you want the gas certificate and
+  you want it in five seconds — and the type chips only narrow to a kind, not to
+  a document. Photos is the fastest-growing list in the app on a busy week.
+
+It became one shared component rather than three more copies because the two
+existing copies had already drifted, and in a way that was itself a finding in
+this audit: the Analysis one positioned its `×` with a hand-measured
+`sm:left-[19rem]` against a field capped at 24rem, which put the button five rem
+inside the field's right edge. Three more hand-written copies would have been
+three more chances to do that again.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding M2, in its stated priority order
+(Invoices → Directory → Documents).
+
+**Files used (read, not changed):**
+- `types/index.ts` — `ProjectPurchaseRow`, `SupplierListRow`, `ItemListRow`,
+  `ContactListRow`, `DocumentView`, to see which fields each row actually
+  carries
+- `lib/documents.ts` — `photoTimeline`, `photoRooms`, to find where the photo
+  grouping takes its input
+
+**Files changed:**
+- `components/ui/SearchInput.tsx` — **new.** Magnifier in the left padding, an
+  `sr-only` label, the `×` that clears it, and the `pl-10 pr-10` that makes room
+  for both. `value` in, `onChange(value)` out, matching `Select` and
+  `DatePicker`. `id` is required rather than defaulted. The width cap goes on
+  the wrapper via `className`, because the magnifier and the `×` are positioned
+  against the wrapper. It is a plain text input, not `type="search"`: WebKit
+  draws its own clear button inside that one, which would sit on top of ours.
+- `components/project/ExpensesTab.tsx` — its hand-written box replaced by the
+  component (no visible change)
+- `components/project/AnalysisTab.tsx` — the same, which also removes the
+  `sm:max-w-sm` wrapper added earlier today for finding L5; the component now
+  owns that behaviour
+- `components/project/InvoicesTab.tsx` — searches supplier, invoice number and
+  the first line's description: the three things anyone remembers about a
+  document they are hunting for. Hidden until there is a list worth searching.
+- `components/directory/DirectoryScreen.tsx` — one box above all three
+  segments, filtering at the top level because the act is the same on all three
+  and only the haystack differs. Suppliers by name; Items by name, category and
+  unit; People by name, company, trade and phone. The page subtitle still counts
+  the **whole** register — it says what the directory holds, and a count that
+  shrinks as you type is a different statement — so the "N of M" goes under the
+  box instead.
+- `components/documents/DocumentsScreen.tsx` — one box above both views,
+  searching title, reference, room and the document type's label. The type
+  chips, the room chips and the photo count are deliberately **not** filtered by
+  it: they are controls, not results, and a chip row that loses options as you
+  type takes away the way out.
+
+Every one of the three new screens got a distinct **"Nothing matches"** state,
+separate from its existing "nothing here yet" one — including inside
+`PhotoTimelineView`, which took a new `searching` prop for the purpose. A search
+that matches nothing is not an empty project, and the two reading the same is
+the mistake that makes a filter look broken.
+
+In all three, the haystack is **only what the row displays**. Matching on a
+field that is not on screen produces results whose reason is invisible, which
+reads as a broken filter rather than a clever one.
+
+**Database:**
+None. All filtering is client-side over rows the screens already had.
+
+**Result / numbers after:**
+Screens with search: **2 → 5**. Hand-written search implementations: **2 → 0**
+(one shared component).
+
+No money figure moves: every filter here narrows what is listed and nothing
+sums the filtered set. The Invoices tab's four hero `StatCard`s are built from
+`totals`, which is untouched by the query — deliberately, so searching cannot
+appear to change what the project cost.
+
+`npm run build` passes, `npm run lint` clean, and the scheduling engine is
+**71 of 71** (unchanged — nothing here touches it).
+
+**Not checked in a browser.** All five screens are behind a login and there is
+no signed-in session here, so this is covered by typecheck. The two conversions
+(Costs, Analysis) are the ones to glance at first, since they are the only ones
+where existing markup was replaced rather than added to.
+
+---
+
+### 2026-10-01 — The project page no longer downloads the tabs you are not looking at
+
+**What changed (in plain English):**
+The Analysis tab and the Schedule tab are now loaded on demand instead of being
+part of the project page's own JavaScript. Opening a project to glance at the
+Overview used to download the Gantt chart and four pivot tables as well. Nothing
+looks or behaves differently.
+
+**Why:**
+`/projects/[id]` was **150 kB of client JavaScript / 268 kB first load** while
+every other route in the app was 100–120 kB. The two biggest contributors are
+tabs that are usually not the one on screen: `AnalysisTab` is about 1,430 lines
+and `ScheduleTab` about 940, and at most one of them is visible at a time.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding M6. Figures read off `npm run build`'s route
+table, before and after.
+
+**Files used (read, not changed):**
+- `components/ui/States.tsx` — `ListSkeleton`, used as the loading fallback
+- `components/project/AnalysisTab.tsx`,
+  `components/schedule/ScheduleTab.tsx` — to confirm the only things
+  `ProjectDetail` imports from them besides the default export are the two
+  **types** `AnalysisView` and `LineCategory`
+
+**Files changed:**
+- `components/project/ProjectDetail.tsx` — both tabs wrapped in `next/dynamic`.
+  Three decisions worth recording:
+  - **`ssr` is left ON** (the default). The tabs are rendered conditionally on
+    `tab`, so the server still renders whichever one the URL asked for —
+    arriving at `?tab=schedule` is no slower than before — and the other one's
+    JavaScript is simply never fetched. Turning SSR off would have traded a
+    bundle problem for a blank first paint.
+  - The two types are now imported with **`import type`**, so they are erased at
+    compile time rather than dragging the module back into the runtime graph and
+    undoing the split.
+  - `ListSkeleton` is the fallback rather than a spinner. On a fast connection
+    the chunk is already there and neither is seen; on a slow one, a shape the
+    size of the list that is coming is less jarring than a spinner in the middle
+    of the page.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+
+| | before | after |
+|---|---|---|
+| `/projects/[id]` route JS | 150 kB | **130 kB** |
+| `/projects/[id]` first load | 268 kB | **242 kB** |
+
+That is −20 kB of route JavaScript and −26 kB of first load. For context, the
+audit measured 141 kB / 267 kB on 2026-10-01 before any of today's work; the
+earlier changes in this batch (the "% built" editor, the Costs caption, search on
+three screens) took it to 150 kB / 268 kB, and this change takes it below where
+it started. Every other route is unchanged.
+
+This is **pure perf — no behaviour change.** No money figure moves; no query,
+total or filter is touched. What the audit also noted and this change does *not*
+address: `ProjectDetail` still *computes* all five tabs' data on mount (the four
+Analysis pivots, the task cost rollup, the price alerts) whether or not those
+tabs are opened. That is the memo work in `ProjectDetail` itself, not the tab
+components, and deferring it would be a behaviour change rather than a code
+split — so it was left alone, as the finding asked.
+
+`npm run build` passes, `npm run lint` clean, scheduling engine **71 of 71**.
+
+**Not checked in a browser.** The one thing worth a glance on a real session:
+switching to Analysis or Schedule for the first time now resolves a chunk, so
+there is a moment of `ListSkeleton` on a slow connection where previously there
+was none.
+
+---
+
+### 2026-10-01 — The activity log now admits when it is only showing part of itself
+
+**What changed (in plain English):**
+The project log has always shown at most the 300 most recent entries. Nothing on
+screen said so, so on a project with more than that the 301st entry simply was
+not there and the list looked complete. It now says, under the list:
+*"Showing the most recent 300 of 412 entries. Older ones are still stored — they
+are not shown here."* The sentence only appears when the cap is actually reached.
+
+**Why:**
+This is the screen people go to in order to remember what was agreed on a phone
+call six months ago, and on a year-long job the cap silently hides the oldest
+part of exactly that record. A list that stops without saying it has stopped is
+worse than a short list, because it is read as the whole truth.
+
+**Which option, and why:**
+The audit offered either a note or a date filter. The **note** was chosen,
+because the cap is only reached on a project that has had hundreds of entries
+logged, and the sentence is what makes the gap *knowable* at all. A filter
+without the note would still leave someone on the default view thinking they
+were looking at everything. The note is also the cheaper half: a filter means a
+new query path, and the screen's own search and segments already work over
+whatever was fetched. If the cap starts actually biting on this job, a filter is
+the next step and this note is what will say so.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding L7.
+
+**Files used (read, not changed):**
+- `app/(app)/projects/[id]/log/page.tsx` — the one caller of
+  `getCommunicationBundle`
+
+**Files changed:**
+- `lib/data.ts` — the 300 is now an exported `ACTIVITY_LIMIT` constant, and the
+  activity query carries `count: "exact"`. That count rides along on the same
+  request, so knowing the real total costs no extra round trip — and without it
+  the screen cannot tell a project with exactly 300 entries from one with 3,000.
+  The returned bundle gains `activity_total` and `activity_limit`.
+  `activity_total` falls back to the number of rows in hand if PostgREST returns
+  no count, so a missing count makes the screen say nothing rather than claim a
+  total it does not have.
+- `types/index.ts` — `CommunicationBundle` gains `activity_total` and
+  `activity_limit`, documented
+- `components/snags/LogScreen.tsx` — the note, rendered only when
+  `activity_total > activity.length`. The activity/snags ternary became two
+  separate conditionals so the note could sit outside both without being
+  repeated in each.
+
+**Database:**
+None. No migration, no schema change — `count: "exact"` is a PostgREST header on
+the existing query.
+
+**Result / numbers after:**
+No money figure moves. The cap itself is **unchanged at 300** — this change does
+not fetch more rows, it says how many were left out. On this project the log is
+well under 300, so the sentence does not currently render; it will the first time
+the project passes 300 entries.
+
+`npm run build` passes, `npm run lint` clean, scheduling engine **71 of 71**.
+
+**Not checked in a browser**, and worth noting why it is harder than usual to
+check: the sentence only appears above 300 activity rows, which this project does
+not have, so seeing it would mean seeding a few hundred rows. It is covered by
+typecheck and by reading the query.
+
+---
+
+### 2026-10-01 — Retired a warning that had become untrue, and made the ledger rule one rule
+
+**What changed (in plain English):**
+Two things, both about the diary/ledger split:
+
+1. The amber panel on the three invoice screens — *"Invoices logged here… do
+   **not** yet feed the project's Overview or Expenses tabs"* — is **gone**. It
+   was telling users something that is no longer true.
+2. The rule "never add up `source: 'ledger'` rows" was written out by hand in
+   six places. It is now one documented predicate, `SPENDABLE_ENTRY`, that all
+   six import.
+
+**No money figure moves.** See the figures section below for why that is a
+statement about the code and not a hope.
+
+**Why — part 1, the panel was wrong:**
+The audit said to retire `InvoiceScopeNote` "if it explains a distinction the
+user can no longer see", and to read it first. Reading it turned out to matter,
+because it is worse than obsolete — it is **false**. It told anyone logging an
+invoice that their invoice would not appear on the project's Overview or Costs
+tabs. Both now show it:
+
+- `getProjectBundle` builds a synthetic expense entry per invoice
+  (`purchasesToSyntheticEntries`) with `source: "invoice"` and merges it into
+  `entries`.
+- Every screen's filter excludes `'ledger'`, not `'invoice'`, so those rows are
+  in `diaryEntries` — which is exactly what feeds `buildSummary` (the Overview
+  cards) and `buildByWeek`, and what the Costs tab lists.
+
+So the one thing the panel existed to warn about had been fixed, and the panel
+had been left behind telling people to distrust a figure that is correct. (It
+also sat on the review screen, where it was the third grey-or-amber block of
+explanatory text above the form.) `about.md` claimed this component was already
+gone — it was wrong, and is corrected.
+
+**Why — part 2, six copies of one rule:**
+`source = 'ledger'` is the File-2 Excel import. It **overlapped** the diary, so
+adding the two counts the same spend twice, and it has been **empty since
+migration 0009 (2026-08-14)** because the workbook turned out to be a different
+job. The column stays — it is provenance, exactly as the audit says — but the
+*rule* was `e.source !== "ledger"` typed out in ProjectDetail, ExpensesTab, the
+dashboard, `getPortfolio` and both export routes. Every new screen that totals
+expenses had to have heard of a string in order to be correct, and getting it
+wrong does not break a build, it just produces a wrong number.
+
+**What was deliberately NOT done:**
+- **The filter is not deleted.** It now matches every row in the database, and
+  deleting it would still be wrong: it costs one comparison per row and it is
+  the only thing standing between the app and a double-count the day a second
+  dataset is imported. The predicate's own comment says this, because "it
+  matches everything, so remove it" is the obvious next mistake.
+- **The `order: ["diary", "ledger"]` arrays are left alone** (`totalsBySource`,
+  `buildPurchaseGroups`, the item loader). On inspection all three already
+  `.filter()` down to the sources actually present — they emit a bucket only if
+  it has rows — so they are a *sort order*, "diary first", and never produce an
+  empty second group on screen. There was nothing in the UI path left to drop,
+  and rewriting them would have been churn on a money path for no visible
+  change.
+- **`combineTotals` was already doing the display collapse** — it was added for
+  that purpose on 2026-08-21 and `about.md` §"three rules" documents it. The
+  money-figure half of this finding was done before today.
+- **`PurchaseEntrySource` stays in `types/index.ts`.** It types the `purchases`
+  column, which still exists and is still written on every insert.
+
+**Where the information came from:**
+UX audit of 2026-10-01, finding M5. The claim that the panel is now false was
+checked against the code, not assumed: `lib/purchases.ts`
+(`purchasesToSyntheticEntries`, `source: "invoice"`), `lib/data.ts`
+(`getProjectBundle` merging them into `entries`) and
+`components/project/ProjectDetail.tsx` (`diaryEntries` feeding `buildSummary`).
+
+**Files used (read, not changed):**
+- `components/purchases/totals.ts` — `combineTotals`, to establish the display
+  collapse was already done
+- `lib/purchases.ts` — `totalsBySource`; `lib/data.ts` — `buildPurchaseGroups`
+  and the item loader, to establish all three `order` arrays already drop absent
+  sources
+- `types/index.ts` — `ExpenseEntry.source`, `PurchaseEntrySource`
+
+**Files changed:**
+- `components/purchases/SourceNote.tsx` — **deleted** (its only export was
+  `InvoiceScopeNote`)
+- `app/(app)/invoices/new/page.tsx`,
+  `app/(app)/invoices/upload/page.tsx`,
+  `app/(app)/invoices/[uploadId]/review/page.tsx` — the panel and its import
+  removed from each
+- `lib/purchases.ts` — new exported `SPENDABLE_ENTRY` predicate beside
+  `ACTIVE_PURCHASE`, with the whole explanation on it, including why it must not
+  be deleted for matching everything. `buildMaterialPriceIndex` now uses it too.
+- `components/project/ProjectDetail.tsx`,
+  `components/project/ExpensesTab.tsx`,
+  `app/(app)/dashboard/page.tsx`,
+  `lib/data.ts` (`getPortfolio`),
+  `app/api/projects/[id]/export/excel/route.ts`,
+  `app/api/projects/[id]/export/pdf/route.ts` — each now filters with
+  `SPENDABLE_ENTRY` instead of its own copy. ProjectDetail's comment also
+  corrected: it said Overview covers "the week-by-week Expenses diary only",
+  which stopped being true when invoices were merged in.
+- `about.md` — the §"three rules" paragraph corrected (it claimed `SourceNote`
+  was already gone), and a note added recording `SPENDABLE_ENTRY` and that the
+  filter is deliberately kept over an empty bucket.
+
+**Database:**
+None. **No migration, and the `source` column is untouched** — no row is
+reclassified, nothing is deleted, and `expense_entries.source` keeps taking
+`'diary' | 'ledger' | 'invoice'` exactly as before.
+
+**Result / numbers after — every affected total:**
+
+**Nothing moved, and here is why that is checkable rather than hopeful.** Each of
+the six call sites went from the inline arrow function
+`(e) => e.source !== "ledger"` to `SPENDABLE_ENTRY`, whose body is
+`e.source !== "ledger"`. Same comparison, same field, same literal, same call
+sites, in the same order in the same pipelines. (`Array.prototype.filter` passes
+three arguments and the predicate declares one, so the extra two are ignored —
+as they were by the arrow functions it replaced.) Nothing was added to or removed
+from any filter chain, and no aggregation changed.
+
+So, stated as before → after:
+
+| figure | before | after |
+|---|---|---|
+| Project Overview — Cost, Paid, Owed, Variance, contingency | *unchanged* | *unchanged* |
+| Week-by-Week table totals | *unchanged* | *unchanged* |
+| Costs tab list and its per-week subtotals | *unchanged* | *unchanged* |
+| Dashboard spend per project | *unchanged* | *unchanged* |
+| Portfolio (`getPortfolio`) totals | *unchanged* | *unchanged* |
+| Excel and PDF export figures | *unchanged* | *unchanged* |
+| Price alerts (`buildMaterialPriceIndex`) | *unchanged* | *unchanged* |
+
+The honest caveat: this is **unchanged by construction, not by measurement.**
+These screens are behind a login and there is no signed-in session here, so no
+figure was read off the running app before and after. What was done instead:
+`npm run build` passes (the only full typecheck), `npm run lint` is clean, and
+the scheduling engine is **71 of 71**. There are no tests over the money path —
+that is the long-standing gap noted in CLAUDE.md, and it is the reason this
+change was deliberately made as a pure substitution rather than as a rewrite.
+
+Hand-written copies of the ledger rule: **6 → 0** (one shared predicate).
+Screens showing a warning that was false: **3 → 0**.
+
+---
+
+### 2026-10-01 — Why the dashboard still reads its four tables twice (no code change)
+
+**What changed (in plain English):**
+**Nothing in the code.** This entry records a decision not to make a change that
+was on the backlog, and the reason — because the reason is not obvious from
+reading the files and would otherwise have to be rediscovered.
+
+**The finding it answers:**
+UX audit of 2026-10-01, finding M7: `app/(app)/dashboard/page.tsx` fetches
+`projects`, `expense_entries`, `purchases` and `payments`; `getPortfolio()` then
+fetches all four again plus nine more — thirteen unscoped whole-table reads on
+one screen, and two independent computations of "spend per project" that must
+agree by hand. The finding rated it low urgency at this data size and said to
+**fix only if touching that page anyway**.
+
+**Why it was left:**
+
+First, its own condition was not met. The dashboard page was touched today only
+to swap one inline filter for the shared `SPENDABLE_ENTRY` predicate — a one-line
+import change in the entry filter, not work in the double-fetching area.
+
+Second, and more importantly, **the obvious fix is wrong**, and that is worth
+writing down. The tempting change is to drop the page's own four queries and read
+the money figures out of `portfolio`. But look at how `getPortfolio()` is called:
+
+```ts
+getPortfolio().catch(() => ({ healths: [], bundles: [] })),
+```
+
+That `.catch` is load-bearing. Migrations here are applied by hand, so on a
+database where `0016_schedule_core.sql` has not been pasted in, the schedule
+tables genuinely do not exist and `getPortfolio()` throws. The page's own comment
+says why that is tolerated: *"the money view of this screen worked perfectly well
+before the schedule existed and must keep working."*
+
+So moving the money half onto `getPortfolio()` would mean that a database missing
+one hand-applied migration shows **£0 spent on every project** on the home
+screen — turning a missing schedule into an apparently empty company. That is the
+precise failure this project has already lived through once (see the 2026-07-20
+entry at the top of this file), and the ambiguity CLAUDE.md's "Data recovery"
+section warns about.
+
+The two computations are therefore independent **partly on purpose**. A genuine
+fix means separating `getPortfolio()`'s money half from its schedule half so the
+money half can be shared without inheriting the schedule's fragility — a real
+refactor of an untested money path. That is a bigger piece of work than the
+finding describes, and it is not justified by thirteen whole-table reads against
+one project's worth of rows.
+
+**The one thing to know before anyone does attempt it:** the two sets of queries
+are **not** identical, so they cannot simply be deduplicated. The dashboard asks
+for `purchases` with `.neq("entry_status", "Cancelled")`; `getPortfolio()` asks
+for all of them and lets its consumers drop cancelled rows. Collapsing them
+without noticing that moves money.
+
+**Where the information came from:**
+Reading `app/(app)/dashboard/page.tsx` and `getPortfolio()` in `lib/data.ts`.
+
+**Files used (read, not changed):**
+- `app/(app)/dashboard/page.tsx`
+- `lib/data.ts` — `getPortfolio`
+
+**Files changed:**
+- `updates.md` — this entry only.
+
+**Database:**
+None.
+
+**Result / numbers after:**
+No figure moves; no code ran differently. Whole-table reads on the dashboard:
+**13 → 13**, deliberately.

@@ -34,17 +34,49 @@ import { IconTile } from "@/components/ui/List";
  * action row, sized to match the desktop one and the `⋯` beside it.
  */
 
-export type AddItem = "cost" | "invoice" | "labour";
+export type AddItem =
+  | "cost"
+  | "invoice"
+  | "labour"
+  | "document"
+  | "snag"
+  | "log";
+
+/*
+ * Two groups, not one list.
+ *
+ * It used to be three items — cost, invoice, labour — under a sheet that said
+ * "Three ways money gets recorded here", while the button said "Add to this
+ * project". The button was telling the truth about its job and the list was
+ * not: you could not add a photo, a snag or a log entry from the one control
+ * named after adding things, and each of those was two taps away behind an
+ * Overview tile. Those three are exactly the ones done standing on site with
+ * one hand, which is the worst possible place to need two taps and a tile.
+ *
+ * Orders and Variations are deliberately NOT here. Both are desk jobs — an
+ * order is lines and quantities copied off a supplier's confirmation, a
+ * variation is a written agreement — and both have a screen of their own built
+ * for that. Adding them would make this list nine items long, which is a menu
+ * you read rather than a menu you use.
+ */
+type AddGroup = "money" | "site";
+
+const GROUP_LABELS: Record<AddGroup, string> = {
+  money: "Money",
+  site: "On site",
+};
 
 const ITEMS: {
   key: AddItem;
+  group: AddGroup;
   label: string;
   icon: IconName;
-  tone: "brand" | "info" | "warn";
+  tone: "brand" | "info" | "warn" | "bad" | "neutral";
   hint: string;
 }[] = [
   {
     key: "cost",
+    group: "money",
     label: "Cost",
     icon: "wallet",
     tone: "brand",
@@ -52,6 +84,7 @@ const ITEMS: {
   },
   {
     key: "invoice",
+    group: "money",
     label: "Invoice",
     icon: "receipt",
     tone: "info",
@@ -61,10 +94,38 @@ const ITEMS: {
   },
   {
     key: "labour",
+    group: "money",
     label: "Labour",
     icon: "hammer",
     tone: "warn",
     hint: "Work paid direct, by rate and hours",
+  },
+  {
+    key: "document",
+    group: "site",
+    label: "Photo or document",
+    // `camera` rather than `receipt` for the same reason OverviewTab's tile
+    // uses it: `receipt` means *invoice* everywhere else in this app, and this
+    // store is mostly site photographs.
+    icon: "camera",
+    tone: "info",
+    hint: "A photo, a certificate, a drawing",
+  },
+  {
+    key: "snag",
+    group: "site",
+    label: "Snag",
+    icon: "alert",
+    tone: "bad",
+    hint: "Something that needs putting right",
+  },
+  {
+    key: "log",
+    group: "site",
+    label: "Log entry",
+    icon: "list",
+    tone: "neutral",
+    hint: "A call, a visit, a decision",
   },
 ];
 
@@ -82,25 +143,36 @@ export default function AddMenu({ onSelect }: { onSelect: (item: AddItem) => voi
     onSelect(item);
   }
 
-  const rows = ITEMS.map((item) => (
-    <button
-      key={item.key}
-      type="button"
-      role="menuitem"
-      className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition active:bg-gray-100 hover:bg-gray-50"
-      onClick={() => choose(item.key)}
-    >
-      <IconTile name={item.icon} tone={item.tone} size="lg" />
-      <span className="min-w-0 flex-1">
-        <span className="block text-[0.9375rem] font-semibold text-gray-900">
-          {item.label}
-        </span>
-        <span className="mt-0.5 block text-[0.8125rem] leading-snug text-gray-500">
-          {item.hint}
-        </span>
-      </span>
-      <Icon name="chevronRight" size={18} className="shrink-0 text-gray-300" />
-    </button>
+  // One rendering, used by both the desktop dropdown and the mobile sheet, so
+  // the two cannot drift apart. Six items is enough that they need the two
+  // headings to be scannable — "Money" and "On site" is the division people
+  // already have in their heads.
+  const rows = (["money", "site"] as AddGroup[]).map((group) => (
+    <div key={group} className="first:mt-0 mt-1.5 first:pt-0 pt-1.5 first:border-0 border-t border-gray-200/70">
+      <p className="px-3 pb-1 pt-1.5 text-2xs font-bold uppercase tracking-wider text-gray-400">
+        {GROUP_LABELS[group]}
+      </p>
+      {ITEMS.filter((item) => item.group === group).map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          role="menuitem"
+          className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left transition active:bg-gray-100 hover:bg-gray-50"
+          onClick={() => choose(item.key)}
+        >
+          <IconTile name={item.icon} tone={item.tone} size="lg" />
+          <span className="min-w-0 flex-1">
+            <span className="block text-[0.9375rem] font-semibold text-gray-900">
+              {item.label}
+            </span>
+            <span className="mt-0.5 block text-[0.8125rem] leading-snug text-gray-500">
+              {item.hint}
+            </span>
+          </span>
+          <Icon name="chevronRight" size={18} className="shrink-0 text-gray-300" />
+        </button>
+      ))}
+    </div>
   ));
 
   return (
@@ -155,7 +227,7 @@ export default function AddMenu({ onSelect }: { onSelect: (item: AddItem) => voi
           open={sheetOpen}
           onClose={() => setSheetOpen(false)}
           title="Add to this project"
-          description="Three ways money gets recorded here."
+          description="Money, and what you noted on site."
           size="sm"
         >
           <div role="menu" className="-mx-2">

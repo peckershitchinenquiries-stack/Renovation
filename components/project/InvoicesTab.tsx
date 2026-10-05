@@ -1,13 +1,14 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { formatCurrency } from "@/lib/calculations";
 import { MONEY } from "@/lib/vocabulary";
 import { Badge } from "@/components/ui/Badge";
 import { StatCard } from "@/components/ui/StatCard";
 import { EmptyState } from "@/components/ui/States";
-import { PageHeader } from "@/components/ui/PageHeader";
 import { Icon } from "@/components/ui/Icon";
+import { SearchInput } from "@/components/ui/SearchInput";
 import { IconTile } from "@/components/ui/List";
 import { formatDisplayDate } from "@/components/ui/DatePicker";
 import { combineTotals } from "@/components/purchases/totals";
@@ -17,13 +18,15 @@ import type { Project, ProjectPurchaseRow, PurchaseTotals } from "@/types";
  * Invoices & purchases — every document filed against one project.
  *
  * This was a route of its own (`/projects/[id]/purchases`) that left the tab
- * strip entirely and needed a `?tab=` link to get back. It is a tab now. The
- * route still exists and still works — plenty of screens link to it — and
- * renders this same component, so there is one list rather than two.
+ * strip entirely and needed a `?tab=` link to get back. It is a tab now, and
+ * since 2026-10-01 it is ONLY a tab: that route is a `redirect()` to
+ * `?tab=invoices` and nothing renders this component any other way.
  *
- * `chrome` is the only difference between the two renders: the route needs its
- * own heading and breadcrumb, and inside the tab strip the project name is
- * already two inches above in the project header.
+ * It used to render twice, the route passing `chrome="page"` for its own
+ * heading, breadcrumb and a "Log" button. That made one list with two doors —
+ * and the invoice form saved you through the wrong one, so filing an invoice
+ * dropped you on a bare page instead of back on the job. The prop and its
+ * branch are gone with the second door.
  */
 
 // What one row says it is: a hand-typed invoice, or a row copied over from the
@@ -83,40 +86,33 @@ export default function InvoicesTab({
   project,
   rows,
   totals,
-  chrome = "tab",
 }: {
   project: Project;
   rows: ProjectPurchaseRow[];
   totals: PurchaseTotals[];
-  chrome?: "page" | "tab";
 }) {
   const total = combineTotals(totals);
+  const [query, setQuery] = useState("");
+
+  // This is the list that grows without bound: every project ends with more
+  // invoices than weeks, and unlike the Costs tab it has no week headings to
+  // navigate by. Supplier, invoice number and the first line's description are
+  // the three things anyone actually remembers about a document they are
+  // hunting for.
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) =>
+      `${row.supplier_name ?? ""} ${row.invoice_no ?? ""} ${
+        row.first_description ?? ""
+      }`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [rows, query]);
 
   return (
     <div className="space-y-5">
-      {/* Only the standalone route carries an add button of its own. Inside the
-          tab strip the project header's "+ Add → Invoice" is two inches above
-          it and goes to the same place (AddMenu.tsx); on `/projects/[id]/
-          purchases` there is no project header, so without this button the page
-          would have no way to log an invoice at all. */}
-      {chrome === "page" ? (
-        <PageHeader
-          title="Invoices"
-          subtitle={project.name}
-          backHref={`/projects/${project.id}`}
-          backLabel="Back to project"
-          action={
-            // Adding happens from the nav bar's Invoices menu, not here: an
-            // invoice is filed against a project on the form itself now, so
-            // there is one add flow rather than one per project.
-            <Link href="/invoices" className="btn-primary btn-sm">
-              <Icon name="plus" size={16} strokeWidth={2.25} />
-              Log
-            </Link>
-          }
-        />
-      ) : null}
-
       {/* One set of totals for the project. Cancelled documents are already
           excluded upstream. */}
       {total ? (
@@ -149,6 +145,19 @@ export default function InvoicesTab({
         </div>
       ) : null}
 
+      {/* Hidden until there is a list worth searching — a search box over an
+          empty state is furniture. */}
+      {rows.length > 0 ? (
+        <SearchInput
+          id="invoices-search"
+          className="sm:max-w-sm"
+          value={query}
+          onChange={setQuery}
+          label="Search invoices"
+          placeholder="Supplier, invoice number or description"
+        />
+      ) : null}
+
       {rows.length === 0 ? (
         <EmptyState
           icon="receipt"
@@ -161,13 +170,31 @@ export default function InvoicesTab({
             </Link>
           }
         />
+      ) : visible.length === 0 ? (
+        /* A search that matches nothing is not an empty project, and the two
+           must not read the same — see the Costs tab for the same distinction. */
+        <EmptyState
+          icon="search"
+          compact
+          title="Nothing matches"
+          description="No invoice on this project matches that search."
+          action={
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setQuery("")}
+            >
+              Clear search
+            </button>
+          }
+        />
       ) : (
         <>
           {/* Mobile: one card per document. The three money figures sit in a
               single row of equal columns rather than a stacked definition list,
               so a column of invoices can be scanned down one number at a time. */}
           <div className="space-y-2.5 sm:hidden">
-            {rows.map((row) => (
+            {visible.map((row) => (
               <div key={row.id} className="card p-0">
                 <div className="flex items-start gap-3 px-4 pb-3 pt-3.5">
                   <IconTile
@@ -257,7 +284,7 @@ export default function InvoicesTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200/70">
-                {rows.map((row) => (
+                {visible.map((row) => (
                   <tr key={row.id} className="align-top">
                     <td className="tnum whitespace-nowrap py-2.5 pr-3 text-gray-600">
                       {row.purchase_date || (

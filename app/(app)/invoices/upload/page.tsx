@@ -1,4 +1,3 @@
-import { InvoiceScopeNote } from "@/components/purchases/SourceNote";
 import UploadInvoicePanel from "@/components/purchases/UploadInvoicePanel";
 import { PageHeader } from "@/components/ui/PageHeader";
 
@@ -13,7 +12,6 @@ export default function UploadInvoicePage() {
         backHref="/invoices"
         backLabel="Back to invoices"
       />
-      <InvoiceScopeNote className="mb-4" />
       <UploadInvoicePanel />
     </div>
   );

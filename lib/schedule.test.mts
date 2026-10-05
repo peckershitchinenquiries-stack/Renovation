@@ -27,6 +27,7 @@ import {
   addLag,
   applyShift,
   calendarDaysBetween,
+  describeWeekdays,
   detectCycle,
   durationFromDates,
   endFromDuration,
@@ -797,4 +798,101 @@ test("sign-off: a link that does not require it is unaffected", () => {
     bundle([first, plasterer], [dep(first.id, plasterer.id)])
   );
   assert.equal(byId(result, plasterer.id).is_blocked, false);
+});
+
+
+// ============================================================
+// The calendar is configurable, and configuring it moves the dates
+// ============================================================
+// Added 2026-10-01 with the Working-calendar panel. `working_weekdays` and
+// `project_holidays` existed from migration 0018 and were read by the engine,
+// but nothing in the app could write either — so every project ran on the
+// column default of Mon–Fri with no holidays, and a Saturday-working crew or a
+// Christmas shutdown produced dates that were wrong by a day a week and looked
+// entirely plausible. These tests pin the thing that fix depends on: that a
+// different calendar genuinely produces different dates, end to end through the
+// forward pass, not just inside isWorkingDay().
+
+test("calendar: a six-day week finishes a ten-day job earlier", () => {
+  const ten = task({ planned_start: MONDAY, duration_days: 10 });
+  const fiveDay = scheduleProject(bundle([ten]));
+  const sixDay = scheduleProject(
+    bundle([task({ ...ten, id: ten.id })], [], {
+      calendar: { working_weekdays: [1, 2, 3, 4, 5, 6], holidays: [] },
+    })
+  );
+  // Mon 2 Mar + 10 working days: Mon–Fri spans two weekends and ends Fri 13th;
+  // working Saturdays it ends Thu 12th. One real day of difference per week,
+  // which is the whole point.
+  assert.equal(byId(fiveDay, ten.id).computed_end, "2026-03-13");
+  assert.equal(byId(sixDay, ten.id).computed_end, "2026-03-12");
+});
+
+test("calendar: one holiday pushes the whole chain, not just the task it lands in", () => {
+  const first = task({ planned_start: MONDAY, duration_days: 3 });
+  const second = task({ duration_days: 2 });
+  const link = [dep(first.id, second.id)];
+  const clear = scheduleProject(bundle([first, second], link));
+  const shut = scheduleProject(
+    bundle([first, second], link, {
+      // Wednesday 4 March — inside the first task.
+      calendar: { working_weekdays: [1, 2, 3, 4, 5], holidays: ["2026-03-04"] },
+    })
+  );
+  // Clear: first runs Mon–Wed, successor Thu–Fri, ending Fri 6 March.
+  // Shut: the Wednesday holiday pushes first to Thu, so the successor runs Fri
+  // and then MONDAY — over the weekend, which is where one lost day becomes
+  // three on the calendar. A holiday that only moved the task it fell inside
+  // would leave the dependency overlapping it.
+  assert.equal(byId(clear, second.id).computed_end, "2026-03-06");
+  assert.equal(byId(shut, second.id).computed_end, "2026-03-09");
+});
+
+test("calendar: the completion date moves with the calendar", () => {
+  const only = task({ planned_start: FRIDAY, duration_days: 2 });
+  const fiveDay = scheduleProject(bundle([only]));
+  const sixDay = scheduleProject(
+    bundle([task({ ...only, id: only.id })], [], {
+      calendar: { working_weekdays: [1, 2, 3, 4, 5, 6], holidays: [] },
+    })
+  );
+  // Two days from Friday: Fri + Mon when Saturday is off, Fri + Sat when it is
+  // not. This is the figure the Schedule tab prints as "Completion".
+  assert.equal(fiveDay.completion, NEXT_MONDAY);
+  assert.equal(sixDay.completion, SATURDAY);
+});
+
+// ============================================================
+// describeWeekdays — the label on the panel
+// ============================================================
+
+test("describeWeekdays collapses a run and refuses to collapse a gap", () => {
+  assert.equal(describeWeekdays([1, 2, 3, 4, 5]), "Mon–Fri");
+  assert.equal(describeWeekdays([1, 2, 3, 4, 5, 6]), "Mon–Sat");
+  // The one that matters: three non-consecutive days must NOT read as a range.
+  // "Mon–Fri" for a Mon/Wed/Fri job is a lie that reads perfectly naturally.
+  assert.equal(describeWeekdays([1, 3, 5]), "Mon, Wed, Fri");
+  // Two days are listed rather than ranged — "Mon–Tue" is longer than "Mon, Tue"
+  // and no clearer.
+  assert.equal(describeWeekdays([1, 2]), "Mon, Tue");
+});
+
+test("describeWeekdays says the two extremes plainly", () => {
+  assert.equal(describeWeekdays([1, 2, 3, 4, 5, 6, 7]), "every day");
+  // Refused by the database and by validateWorkCalendar, but the label must not
+  // render an empty string if one ever reaches it.
+  assert.equal(describeWeekdays([]), "no working days");
+});
+
+test("describeWeekdays is order- and duplicate-proof", () => {
+  // The column has no ordering guarantee, so a hand-written SQL update can
+  // leave {5,1,3} in it and the panel still has to read correctly.
+  assert.equal(describeWeekdays([5, 1, 3]), "Mon, Wed, Fri");
+  // A duplicate must not make a gapped set look consecutive, nor the reverse:
+  // {3,1,3} is two days with a gap, however it is written.
+  assert.equal(describeWeekdays([3, 1, 3]), "Mon, Wed");
+  // Three genuinely consecutive days DO range, whatever order they arrive in.
+  assert.equal(describeWeekdays([3, 2, 1, 2]), "Mon–Wed");
+  // Out-of-range numbers are dropped rather than crashing on ISO_WEEKDAYS[i].
+  assert.equal(describeWeekdays([0, 1, 2, 9]), "Mon, Tue");
 });

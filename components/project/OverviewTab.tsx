@@ -1,10 +1,15 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import Link from "next/link";
 import { formatCurrency } from "@/lib/calculations";
+import { apiFetch } from "@/lib/fetcher";
+import { useToast } from "@/components/ui/Toast";
 import { MONEY, BUDGET } from "@/lib/vocabulary";
 import { StatCard } from "@/components/ui/StatCard";
 import { SectionHeader } from "@/components/ui/PageHeader";
-import { Icon } from "@/components/ui/Icon";
+import { Icon, type IconName } from "@/components/ui/Icon";
+import { IconTile } from "@/components/ui/List";
 import { WeeklySpendChart } from "@/components/charts/WeeklySpendChart";
 import { CategoryDonut } from "@/components/charts/CategoryDonut";
 import { combineTotals } from "@/components/purchases/totals";
@@ -22,7 +27,61 @@ import type {
   VariationRollup,
 } from "@/types";
 
+/**
+ * The project's non-money screens, each a route of its own.
+ *
+ * They are routes rather than tabs for the reason stated in ProjectDetail:
+ * five tabs is already one more than the 2026-08-28 collapse settled on, and
+ * none of these is another way of looking at the spend — which is what earns a
+ * tab. But a route still needs a visible door, and until now the only one was
+ * the "⋯" menu.
+ *
+ * `camera` for documents rather than `receipt`: `receipt` means *invoice*
+ * everywhere else in this app (the nav item, the Invoices tab, the AddMenu),
+ * and this screen is mostly site photos.
+ *
+ * The hints are shorter than the ones in the "⋯" sheet were, because these sit
+ * two to a row on a phone rather than full width.
+ */
+const PROJECT_LINKS: {
+  slug: string;
+  label: string;
+  hint: string;
+  icon: IconName;
+  tone: "brand" | "info" | "warn" | "neutral";
+}[] = [
+  {
+    slug: "log",
+    label: "Log & snags",
+    hint: "Calls, visits, and what needs putting right",
+    icon: "list",
+    tone: "brand",
+  },
+  {
+    slug: "documents",
+    label: "Documents & photos",
+    hint: "Planning, certificates, drawings, site photos",
+    icon: "camera",
+    tone: "info",
+  },
+  {
+    slug: "orders",
+    label: "Orders",
+    hint: "What you ordered, and what was billed for it",
+    icon: "truck",
+    tone: "warn",
+  },
+  {
+    slug: "variations",
+    label: "Variations",
+    hint: "What changed, why, and what it cost",
+    icon: "edit",
+    tone: "neutral",
+  },
+];
+
 export default function OverviewTab({
+  projectId,
   summary,
   byWeek,
   byCategory,
@@ -37,7 +96,10 @@ export default function OverviewTab({
   onViewInvoicesForRetention,
   variationRollup = null,
   onViewVariations,
+  onWeekSaved,
 }: {
+  /** For the "More on this project" tiles, which are plain links. */
+  projectId: string;
   summary: ProjectSummary;
   byWeek: WeekTotal[];
   byCategory: CategoryTotal[];
@@ -79,6 +141,13 @@ export default function OverviewTab({
    */
   variationRollup?: VariationRollup | null;
   onViewVariations?: () => void;
+  /**
+   * Called after a week's "% built" has been saved, so the page can refetch.
+   * The figure comes from `project_weeks`, which only the server reads, so
+   * without this the cell would show the new number and every other screen
+   * would keep the old one until a reload.
+   */
+  onWeekSaved?: () => void;
 }) {
   const invoiced = combineTotals(invoiceTotals);
   /**
@@ -107,6 +176,22 @@ export default function OverviewTab({
   // about retention, so it is corrected here rather than in buildSummary —
   // which also serves hand-entered diary rows, where retention does not exist.
   const owed = Math.max(0, summary.remaining_to_pay - retentionHeld);
+
+  /**
+   * Is there a Committed figure at all, and does it cover the whole job?
+   *
+   * `total_quoted` is Σ of the agreed figures, and the agreed figure is NULL on
+   * nearly every row (committedGross in lib/purchases.ts). Zero therefore means
+   * "nobody recorded one", not "it was agreed at nothing", and the cards it
+   * feeds are hidden rather than shown as £0.00 — the same choice the Analysis
+   * tab makes when it renders its Committed column as "—".
+   *
+   * Coverage is the second half of it: a variance only answers "is this job on
+   * quote" when all of the cost has a quote behind it.
+   */
+  const committedKnown = summary.total_quoted > 0.005;
+  const committedPct = Math.round(summary.quoted_coverage * 100);
+  const partlyCommitted = committedKnown && summary.quoted_coverage < 0.995;
 
   return (
     <div className="space-y-6">
@@ -198,12 +283,26 @@ export default function OverviewTab({
               )} approved, agreed ex VAT`}
             />
           ) : null}
-          <StatCard
-            icon="check"
-            label={MONEY.committed.label}
-            value={formatCurrency(summary.total_quoted)}
-            hint={MONEY.committed.hint}
-          />
+          {/* Only when something actually was agreed in advance. This card and
+              the Variance card below used to render unconditionally, and
+              because `quoted_gross` had no write path the figure behind them
+              fell back to the invoice's own total — so Committed equalled Cost
+              to the penny, Variance was structurally £0.00, and its hint read
+              "Within Committed" on every project for ever. A card that cannot
+              be wrong cannot be right either; absent is the honest state, and
+              it is what the Analysis tab has always shown. */}
+          {committedKnown ? (
+            <StatCard
+              icon="check"
+              label={MONEY.committed.label}
+              value={formatCurrency(summary.total_quoted)}
+              hint={
+                partlyCommitted
+                  ? `${MONEY.committed.hint} — ${committedPct}% of cost`
+                  : MONEY.committed.hint
+              }
+            />
+          ) : null}
           <StatCard
             icon="chart"
             label={MONEY.cost.label}
@@ -211,17 +310,23 @@ export default function OverviewTab({
             hint={MONEY.cost.hint}
             tone="brand"
           />
-          <StatCard
-            icon={summary.variance > 0 ? "arrowUp" : "arrowDown"}
-            label="Variance"
-            value={formatCurrency(summary.variance)}
-            tone={summary.variance > 0 ? "bad" : "good"}
-            hint={
-              summary.variance > 0
-                ? `Over ${MONEY.committed.label.toLowerCase()}`
-                : `Within ${MONEY.committed.label.toLowerCase()}`
-            }
-          />
+          {/* Stricter than the card above: a variance is only a budget check
+              when every pound of cost has an agreed figure behind it. At 40%
+              coverage it subtracts two quoted jobs from the cost of five and
+              calls the other three an overrun. */}
+          {committedKnown && !partlyCommitted ? (
+            <StatCard
+              icon={summary.variance > 0 ? "arrowUp" : "arrowDown"}
+              label="Variance"
+              value={formatCurrency(summary.variance)}
+              tone={summary.variance > 0 ? "bad" : "good"}
+              hint={
+                summary.variance > 0
+                  ? `Over ${MONEY.committed.label.toLowerCase()}`
+                  : `Within ${MONEY.committed.label.toLowerCase()}`
+              }
+            />
+          ) : null}
           <StatCard
             icon="wallet"
             label={MONEY.paid.label}
@@ -396,6 +501,46 @@ export default function OverviewTab({
         ) : null}
       </section>
 
+      {/* The four screens that are not about money.
+
+          They were reachable from exactly one place in the whole app — the
+          unlabelled "⋯" in the project header, which also holds Edit, Export
+          and Delete and therefore reads as a settings menu rather than as a
+          list of places. Documents and Orders had ONE inbound link each; there
+          was no way to raise a first snag without finding that menu. Four built
+          modules were effectively invisible.
+
+          So they are named, here, in the body of the tab every project opens
+          on. Deliberately no counts on these tiles: the open-snag count is
+          already a banner above the tab strip and the variation position is
+          already a sentence a few inches above this row, so a badge would
+          repeat them — and a tile with no badge would then read as "none",
+          which for Documents and Orders would be a guess (neither count is
+          loaded on this page). These are doors, not figures. */}
+      <section>
+        <SectionHeader
+          title="More on this project"
+          hint="The record that is not money"
+        />
+        <div className="grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+          {PROJECT_LINKS.map((link) => (
+            <Link
+              key={link.slug}
+              href={`/projects/${projectId}/${link.slug}`}
+              className="card flex flex-col gap-2 transition active:scale-[0.99] hover:border-brand-200 hover:shadow-soft"
+            >
+              <IconTile name={link.icon} tone={link.tone} size="lg" />
+              <span className="text-[0.9375rem] font-bold leading-tight tracking-[-0.01em] text-gray-900">
+                {link.label}
+              </span>
+              <span className="text-xs leading-snug text-gray-500">
+                {link.hint}
+              </span>
+            </Link>
+          ))}
+        </div>
+      </section>
+
       <section>
         <SectionHeader title="Where the money went" />
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -443,6 +588,21 @@ export default function OverviewTab({
                     <WeekSplit label="Materials" value={w.materials} />
                     <WeekSplit label="VAT" value={w.vat} />
                   </dl>
+                  {/* The same editor as the desktop column. This list is the
+                      ONLY week-by-week table on a phone — the desktop table is
+                      `hidden`, so a column added there alone is invisible on
+                      the device most of this gets typed on. */}
+                  <div className="mt-2.5 flex items-center justify-between gap-3">
+                    <span className="text-2xs font-medium uppercase tracking-wider text-gray-500">
+                      % built
+                    </span>
+                    <WeekCompletion
+                      projectId={projectId}
+                      weekNumber={w.week_number}
+                      value={w.completion_pct}
+                      onSaved={onWeekSaved}
+                    />
+                  </div>
                 </li>
               ))}
             </ul>
@@ -457,6 +617,7 @@ export default function OverviewTab({
                     <th className="pb-2.5 text-right">Materials</th>
                     <th className="pb-2.5 text-right">VAT</th>
                     <th className="pb-2.5 text-right">Total</th>
+                    <th className="pb-2.5 text-right">% built</th>
                   </tr>
                 </thead>
                 <tbody className="tnum divide-y divide-gray-200/70">
@@ -477,6 +638,16 @@ export default function OverviewTab({
                       <td className="py-2.5 text-right font-bold text-gray-900">
                         {formatCurrency(w.total)}
                       </td>
+                      <td className="py-2.5 text-right">
+                        <div className="flex justify-end">
+                          <WeekCompletion
+                            projectId={projectId}
+                            weekNumber={w.week_number}
+                            value={w.completion_pct}
+                            onSaved={onWeekSaved}
+                          />
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -486,6 +657,102 @@ export default function OverviewTab({
         )}
       </section>
     </div>
+  );
+}
+
+/**
+ * A week's manual "% built", editable in place.
+ *
+ * `project_weeks.completion_pct` has existed since migration 0001 and
+ * `PATCH /api/projects/[id]/weeks` has been able to write it for just as long,
+ * but nothing on any screen rendered it and nothing called the route, so it sat
+ * at 0 for every week of the job. It is worth having beside the Schedule's own
+ * `pct_complete`: that one is per task, this one is "how much of this week's
+ * work actually got done", which is the judgement you make on site on a Friday.
+ *
+ * Saved on blur or Enter, not on every keystroke — the field is a free-text
+ * number and an intermediate "1" on the way to "100" is not a value to store.
+ * Escape abandons the edit. The number shown is optimistic; `onSaved` asks the
+ * page to refetch so the server's copy wins a moment later.
+ */
+function WeekCompletion({
+  projectId,
+  weekNumber,
+  value,
+  onSaved,
+}: {
+  projectId: string;
+  weekNumber: number;
+  value: number;
+  onSaved?: () => void;
+}) {
+  const toast = useToast();
+  const [draft, setDraft] = useState(() => String(Math.round(value)));
+  const [saving, setSaving] = useState(false);
+
+  // The prop is the truth once a refetch lands. Without this the cell would
+  // keep whatever was last typed even after the server rejected or changed it.
+  useEffect(() => {
+    setDraft(String(Math.round(value)));
+  }, [value]);
+
+  async function commit() {
+    const next = Number(draft);
+    if (draft.trim() === "" || !Number.isFinite(next)) {
+      setDraft(String(Math.round(value)));
+      return;
+    }
+    const pct = Math.round(next);
+    if (pct < 0 || pct > 100) {
+      toast("% built must be 0–100", "error");
+      setDraft(String(Math.round(value)));
+      return;
+    }
+    if (pct === Math.round(value)) {
+      setDraft(String(pct));
+      return;
+    }
+    setSaving(true);
+    try {
+      await apiFetch(`/api/projects/${projectId}/weeks`, {
+        method: "PATCH",
+        body: JSON.stringify({ week_number: weekNumber, completion_pct: pct }),
+      });
+      setDraft(String(pct));
+      onSaved?.();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Could not save % built", "error");
+      setDraft(String(Math.round(value)));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <label className="sr-only" htmlFor={`week-pct-${weekNumber}`}>
+        Week {weekNumber} per cent built
+      </label>
+      <input
+        id={`week-pct-${weekNumber}`}
+        className="input tnum h-9 min-h-0 w-16 px-2 py-0 text-right"
+        inputMode="numeric"
+        disabled={saving}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            e.currentTarget.blur();
+          } else if (e.key === "Escape") {
+            setDraft(String(Math.round(value)));
+            e.currentTarget.blur();
+          }
+        }}
+      />
+      <span className="text-[0.8125rem] font-medium text-gray-500">%</span>
+    </span>
   );
 }
 

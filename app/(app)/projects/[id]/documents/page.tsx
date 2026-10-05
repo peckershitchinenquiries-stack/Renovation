@@ -15,10 +15,15 @@ export const dynamic = "force-dynamic";
  */
 export default async function DocumentsPage({
   params,
+  searchParams,
 }: {
   params: { id: string };
+  searchParams: { add?: string };
 }) {
   const bundle = await getDocumentBundle(params.id);
+  // `?add=1` opens the upload sheet on arrival, for the project header's
+  // "+ Add → Photo or document". See DocumentsScreen's `autoAdd`.
+  const autoAdd = searchParams?.add === "1";
 
   // Null from a project that does not exist is a 404; null because migration
   // 0021 has not been run is not — that is a message, not a missing page.
@@ -28,5 +33,11 @@ export default async function DocumentsPage({
     return <DocumentsScreen bundle={null} project={project} />;
   }
 
-  return <DocumentsScreen bundle={bundle} project={bundle.project} />;
+  return (
+    <DocumentsScreen
+      bundle={bundle}
+      project={bundle.project}
+      autoAdd={autoAdd}
+    />
+  );
 }

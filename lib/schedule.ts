@@ -96,6 +96,47 @@ export function fromDayNumber(day: number): string {
   return new Date(day * MS_PER_DAY).toISOString().slice(0, 10);
 }
 
+/**
+ * The seven weekdays in ISO order, 1 = Monday … 7 = Sunday.
+ *
+ * Monday-first because that is how a working week is read here, and because the
+ * numbering has to match `projects.working_weekdays`, Postgres `isodow` and
+ * `isoWeekday()` below. One list, so a label can never drift from the number it
+ * names — getting Saturday and Sunday the wrong way round would move every bar
+ * on the chart by two days and look entirely deliberate.
+ */
+export const ISO_WEEKDAYS = [
+  { iso: 1, short: "Mon", long: "Monday" },
+  { iso: 2, short: "Tue", long: "Tuesday" },
+  { iso: 3, short: "Wed", long: "Wednesday" },
+  { iso: 4, short: "Thu", long: "Thursday" },
+  { iso: 5, short: "Fri", long: "Friday" },
+  { iso: 6, short: "Sat", long: "Saturday" },
+  { iso: 7, short: "Sun", long: "Sunday" },
+] as const;
+
+/**
+ * A working week in words: "Mon–Fri", "Mon–Sat", "every day", "Mon, Wed, Fri".
+ *
+ * Collapsed to a range **only when the days really are consecutive**. A job
+ * working Monday, Wednesday and Friday described as "Mon–Fri" is a plain lie,
+ * and it is the kind that survives for months because it reads so naturally —
+ * which is the whole hazard this module's tests exist for. Lives here rather
+ * than in the panel that renders it so it is covered by lib/schedule.test.mts.
+ */
+export function describeWeekdays(days: number[]): string {
+  const list = [...new Set(days.map(Number))]
+    .filter((d) => Number.isInteger(d) && d >= 1 && d <= 7)
+    .sort((a, b) => a - b);
+  if (list.length === 0) return "no working days";
+  if (list.length === 7) return "every day";
+  const short = (iso: number) => ISO_WEEKDAYS[iso - 1].short;
+  const consecutive = list.every((d, i) => i === 0 || d === list[i - 1] + 1);
+  if (consecutive && list.length > 2)
+    return `${short(list[0])}–${short(list[list.length - 1])}`;
+  return list.map(short).join(", ");
+}
+
 /** 1 = Monday … 7 = Sunday, matching the database's `working_weekdays`. */
 export function isoWeekday(iso: string): number {
   const jsDay = new Date(`${iso}T00:00:00Z`).getUTCDay(); // 0 = Sunday

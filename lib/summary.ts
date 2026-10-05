@@ -1,5 +1,28 @@
-// Aggregation helpers — derive dashboard/trades/materials/prices summaries
-// from expense entries.
+// Aggregation helpers — the Overview tab's figures, derived from expense entries.
+//
+// ---------------------------------------------------------------------------
+// What is NOT in here any more, and must not come back
+// ---------------------------------------------------------------------------
+// This file used to carry a second set of builders — `buildTrades`,
+// `buildMaterials`, `buildMaterialLedger`, `buildPriceHistory`,
+// `buildPriceAlerts` — for the Trades, Materials and Price Tracker screens. They
+// were written when every cost was a hand-typed row and they still assumed it:
+// they needed `category === "Materials"` to be set, and a per-row `unit_cost` to
+// exist. Neither is true of money that arrives as an invoice, where the
+// quantity and the unit price live on the document's LINES.
+//
+// Those screens moved to lib/invoiceViews.ts, which reads purchase lines. The
+// old builders stayed behind feeding the Excel and PDF exports and five
+// unreachable GET endpoints, so the export disagreed with the app it was
+// exported from — a near-empty Materials sheet, a Prices sheet containing one
+// row reading "—", and trade totals that did not reconcile with the Analysis
+// tab. All of that was deleted on 2026-10-01; the exports now call the same
+// builders the screens call. See about.md §6.10 and the header of lib/export.ts.
+//
+// So: anything grouped by trade, supplier, item or unit price belongs in
+// lib/invoiceViews.ts. What is left here is the Overview's own arithmetic —
+// the money cards, the weekly chart and the Labour/Materials donut — which is
+// over whole cost rows and has no line-level question to answer.
 
 import type {
   ExpenseEntryComputed,
@@ -7,13 +30,7 @@ import type {
   ProjectSummary,
   WeekTotal,
   CategoryTotal,
-  TradeSummary,
-  MaterialSummary,
-  MaterialLedgerRow,
   ProjectWeek,
-  PriceHistoryItem,
-  PricePurchase,
-  PriceDirection,
 } from "@/types";
 
 const ACTIVE = (e: ExpenseEntryComputed) => e.status !== "Cancelled";
@@ -31,6 +48,17 @@ export function buildSummary(
   // difference carries sub-penny float noise. Round it, and normalise -0 to 0
   // so an exact match never renders as "-£0.00".
   const variance = Math.round((forecast_total - total_quoted) * 100) / 100 || 0;
+  // How much of the cost is backed by an agreed figure. `variance` compares
+  // the WHOLE cost against only the rows that carry a quote, so on a project
+  // where one job in five was quoted it reports an overrun that is really just
+  // the other four jobs existing. The cards use this to decide whether the
+  // comparison is worth showing at all — see types/ProjectSummary and
+  // committedGross() in lib/purchases.ts for why so many rows have no quote.
+  const quoted_cost = active.reduce(
+    (s, e) => (Number(e.quoted_amount) > 0 ? s + e.total_incl_vat : s),
+    0
+  );
+  const quoted_coverage = forecast_total > 0 ? quoted_cost / forecast_total : 0;
   const contingency_amount = Math.max(variance, 0);
   const weeks = new Set(active.map((e) => e.week_number));
   return {
@@ -38,6 +66,7 @@ export function buildSummary(
     total_quoted,
     forecast_total,
     variance,
+    quoted_coverage,
     contingency_amount,
     forecast_plus_contingency: forecast_total + contingency_amount,
     paid_to_date,
@@ -102,169 +131,7 @@ export function buildByCategory(entries: ExpenseEntryComputed[]): CategoryTotal[
   ];
 }
 
-export function buildTrades(entries: ExpenseEntryComputed[]): TradeSummary[] {
-  const map = new Map<
-    string,
-    { quoted: number; actual: number; paid: number }
-  >();
-  for (const e of entries) {
-    if (e.status === "Cancelled") continue;
-    const trade = e.trade || "Unassigned";
-    const row = map.get(trade) ?? { quoted: 0, actual: 0, paid: 0 };
-    row.quoted += Number(e.quoted_amount);
-    row.actual += e.total_incl_vat;
-    row.paid += Number(e.paid_amount);
-    map.set(trade, row);
-  }
-  return [...map.entries()]
-    .map(([trade, { quoted, actual, paid }]) => {
-      const remaining = actual - paid;
-      let status: TradeSummary["status"] = "Pending";
-      if (paid > 0 && remaining <= 0.001) status = "Paid";
-      else if (paid > 0) status = "Partial";
-      return { trade, quoted, actual, paid, remaining, status };
-    })
-    .sort((a, b) => b.actual - a.actual);
-}
-
-export function buildMaterials(entries: ExpenseEntryComputed[]): MaterialSummary[] {
-  const map = new Map<string, MaterialSummary>();
-  for (const e of entries) {
-    if (e.category !== "Materials" || e.status === "Cancelled") continue;
-    const supplier = e.supplier || "Unknown supplier";
-    const row =
-      map.get(supplier) ??
-      {
-        supplier,
-        cost: 0,
-        paid: 0,
-        remaining: 0,
-        vat: 0,
-        total: 0,
-        payment_methods: [] as string[],
-        entries: 0,
-      };
-    row.cost += e.total_incl_vat;
-    row.paid += Number(e.paid_amount);
-    row.remaining = row.cost - row.paid;
-    row.vat += e.vat_amount;
-    row.total += e.total_incl_vat;
-    row.entries += 1;
-    if (e.payment_method && !row.payment_methods.includes(e.payment_method)) {
-      row.payment_methods.push(e.payment_method);
-    }
-    map.set(supplier, row);
-  }
-  return [...map.values()].sort((a, b) => b.total - a.total);
-}
-
-// Flat per-purchase materials ledger (the "Materials & Suppliers" view).
-// Every expense entry with category = Materials shows up here automatically,
-// so adding a material in the Expenses form also updates this tab.
-export function buildMaterialLedger(
-  entries: ExpenseEntryComputed[]
-): MaterialLedgerRow[] {
-  return entries
-    .filter((e) => e.category === "Materials" && e.status !== "Cancelled")
-    .map((e) => ({
-      id: e.id,
-      week_number: e.week_number,
-      item: e.description,
-      supplier: e.supplier || "—",
-      unit_cost: Number(e.unit_cost),
-      qty: Number(e.qty),
-      total: e.total_incl_vat,
-      paid: Number(e.paid_amount),
-      remaining: e.remaining,
-      paid_date: e.paid_date,
-      payment_method: e.payment_method,
-      notes: e.notes,
-    }))
-    .sort(
-      (a, b) =>
-        a.week_number - b.week_number ||
-        (a.paid_date || "").localeCompare(b.paid_date || "")
-    );
-}
-
 // Normalise a description into a price-tracking key.
 export function priceKey(description: string): string {
   return description.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-const purchaseDate = (e: ExpenseEntryComputed) => e.paid_date || e.created_at;
-
-// Group material purchases by item and compute unit-price change over time.
-export function buildPriceHistory(
-  entries: ExpenseEntryComputed[]
-): PriceHistoryItem[] {
-  const groups = new Map<string, ExpenseEntryComputed[]>();
-  for (const e of entries) {
-    if (e.status === "Cancelled") continue;
-    if (e.category !== "Materials") continue;
-    if (Number(e.unit_cost) <= 0) continue;
-    const key = priceKey(e.description);
-    if (!key) continue;
-    const arr = groups.get(key) ?? [];
-    arr.push(e);
-    groups.set(key, arr);
-  }
-
-  const items: PriceHistoryItem[] = [];
-  for (const list of groups.values()) {
-    const sorted = list
-      .slice()
-      .sort(
-        (a, b) =>
-          new Date(purchaseDate(a)).getTime() -
-          new Date(purchaseDate(b)).getTime()
-      );
-
-    const purchases: PricePurchase[] = sorted.map((e, i) => {
-      const unit_cost = Number(e.unit_cost);
-      const prev = i > 0 ? Number(sorted[i - 1].unit_cost) : 0;
-      let delta_pct = 0;
-      let direction: PriceDirection = "first";
-      if (i > 0 && prev > 0) {
-        delta_pct = ((unit_cost - prev) / prev) * 100;
-        direction =
-          Math.abs(delta_pct) < 0.001 ? "same" : delta_pct > 0 ? "up" : "down";
-      }
-      return {
-        date: e.paid_date,
-        supplier: e.supplier,
-        unit_cost,
-        qty: Number(e.qty),
-        total: e.total_incl_vat,
-        delta_pct,
-        direction,
-      };
-    });
-
-    const last = purchases[purchases.length - 1];
-    items.push({
-      item: sorted[sorted.length - 1].description.trim(),
-      purchase_count: purchases.length,
-      first_price: purchases[0].unit_cost,
-      latest_price: last.unit_cost,
-      latest_delta_pct: last.delta_pct,
-      trend: last.direction,
-      purchases,
-    });
-  }
-
-  // Items with the biggest recent increase first.
-  return items.sort((a, b) => b.latest_delta_pct - a.latest_delta_pct);
-}
-
-// Materials whose most recent purchase cost more per unit than the time before.
-// Feeds the "paid more than last time" alert on the Overview tab, so a price
-// rise surfaces without having to open the Price Tracker.
-export function buildPriceAlerts(
-  items: PriceHistoryItem[],
-  minPct = 0.001
-): PriceHistoryItem[] {
-  return items.filter(
-    (i) => i.trend === "up" && i.latest_delta_pct >= minPct
-  );
 }
